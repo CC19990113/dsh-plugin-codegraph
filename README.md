@@ -1,5 +1,7 @@
 # dsh-plugin-codegraph
 
+English | [中文](README.zh.md)
+
 Structural code intelligence for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
 
 Gives the agent two tools — `codegraph` and `codegraph_index` — so it can ask **where is this declared**, **who calls it**, **what breaks if I change it**, and **how does one symbol reach another**, answered from a pre-built index instead of from text search.
