@@ -55,6 +55,7 @@ describe('codegraph-tree-sitter plugin', () => {
       filesIndexed: 2,
       filesSkipped: 0,
       unresolvedCount: 0,
+      unresolvedLikelyInternalCount: 0,
       languages: [{ language: 'typescript', fileCount: 2 }],
     })
     expect(report.nodeCount).toBeGreaterThan(0)
@@ -67,6 +68,18 @@ describe('codegraph-tree-sitter plugin', () => {
     expect(status).toMatchObject({ fileCount: 2, formatVersion: 4 })
     const search = await ctx.codegraph.query({ operation: 'search', projectRoot: root, query: 'a', limit: 10 })
     expect(search.nodes.some(node => node.name === 'a')).toBe(true)
+  })
+
+  it('separates likely-external noise from genuine gaps in the unresolved count', async () => {
+    const root = await writeProject({
+      'a.ts': "import { expect } from 'vitest'\nexport function a() {\n  expect(1).toBe(1)\n  return nowhere()\n}\n",
+    })
+    const ctx = await seam()
+    const report = await ctx.codegraph.index(root)
+    // `expect` (imported, unresolved) and `toBe` (member call) are noise; `nowhere` is the one call
+    // shaped like a genuine workspace-internal gap.
+    expect(report.unresolvedCount).toBe(3)
+    expect(report.unresolvedLikelyInternalCount).toBe(1)
   })
 
   it('exposes the on-disk path this package writes, matching the store\'s own constant', async () => {

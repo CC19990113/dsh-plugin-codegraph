@@ -421,8 +421,21 @@ export interface CodegraphIndexReport {
   readonly nodeCount: number
   /** Relationship edges written. */
   readonly edgeCount: number
-  /** Call sites whose callee could not be resolved to exactly one declaration. */
+  /**
+   * Call sites whose callee could not be resolved to exactly one declaration. This total is dominated,
+   * in a typical workspace, by calls that were never real candidates for a workspace edge — a member
+   * access with no type information behind its receiver, or a name the calling file imports from
+   * somewhere this run's resolution could not follow — alongside genuine gaps. See
+   * {@link unresolvedLikelyInternalCount} for the subset worth treating as a gap in the graph.
+   */
   readonly unresolvedCount: number
+  /**
+   * Of {@link unresolvedCount}, the calls that were structurally plausible workspace-internal
+   * candidates: a bare, undeclared name, not a member access or an already-imported one. This is the
+   * number worth judging index completeness by; {@link unresolvedCount} alone is dominated by noise a
+   * type-free resolver was never going to settle.
+   */
+  readonly unresolvedLikelyInternalCount: number
   /** Node counts per language, most files first. */
   readonly languages: readonly { readonly language: string; readonly fileCount: number }[]
 }

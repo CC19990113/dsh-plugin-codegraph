@@ -223,6 +223,7 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
       symbol_count: { type: 'integer', required: true },
       edge_count: { type: 'integer', required: true },
       unresolved_count: { type: 'integer', required: true },
+      unresolved_likely_internal_count: { type: 'integer', required: true },
       languages: { type: 'array', required: true, items: LANGUAGE_COUNT },
     }),
   ],

@@ -66,7 +66,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves an import specifier that already names the exact indexed path, with no suffix needed', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'bar', specifier: './b.ts' },
       ]),
       file('b.ts', [def({ key: '1:0', name: 'bar' })]),
@@ -77,7 +77,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves rule 1: a call whose import resolves to a workspace file matches that file\'s declaration', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'bar', specifier: './b' },
       ]),
       file('b.ts', [def({ key: '1:0', name: 'bar' })]),
@@ -89,7 +89,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves a default import to the target file\'s sole exported declaration', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'Def', line: 1, column: 0 }], [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'Def', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'Def', importedName: 'default', specifier: './b' },
       ]),
       file('b.ts', [def({ key: '1:0', name: 'baz' })]),
@@ -100,7 +100,7 @@ describe('resolveWorkspace', () => {
 
   it('falls through to rule 2 when the imported name does not match any declaration in the target file', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'notThere', specifier: './b' },
       ]),
       file('b.ts', [def({ key: '1:0', name: 'somethingElse' })]),
@@ -112,7 +112,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves rule 2: a call with no matching import but exactly one workspace-wide declaration', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'unique', line: 1, column: 0 }]),
+      file('a.ts', [], [{ callerKey: null, calleeName: 'unique', line: 1, column: 0, isMemberCall: false }]),
       file('b.ts', [def({ key: '1:0', name: 'unique' })]),
     ]
     const graph = resolveWorkspace(files, NOW)
@@ -121,19 +121,43 @@ describe('resolveWorkspace', () => {
 
   it('rule 3: a same-named twin in another module leaves the call unresolved with no calls edge', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'ambiguous', line: 3, column: 1 }]),
+      file('a.ts', [], [{ callerKey: null, calleeName: 'ambiguous', line: 3, column: 1, isMemberCall: false }]),
       file('b.ts', [def({ key: '1:0', name: 'ambiguous' })]),
       file('c.ts', [def({ key: '1:0', name: 'ambiguous' })]),
     ]
     const graph = resolveWorkspace(files, NOW)
     expect(graph.edges.filter(edge => edge.kind === 'calls')).toEqual([])
-    expect(graph.unresolved).toEqual([{ source: 'file:a.ts', filePath: 'a.ts', calleeName: 'ambiguous', line: 3, col: 1 }])
+    expect(graph.unresolved).toEqual([
+      { source: 'file:a.ts', filePath: 'a.ts', calleeName: 'ambiguous', line: 3, col: 1, likelyExternal: false },
+    ])
   })
 
-  it('rule 3: a call to a name that matches nothing is unresolved', () => {
-    const files = [file('a.ts', [], [{ callerKey: null, calleeName: 'nowhere', line: 1, column: 0 }])]
+  it('rule 3: a call to a name that matches nothing is unresolved and not flagged as likely external', () => {
+    const files = [file('a.ts', [], [{ callerKey: null, calleeName: 'nowhere', line: 1, column: 0, isMemberCall: false }])]
     const graph = resolveWorkspace(files, NOW)
-    expect(graph.unresolved).toHaveLength(1)
+    expect(graph.unresolved).toEqual([
+      { source: 'file:a.ts', filePath: 'a.ts', calleeName: 'nowhere', line: 1, col: 0, likelyExternal: false },
+    ])
+  })
+
+  it('flags an unresolved member call as likely external: no type information backs its receiver', () => {
+    const files = [file('a.ts', [], [{ callerKey: null, calleeName: 'parse', line: 1, column: 0, isMemberCall: true }])]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.unresolved).toEqual([
+      { source: 'file:a.ts', filePath: 'a.ts', calleeName: 'parse', line: 1, col: 0, likelyExternal: true },
+    ])
+  })
+
+  it('flags an unresolved bare call as likely external when the file itself imports that name', () => {
+    const files = [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'expect', line: 1, column: 0, isMemberCall: false }], [
+        { localName: 'expect', importedName: 'expect', specifier: 'vitest' },
+      ]),
+    ]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.unresolved).toEqual([
+      { source: 'file:a.ts', filePath: 'a.ts', calleeName: 'expect', line: 1, col: 0, likelyExternal: true },
+    ])
   })
 
   it('writes an imports edge between files whose relative specifier resolves', () => {
@@ -147,7 +171,7 @@ describe('resolveWorkspace', () => {
 
   it('writes an imports edge for a resolved namespace import, without binding it to a specific symbol', () => {
     const files = [
-      file('a.ts', [], [{ callerKey: null, calleeName: 'ns', line: 1, column: 0 }], [
+      file('a.ts', [], [{ callerKey: null, calleeName: 'ns', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'ns', importedName: '*', specifier: './b' },
       ]),
       file('b.ts', [def({ key: '1:0', name: 'bar' })]),
@@ -167,7 +191,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves a Python relative import (one leading dot: same package)', () => {
     const files = [
-      { ...file('a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      { ...file('a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'bar', specifier: '.bar' },
       ]), language: 'python' },
       { ...file('bar.py', [def({ key: '1:0', name: 'bar' })]), language: 'python' },
@@ -178,7 +202,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves a Python relative import climbing one parent level (two leading dots)', () => {
     const files = [
-      { ...file('pkg/sub/a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      { ...file('pkg/sub/a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'bar', specifier: '..bar' },
       ]), language: 'python' },
       { ...file('pkg/bar.py', [def({ key: '1:0', name: 'bar' })]), language: 'python' },
@@ -197,7 +221,7 @@ describe('resolveWorkspace', () => {
 
   it('does not resolve a Python absolute (non-relative) import as a relative specifier', () => {
     const files = [
-      { ...file('a.py', [], [{ callerKey: null, calleeName: 'path', line: 1, column: 0 }], [
+      { ...file('a.py', [], [{ callerKey: null, calleeName: 'path', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'path', importedName: 'path', specifier: 'os' },
       ]), language: 'python' },
       { ...file('os.py', [def({ key: '1:0', name: 'path' })]), language: 'python' },
@@ -211,7 +235,7 @@ describe('resolveWorkspace', () => {
 
   it('resolves a Python relative import with nothing after the dots (climbing with no module name)', () => {
     const files = [
-      { ...file('pkg/sub/a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0 }], [
+      { ...file('pkg/sub/a.py', [], [{ callerKey: null, calleeName: 'bar', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'bar', importedName: 'bar', specifier: '..' },
       ]), language: 'python' },
       { ...file('pkg/bar.py', [def({ key: '1:0', name: 'bar' })]), language: 'python' },
@@ -222,7 +246,7 @@ describe('resolveWorkspace', () => {
 
   it('never resolves a Go package import to a specific declaration (importedName "*")', () => {
     const files = [
-      { ...file('a.go', [], [{ callerKey: null, calleeName: 'Helper', line: 1, column: 0 }], [
+      { ...file('a.go', [], [{ callerKey: null, calleeName: 'Helper', line: 1, column: 0, isMemberCall: false }], [
         { localName: 'pkg', importedName: '*', specifier: './pkg' },
       ]), language: 'go' },
       { ...file('pkg/util.go', [def({ key: '1:0', name: 'Helper' })]), language: 'go' },
@@ -235,7 +259,7 @@ describe('resolveWorkspace', () => {
 
   it('attributes a nested call to its enclosing definition, not the file', () => {
     const files = [
-      file('a.ts', [def({ key: '1:0', name: 'outer' })], [{ callerKey: '1:0', calleeName: 'unique', line: 2, column: 2 }]),
+      file('a.ts', [def({ key: '1:0', name: 'outer' })], [{ callerKey: '1:0', calleeName: 'unique', line: 2, column: 2, isMemberCall: false }]),
       file('b.ts', [def({ key: '1:0', name: 'unique' })]),
     ]
     const graph = resolveWorkspace(files, NOW)

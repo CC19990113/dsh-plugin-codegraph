@@ -146,6 +146,7 @@ function stubIndexer(id: string, roots: readonly string[]): CodegraphIndexer {
       nodeCount: 1,
       edgeCount: 0,
       unresolvedCount: 0,
+      unresolvedLikelyInternalCount: 0,
       languages: [],
     } satisfies CodegraphIndexReport),
   }
@@ -170,6 +171,7 @@ describe('codegraph indexer registry', () => {
       nodeCount: 0,
       edgeCount: 0,
       unresolvedCount: 0,
+      unresolvedLikelyInternalCount: 0,
       languages: [],
     } satisfies CodegraphIndexReport))
     ctx.codegraph.registerIndexer({ id: CodegraphIndexerId('spy'), canIndex, index })

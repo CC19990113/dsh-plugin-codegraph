@@ -172,6 +172,7 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
     nodeCount: graph.nodes.length,
     edgeCount: graph.edges.length,
     unresolvedCount: graph.unresolved.length,
+    unresolvedLikelyInternalCount: graph.unresolved.filter(ref => !ref.likelyExternal).length,
     languages,
   }
 }

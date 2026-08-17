@@ -8,6 +8,12 @@
  * `calls` edge is written. An ambiguous edge is worse than a missing one: the model acts on `callers`
  * output, so a confidently wrong caller sends it to edit the wrong file, while a missing caller merely
  * sends it back to text search.
+ *
+ * Rule 3's `unresolved` entries are not one uniform signal. Each carries {@link UnresolvedRef.likelyExternal},
+ * which is true for a member call (no type information behind its receiver) or a name the file itself
+ * imports (a known external origin the specifier just didn't resolve) — both real code that was never a
+ * candidate for a workspace edge, as against a bare, undeclared name, which is the actual gap this
+ * resolver's conservative rule leaves behind.
  * @module dsh-plugin-codegraph-tree-sitter/resolve
  */
 
@@ -63,6 +69,15 @@ export interface UnresolvedRef {
   readonly calleeName: string
   readonly line: number
   readonly col: number
+  /**
+   * Whether this site's own shape makes a workspace declaration structurally unlikely, rather than
+   * merely unresolved: a member access (`x.map()`, `expect(v).toBe()`) has no type information behind
+   * its receiver, and a bare name the file itself imports (`import { expect } from 'vitest'`) already
+   * has a known, non-workspace origin even though the specifier never resolved to an indexed file.
+   * Neither is a gap in the graph — both are real code that was never a candidate for a workspace edge
+   * — so a caller sizing "how much did resolution miss" should discount them.
+   */
+  readonly likelyExternal: boolean
 }
 
 /** The resolved workspace graph. */
@@ -259,11 +274,13 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
     }
 
     const keyToId = mustGet(defIdByKey, file.path)
+    const importedLocalNames = new Set(file.extraction.imports.map(binding => binding.localName))
     for (const call of file.extraction.calls) {
       const callerId = call.callerKey === null ? mustGet(fileNodeId, file.path) : mustGet(keyToId, call.callerKey)
       const resolved = resolveCall(call.calleeName, bindings, nodesByFile, nameIndex)
       if (resolved === undefined) {
-        unresolved.push({ source: callerId, filePath: file.path, calleeName: call.calleeName, line: call.line, col: call.column })
+        const likelyExternal = call.isMemberCall || importedLocalNames.has(call.calleeName)
+        unresolved.push({ source: callerId, filePath: file.path, calleeName: call.calleeName, line: call.line, col: call.column, likelyExternal })
         continue
       }
       edges.push({ source: callerId, target: resolved, kind: 'calls', line: call.line, col: call.column, provenance: 'tree-sitter' })

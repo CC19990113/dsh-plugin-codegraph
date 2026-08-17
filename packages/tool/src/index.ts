@@ -261,6 +261,7 @@ async function runIndex(
     symbol_count: report.nodeCount,
     edge_count: report.edgeCount,
     unresolved_count: report.unresolvedCount,
+    unresolved_likely_internal_count: report.unresolvedLikelyInternalCount,
     languages: report.languages.map(entry => ({ language: entry.language, file_count: entry.fileCount })),
   }
 }

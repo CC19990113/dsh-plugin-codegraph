@@ -164,10 +164,13 @@ export function renderCodegraph(value: CodegraphToolValue): string {
     }
     case 'index': {
       const languages = value.languages.map(entry => `${entry.language} ${entry.file_count}`).join(', ')
+      const unresolved = value.unresolved_count === 0
+        ? 'Every call site resolved.'
+        : `${value.unresolved_likely_internal_count} of ${value.unresolved_count} unresolved call sites look like genuine gaps; the rest are member calls or already-imported names, never workspace-edge candidates.`
       return [
         `Indexed ${value.project_path}:`,
         `${value.files_indexed} files indexed, ${value.files_skipped} skipped.`,
-        `${value.symbol_count} symbols, ${value.edge_count} relationships, ${value.unresolved_count} unresolved call sites.`,
+        `${value.symbol_count} symbols, ${value.edge_count} relationships. ${unresolved}`,
         `Languages: ${languages || 'none'}.`,
       ].join('\n')
     }

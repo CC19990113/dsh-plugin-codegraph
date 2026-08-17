@@ -38,6 +38,13 @@ export interface RawCall {
   readonly calleeName: string
   readonly line: number
   readonly column: number
+  /**
+   * Whether the callee expression is a member access (`obj.parse()`) rather than a bare identifier
+   * (`parse()`). With no type information, a member call's receiver could be anything, so a name
+   * match against it is far less trustworthy than a bare identifier's — `resolve.ts` uses this to
+   * separate that noise from a genuine gap in the graph when a call goes unresolved.
+   */
+  readonly isMemberCall: boolean
 }
 
 /** One import binding this file introduces. */
@@ -283,6 +290,10 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           calleeName: name,
           line: node.startPosition.row + 1,
           column: node.startPosition.column,
+          // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
+          // system's view of the field lookup above, not a real possibility here.
+          /* v8 ignore next */
+          isMemberCall: callee?.type !== 'identifier',
         })
       }
     }

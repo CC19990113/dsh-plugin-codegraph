@@ -66,7 +66,7 @@ The **store is format-bound, not language-bound**: a graph built by the `codegra
 
 Every call site resolves in a fixed order: an import that lands on an indexed file wins; otherwise a unique workspace-wide name wins; otherwise **no edge is emitted** and the site is recorded as unresolved.
 
-That last rule is deliberate. The model acts on `callers` output, so a confidently wrong caller sends it to edit the wrong file, while a missing caller merely sends it back to text search. The index report's `unresolved_count` makes the size of that gap visible instead of hiding it.
+That last rule is deliberate. The model acts on `callers` output, so a confidently wrong caller sends it to edit the wrong file, while a missing caller merely sends it back to text search. The index report's `unresolved_count` is not, by itself, that gap's size — a type-free resolver was never going to settle a member call (`x.map()`) or a name already imported from elsewhere, and those dominate the total in a typical workspace. `unresolved_likely_internal_count` is the subset worth judging completeness by: bare, undeclared names that were structurally plausible workspace calls.
 
 ## Install
 
@@ -121,7 +121,7 @@ The split is not ceremony. The seam carries no source text and performs no files
 
 - **Freshness is now visible, though still not automatic.** The index does not watch for changes by itself, but `status` reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly. A caller can tell a trustworthy index from a drifted one instead of assuming the best; refresh with `codegraph_index`.
 - **Exclusion unions the built-in default directories with the project's own `.gitignore`.** Build output that lands outside `node_modules`/`dist`/`build`/`coverage` (a `lib` a TypeScript project compiles to, say) is almost always gitignored too, and indexing it alongside its own source would hand call resolution two same-named declarations of one symbol to pick between arbitrarily. Only a practical subset of gitignore syntax is understood — no `**`, character classes, or per-directory `.gitignore` files. Turn it off with `respectGitignore: false`.
-- **The unresolved tail can be large** in a codebase leaning on re-exports or dynamic dispatch. `unresolved_count` measures it.
+- **The unresolved tail can be large**, and most of it is not a gap. `unresolved_count` includes every member call and already-imported name a type-free resolver could never have settled; `unresolved_likely_internal_count` is the narrower number that reflects re-exports and dynamic dispatch the graph actually missed.
 - **`context` ranks by identifier-term overlap**, so a task phrased without naming any symbol ranks poorly. There is no semantic matching.
 - `dsh` itself is in developer preview and iterating fast; expect compatibility-breaking changes.
 
