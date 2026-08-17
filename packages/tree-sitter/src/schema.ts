@@ -4,13 +4,17 @@
  * package writes — and insert one indexing run's resolved graph.
  *
  * Writing replaces whatever was at the path: an indexing run is a full rebuild, not an incremental
- * update, so the previous file is removed before a fresh one is created.
+ * update. The new graph is built on a same-directory temporary file and `rename`d into place, so a
+ * reader opening `databasePath` at any point either sees the complete previous graph or the complete
+ * new one — never a window where the file exists with a fresh, empty schema and no rows yet, which a
+ * naive "delete then recreate" leaves open between `CREATE TABLE` and the first `COMMIT`.
  * @module dsh-plugin-codegraph-tree-sitter/schema
  */
 
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { randomUUID } from 'node:crypto'
 import type { ExtractedFile, GraphEdge, GraphNode, UnresolvedRef } from './resolve.ts'
 
 /** The schema version this package writes, matching the format `dsh-codegraph-sqlite` reads. */
@@ -55,66 +59,92 @@ export interface WriteInput {
   readonly indexedAt: number
 }
 
+/** Remove a database file and its WAL/SHM sidecars, tolerating any of the three being absent. */
+async function removeGraphFiles(path: string): Promise<void> {
+  await rm(path, { force: true })
+  await rm(`${path}-wal`, { force: true })
+  await rm(`${path}-shm`, { force: true })
+}
+
 /**
  * Replace the graph at `databasePath` with one indexing run's output.
+ *
+ * The full build happens on a temporary file beside `databasePath`; only a successful build is
+ * `rename`d over the real path, atomically on the same filesystem. A reader with a connection already
+ * open on the old file keeps reading it (POSIX unlink semantics) until it reopens — that half of
+ * freshness is the sqlite store's responsibility, not this writer's.
  * @param databasePath - absolute path of the `.codegraph/codegraph.db` file to (re)create.
  * @param input - the run's resolved graph and per-file metadata.
  */
 export async function writeGraph(databasePath: string, input: WriteInput): Promise<void> {
   await mkdir(dirname(databasePath), { recursive: true })
-  await rm(databasePath, { force: true })
+  const tempPath = `${databasePath}.tmp-${process.pid}-${randomUUID()}`
+  // Defensive: a previous run that crashed mid-write may have left this exact temp name behind.
+  await removeGraphFiles(tempPath)
+
+  try {
+    const db = new DatabaseSync(tempPath)
+    try {
+      db.exec('BEGIN')
+      db.exec(SCHEMA)
+      db.prepare('INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)')
+        .run(SCHEMA_VERSION, input.indexedAt, 'dsh-codegraph-tree-sitter')
+
+      const insertNode = db.prepare(`INSERT INTO nodes
+        (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column,
+         end_column, is_exported, is_async, is_static, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      for (const node of input.nodes) {
+        insertNode.run(
+          node.id, node.kind, node.name, node.qualifiedName, node.filePath, node.language,
+          node.startLine, node.endLine, node.startColumn, node.endColumn,
+          node.isExported ? 1 : 0, node.isAsync ? 1 : 0, node.isStatic ? 1 : 0, node.updatedAt,
+        )
+      }
+
+      const insertEdge = db.prepare('INSERT INTO edges (source, target, kind, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?)')
+      for (const edge of input.edges) {
+        insertEdge.run(edge.source, edge.target, edge.kind, edge.line ?? null, edge.col ?? null, edge.provenance)
+      }
+
+      const insertFile = db.prepare(`INSERT INTO files
+        (path, content_hash, language, size, modified_at, indexed_at, node_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      const nodeCountByFile = new Map<string, number>()
+      for (const node of input.nodes) {
+        if (node.kind === 'file') continue
+        nodeCountByFile.set(node.filePath, (nodeCountByFile.get(node.filePath) ?? 0) + 1)
+      }
+      for (const file of input.files) {
+        insertFile.run(
+          file.path, file.contentHash, file.language, file.size, file.modifiedAt, input.indexedAt,
+          nodeCountByFile.get(file.path) ?? 0,
+        )
+      }
+
+      const insertUnresolved = db.prepare('INSERT INTO unresolved_refs (source, file_path, callee_name, line, col) VALUES (?, ?, ?, ?, ?)')
+      for (const ref of input.unresolved) {
+        insertUnresolved.run(ref.source, ref.filePath, ref.calleeName, ref.line, ref.col)
+      }
+
+      db.exec('COMMIT')
+    } catch (cause) {
+      db.exec('ROLLBACK')
+      throw cause
+    } finally {
+      db.close()
+    }
+  } catch (cause) {
+    await removeGraphFiles(tempPath)
+    throw cause
+  }
+
+  // The old file's sidecars, if any, describe the graph being replaced, not the new one; clear them
+  // before the rename so the new file never inherits a stale WAL/SHM pair.
   await rm(`${databasePath}-wal`, { force: true })
   await rm(`${databasePath}-shm`, { force: true })
-
-  const db = new DatabaseSync(databasePath)
-  try {
-    db.exec(SCHEMA)
-    db.exec('BEGIN')
-    db.prepare('INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)')
-      .run(SCHEMA_VERSION, input.indexedAt, 'dsh-codegraph-tree-sitter')
-
-    const insertNode = db.prepare(`INSERT INTO nodes
-      (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column,
-       end_column, is_exported, is_async, is_static, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    for (const node of input.nodes) {
-      insertNode.run(
-        node.id, node.kind, node.name, node.qualifiedName, node.filePath, node.language,
-        node.startLine, node.endLine, node.startColumn, node.endColumn,
-        node.isExported ? 1 : 0, node.isAsync ? 1 : 0, node.isStatic ? 1 : 0, node.updatedAt,
-      )
-    }
-
-    const insertEdge = db.prepare('INSERT INTO edges (source, target, kind, line, col, provenance) VALUES (?, ?, ?, ?, ?, ?)')
-    for (const edge of input.edges) {
-      insertEdge.run(edge.source, edge.target, edge.kind, edge.line ?? null, edge.col ?? null, edge.provenance)
-    }
-
-    const insertFile = db.prepare(`INSERT INTO files
-      (path, content_hash, language, size, modified_at, indexed_at, node_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    const nodeCountByFile = new Map<string, number>()
-    for (const node of input.nodes) {
-      if (node.kind === 'file') continue
-      nodeCountByFile.set(node.filePath, (nodeCountByFile.get(node.filePath) ?? 0) + 1)
-    }
-    for (const file of input.files) {
-      insertFile.run(
-        file.path, file.contentHash, file.language, file.size, file.modifiedAt, input.indexedAt,
-        nodeCountByFile.get(file.path) ?? 0,
-      )
-    }
-
-    const insertUnresolved = db.prepare('INSERT INTO unresolved_refs (source, file_path, callee_name, line, col) VALUES (?, ?, ?, ?, ?)')
-    for (const ref of input.unresolved) {
-      insertUnresolved.run(ref.source, ref.filePath, ref.calleeName, ref.line, ref.col)
-    }
-
-    db.exec('COMMIT')
-  } catch (cause) {
-    db.exec('ROLLBACK')
-    throw cause
-  } finally {
-    db.close()
-  }
+  await rename(tempPath, databasePath)
+  // rename() only moves the main file; the temp name's own sidecars (should the driver have left any)
+  // never travel with it and would otherwise linger under the temp name forever.
+  await removeGraphFiles(tempPath)
 }

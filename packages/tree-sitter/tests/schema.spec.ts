@@ -1,6 +1,6 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION, writeGraph } from '../src/schema.ts'
@@ -95,14 +95,36 @@ describe('writeGraph', () => {
     db.close()
   })
 
-  it('rolls back and rethrows when a write violates the schema', async () => {
+  it('rethrows when a write violates the schema, leaving no file behind on a first write', async () => {
     const path = await tempDatabasePath()
     const duplicateNodes = [NODES[0]!, NODES[0]!]
     await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW }))
       .rejects.toThrow()
+    // The build happens on a temp file that is only renamed into place on success; a failed first
+    // write never creates `path` at all, rather than leaving a schema-only, zero-row database there.
+    await expect(readdir(dirname(path))).resolves.toEqual([])
+  })
+
+  it('leaves a previously written graph untouched when a later write fails', async () => {
+    const path = await tempDatabasePath()
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    const duplicateNodes = [NODES[0]!, NODES[0]!]
+    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW + 1 }))
+      .rejects.toThrow()
     const db = new DatabaseSync(path, { readOnly: true })
-    // The failed transaction left no partial rows behind.
-    expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 0 })
+    // The failed write built and discarded its own temp file; it never touched the live database.
+    expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 2 })
+    expect(db.prepare('SELECT MAX(applied_at) AS a FROM schema_versions').get()).toEqual({ a: NOW })
     db.close()
+  })
+
+  it('leaves no temp file behind after a successful write or a failed one', async () => {
+    const path = await tempDatabasePath()
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    const duplicateNodes = [NODES[0]!, NODES[0]!]
+    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW + 1 }))
+      .rejects.toThrow()
+    const entries = await readdir(dirname(path))
+    expect(entries).toEqual(['codegraph.db'])
   })
 })

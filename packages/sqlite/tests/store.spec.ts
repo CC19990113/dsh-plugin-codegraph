@@ -11,7 +11,7 @@ import { toEdge, toFile, toNode } from '../src/rows.ts'
 import { ftsPhrase, likeAnywhere } from '../src/sql.ts'
 import { walkImpact, walkTrace } from '../src/traverse.ts'
 import { files, impact, node, relations, search, status, trace } from '../src/queries.ts'
-import { seedProject } from './fixture.ts'
+import { seedProject, writeGraphAt } from './fixture.ts'
 
 const roots: string[] = []
 let context: Context | undefined
@@ -99,6 +99,42 @@ describe('graph database', () => {
     expect(() => pool.acquire(first)).toThrow(
       expect.objectContaining<Partial<CodegraphError>>({ code: 'CODEGRAPH_DISPOSED' }),
     )
+  })
+})
+
+describe('connection identity', () => {
+  it('reopens once the graph on disk is replaced, closing the stale connection', async () => {
+    const root = await project(SEED)
+    const pool = new GraphPool(4)
+    const original = pool.acquire(root)
+    expect(node(original, { operation: 'node', ...AT(root), symbol: 'main', limit: 5 }).node).not.toBeNull()
+
+    // A real indexing run replaces the file wholesale (see tree-sitter's writeGraph): same path, new
+    // on-disk identity.
+    await writeGraphAt(root, { nodes: [{ id: 'fn:only', kind: 'function', name: 'only', filePath: 'src/only.ts' }] })
+
+    const reopened = pool.acquire(root)
+    // Compared as booleans, not `expect(reopened).not.toBe(original)`: vitest's failure-message
+    // formatter can reach into a DatabaseSync it's printing, and one side of this comparison is
+    // already closed by the time the assertion runs.
+    expect(reopened === original).toBe(false)
+    expect(() => original.prepare('SELECT 1')).toThrow(/not open/)
+    expect(node(reopened, { operation: 'node', ...AT(root), symbol: 'only', limit: 5 }).node).not.toBeNull()
+    pool.close()
+  })
+
+  it('keeps serving the cached connection when the path is transiently unstatable', async () => {
+    const root = await project(SEED)
+    const pool = new GraphPool(4)
+    const original = pool.acquire(root)
+
+    // The window an indexing run's atomic replace passes through between removing the old file and
+    // renaming the new one into place: the path briefly resolves to nothing at all.
+    await rm(databasePath(root))
+
+    expect(pool.acquire(root) === original).toBe(true)
+    expect(() => original.prepare('SELECT 1')).not.toThrow()
+    pool.close()
   })
 })
 

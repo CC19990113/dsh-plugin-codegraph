@@ -1,7 +1,7 @@
 // A schema-v4 knowledge graph built in a temp directory, so every test runs against the real
 // on-disk format rather than a stand-in: the store's SQL, its FTS5 search, and its format-version
 // gate are all exercised exactly as they are against an index the external indexer wrote.
-import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -80,14 +80,23 @@ export interface Seed {
 }
 
 /**
- * Create a project directory holding a schema-v4 graph and its source files.
+ * Write (or overwrite) a schema-v4 graph and its source files at an existing project root. Used both
+ * by {@link seedProject} for a fresh temp directory and directly by tests that need to replace the
+ * graph at a root that already has one — e.g. to exercise a store's reaction to the file being swapped
+ * out from under a connection it already opened.
+ * @param root - an existing project root; `.codegraph/codegraph.db` there is replaced.
  * @param seed - the graph and files to write.
- * @returns the absolute project root.
  */
-export async function seedProject(seed: Seed): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-codegraph-'))
+export async function writeGraphAt(root: string, seed: Seed): Promise<void> {
   await mkdir(join(root, '.codegraph'), { recursive: true })
-  const db = new DatabaseSync(join(root, DATABASE_RELATIVE_PATH))
+  const path = join(root, DATABASE_RELATIVE_PATH)
+  // A fresh file, distinct from whatever (if anything) was at this path before: this is the fixture's
+  // stand-in for a real indexing run replacing the graph, which is what the tests using this on an
+  // already-seeded root want to exercise.
+  await rm(path, { force: true })
+  await rm(`${path}-wal`, { force: true })
+  await rm(`${path}-shm`, { force: true })
+  const db = new DatabaseSync(path)
   db.exec(SCHEMA)
   db.prepare('INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)')
     .run(seed.formatVersion ?? 4, 1, 'test fixture')
@@ -128,5 +137,15 @@ export async function seedProject(seed: Seed): Promise<string> {
     insertFile.run(file.path, file.language ?? 'typescript', file.size ?? 100, modifiedAt, file.nodeCount ?? 0)
   }
   db.close()
+}
+
+/**
+ * Create a project directory holding a schema-v4 graph and its source files.
+ * @param seed - the graph and files to write.
+ * @returns the absolute project root.
+ */
+export async function seedProject(seed: Seed): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-codegraph-'))
+  await writeGraphAt(root, seed)
   return root
 }

@@ -82,6 +82,27 @@ describe('codegraph-tree-sitter plugin', () => {
     expect(report.unresolvedLikelyInternalCount).toBe(1)
   })
 
+  it('reflects a second, in-session index() in a store connection opened before it ran', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const ctx = await seam()
+    await ctx.codegraph.index(root)
+    const CodegraphSqlite = await import('dsh-plugin-codegraph-sqlite')
+    await ctx.plugin(CodegraphSqlite)
+    // Open (and cache) a store connection against the first graph before anything changes on disk.
+    const before = await ctx.codegraph.query({ operation: 'search', projectRoot: root, query: 'first', limit: 10 })
+    expect(before.nodes.some(node => node.name === 'first')).toBe(true)
+
+    await import('node:fs/promises').then(fs => fs.writeFile(`${root}/a.ts`, 'export function second() {}\n'))
+    await ctx.codegraph.index(root)
+
+    // The same session, same store instance, no reconnect on the caller's part: this must not read
+    // back the graph the pooled connection was opened against before the rebuild.
+    const after = await ctx.codegraph.query({ operation: 'search', projectRoot: root, query: 'first', limit: 10 })
+    expect(after.nodes.some(node => node.name === 'first')).toBe(false)
+    const updated = await ctx.codegraph.query({ operation: 'search', projectRoot: root, query: 'second', limit: 10 })
+    expect(updated.nodes.some(node => node.name === 'second')).toBe(true)
+  })
+
   it('exposes the on-disk path this package writes, matching the store\'s own constant', async () => {
     const { DATABASE_RELATIVE_PATH: storePath } = await import('dsh-plugin-codegraph-sqlite')
     expect(DATABASE_RELATIVE_PATH).toBe(storePath)

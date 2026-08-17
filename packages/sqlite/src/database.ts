@@ -10,6 +10,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import { CodegraphError } from 'dsh-plugin-codegraph-service'
 
@@ -53,6 +54,37 @@ function readFormatVersion(db: DatabaseSync): number {
 }
 
 /**
+ * The device and inode a path currently resolves to — cheap, filesystem-level proof that two opens
+ * of the same path did or didn't land on the same underlying file. `ino` alone is only unique within
+ * one device, so both are required.
+ */
+interface FileIdentity {
+  readonly dev: number
+  readonly ino: number
+}
+
+/**
+ * A path's current on-disk identity, or `undefined` when it cannot be stat'd (most commonly: an
+ * indexing run's atomic replace is between removing the old file and renaming the new one into place).
+ * That absence is treated as "unknown, not gone" by every caller — a transient rebuild window must
+ * never look like a missing graph.
+ * @param path - the file to identify.
+ */
+function identify(path: string): FileIdentity | undefined {
+  try {
+    const stats = statSync(path)
+    return { dev: stats.dev, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether two identities name the same underlying file. */
+function sameIdentity(a: FileIdentity, b: FileIdentity): boolean {
+  return a.dev === b.dev && a.ino === b.ino
+}
+
+/**
  * Open one project's graph read-only and verify its format version.
  * @param projectRoot - absolute path of the indexed project root.
  * @returns the open, version-checked connection.
@@ -86,14 +118,27 @@ export function openGraph(projectRoot: string): DatabaseSync {
   return db
 }
 
+/** A pooled connection alongside the on-disk identity it was opened against. */
+interface PooledConnection {
+  readonly db: DatabaseSync
+  readonly identity: FileIdentity
+}
+
 /**
  * A bounded set of open graph connections keyed by project root, evicting the least recently used
  * one when full. Every connection the pool hands out stays valid until {@link close}: eviction and
  * disposal both close connections, so a caller holds a connection only for the duration of one
  * synchronous query.
+ *
+ * A connection is opened against one specific on-disk file. An indexing run replaces that file
+ * wholesale (rename over the old path), and POSIX unlink semantics mean an already-open read-only
+ * connection keeps serving the REPLACED file's bytes indefinitely — reopening is the only way to see
+ * the new graph. `acquire` detects that swap by comparing the device/inode recorded at open time
+ * against the path's current identity, so a cache hit never silently serves a graph an indexing run
+ * has already superseded.
  */
 export class GraphPool {
-  private readonly open = new Map<string, DatabaseSync>()
+  private readonly open = new Map<string, PooledConnection>()
   private disposed = false
 
   /**
@@ -102,9 +147,10 @@ export class GraphPool {
   constructor(private readonly capacity: number) {}
 
   /**
-   * The connection for a project root, opening and caching it on first use.
+   * The connection for a project root, opening and caching it on first use. Reopens automatically
+   * when the file on disk is no longer the one the cached connection was opened against.
    * @param projectRoot - absolute path of the indexed project root.
-   * @returns the open, version-checked connection.
+   * @returns the open, version-checked connection, current as of this call.
    */
   acquire(projectRoot: string): DatabaseSync {
     if (this.disposed) {
@@ -112,13 +158,26 @@ export class GraphPool {
     }
     const cached = this.open.get(projectRoot)
     if (cached !== undefined) {
-      // Re-insert to mark most recently used; Map iteration order is insertion order.
+      const current = identify(databasePath(projectRoot))
+      // `undefined` means the path is transiently unstatable — most likely an indexing run's replace
+      // is mid-flight between removing the old file and renaming the new one into place. Keep serving
+      // the connection we have rather than treating a rebuild-in-progress as a missing graph.
+      if (current === undefined || sameIdentity(current, cached.identity)) {
+        // Re-insert to mark most recently used; Map iteration order is insertion order.
+        this.open.delete(projectRoot)
+        this.open.set(projectRoot, cached)
+        return cached.db
+      }
+      cached.db.close()
       this.open.delete(projectRoot)
-      this.open.set(projectRoot, cached)
-      return cached
     }
     const db = openGraph(projectRoot)
-    this.open.set(projectRoot, db)
+    const identity = identify(databasePath(projectRoot))
+    // Only `undefined` when the file vanishes in the instant between opening it and this stat — an
+    // unprovokable race in tests. The sentinel never matches a real identity, so the next acquire()
+    // is forced to re-verify rather than trusting an unconfirmed connection indefinitely.
+    /* v8 ignore next */
+    this.open.set(projectRoot, { db, identity: identity ?? { dev: -1, ino: -1 } })
     this.evictOverflow()
     return db
   }
@@ -126,7 +185,7 @@ export class GraphPool {
   /** Close every open connection; further {@link acquire} calls fail as `CODEGRAPH_DISPOSED`. */
   close(): void {
     this.disposed = true
-    for (const db of this.open.values()) db.close()
+    for (const { db } of this.open.values()) db.close()
     this.open.clear()
   }
 
@@ -135,8 +194,8 @@ export class GraphPool {
     while (this.open.size > this.capacity) {
       // Map iteration starts at the least recently used entry, and `acquire` re-inserts on a hit,
       // so the first entry is always the eviction candidate.
-      for (const [root, db] of this.open) {
-        db.close()
+      for (const [root, entry] of this.open) {
+        entry.db.close()
         this.open.delete(root)
         break
       }
