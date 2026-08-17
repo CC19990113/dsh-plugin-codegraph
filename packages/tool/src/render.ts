@@ -121,12 +121,22 @@ export function renderCodegraph(value: CodegraphToolValue): string {
       const languages = (value.languages ?? []).map(entry => `${entry.language} ${entry.file_count}`).join(', ')
       const indexedAt = value.indexed_at
       const indexed = indexedAt === undefined || indexedAt === null ? 'never' : new Date(indexedAt).toISOString()
-      return [
+      const lines = [
         `Index for ${value.project_path} (format version ${value.format_version}):`,
         `${value.file_count} files, ${value.symbol_count} symbols, ${value.edge_count} relationships.`,
         `Languages: ${languages || 'none'}.`,
         `Last indexed: ${indexed}.`,
-      ].join('\n')
+      ]
+      const stale = value.stale_file_count
+      // Undefined only when a caller builds a partial value directly (as some tests do); the tool's
+      // own `status` handler always sets this alongside `indexed: true`.
+      if (stale !== undefined && stale > 0) {
+        const truncated = value.stale_file_count_truncated === true
+        const amount = truncated ? `at least ${stale}` : `${stale}`
+        const noun = stale === 1 && !truncated ? 'file' : 'files'
+        lines.push(`${amount} indexed ${noun} changed on disk or went missing since indexing. Call codegraph_index to refresh.`)
+      }
+      return lines.join('\n')
     }
     case 'explore': {
       if (value.files.length === 0) return `No declaration matches in ${value.project_path}.`

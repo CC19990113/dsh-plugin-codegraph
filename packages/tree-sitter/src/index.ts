@@ -31,6 +31,8 @@ export { LANGUAGE_TABLE, languageFor } from './languages.ts'
 export type { DefinitionRule, ImportRule, LanguageSpec } from './languages.ts'
 export { extractFile } from './extract.ts'
 export type { FileExtraction, RawCall, RawDefinition, RawImport } from './extract.ts'
+export { loadGitignore, matchesGitignore, parseGitignore } from './gitignore.ts'
+export type { GitignoreRule } from './gitignore.ts'
 export { resolveWorkspace } from './resolve.ts'
 export type { ExtractedFile, GraphEdge, GraphNode, ResolvedGraph, UnresolvedRef } from './resolve.ts'
 export { SCHEMA_VERSION, writeGraph } from './schema.ts'
@@ -72,6 +74,15 @@ export interface Config {
   languages?: string[]
   /** Directory segment names never descended into (default: node_modules, dist, build, coverage, .git). */
   exclude?: string[]
+  /**
+   * Also exclude whatever the project root's `.gitignore` names, unioned with `exclude` (default
+   * true). Build tooling routinely writes compiled output to a gitignored directory outside the
+   * default exclude list (`lib`, `out`, ...); indexing that output alongside its own source hands the
+   * resolver two same-named declarations of one symbol and makes "the one unique workspace-wide name
+   * wins" pick between them arbitrarily. Only a practical subset of gitignore syntax is understood —
+   * see `./gitignore.ts`. A project with no root `.gitignore` is unaffected either way.
+   */
+  respectGitignore?: boolean
   /** Files larger than this are skipped and counted in the report, never parsed (default 2000000). */
   maxFileBytes?: number
   /** The walk stops discovering new files once this many have been found (default 50000). */
@@ -84,6 +95,7 @@ export const Config: z<Config> = z.object({
   indexerId: z.string().default(DEFAULT_INDEXER_ID),
   languages: z.array(z.string()).default([...new Set(LANGUAGE_TABLE.map(spec => spec.language))]),
   exclude: z.array(z.string()).default(DEFAULT_EXCLUDE),
+  respectGitignore: z.boolean().default(true),
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   maxFiles: z.number().default(DEFAULT_MAX_FILES),
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
@@ -132,6 +144,7 @@ export function apply(ctx: Context, config: Config): void {
 async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: AbortSignal): Promise<CodegraphIndexReport> {
   const { files, filesSkipped } = await walkAndExtract(projectRoot, {
     exclude: config.exclude,
+    respectGitignore: config.respectGitignore,
     maxFileBytes: config.maxFileBytes,
     maxFiles: config.maxFiles,
     concurrency: config.concurrency,

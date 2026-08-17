@@ -71,12 +71,12 @@ Agent 改代码之前,总要先搞清楚代码之间的关系。但它手上的�
 ## 安装
 
 ```sh
-# 1. 装进某个 profile
 dsh plugin --profile <name> add dsh-plugin-codegraph
 ```
 
+就这一条命令,装完就完事:它会拉包,还会自动 reconcile profile 的 manifest,把 `dsh-plugin-codegraph` 追加进 `dsh.profile.bundles`。不用手动改任何 JSON。跑完之后,`$DSH_HOME/profiles/<name>/package.json`(`$DSH_HOME` 默认是 `~/.dsh`)长这样——这里给出来是让你核对,不是让你去写:
+
 ```jsonc
-// 2. 在 $DSH_HOME/profiles/<name>/package.json 里登记
 {
   "dsh": {
     "profile": {
@@ -86,6 +86,8 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 }
 ```
 
+想在不花 API key 的情况下确认四个插件都挂上了,跑 `dsh --profile <name> --dump-default-config`,它们会分组显示在 `# == dsh-plugin-codegraph` 标题下面。
+
 一个 bundle 会把四个插件一次挂全。要调其中某个,在 profile 自己的 `cordis.patch.yml` 里按 id 改就行(`codegraph`、`codegraph-sqlite`、`codegraph-tree-sitter`、`codegraph-tool`):
 
 ```yaml
@@ -93,6 +95,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
   config:
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
+    respectGitignore: true
 
 - id: codegraph-tool
   config:
@@ -116,7 +119,8 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 
 ## 目前的局限
 
-- **索引不会自动更新。** 它只管建,不监视文件变化。`codegraph_index` 跑完之后再改的文件,得等下次重建才会反映进去。
+- **索引会不会过时现在看得见了,但还是不会自动更新。** 它本身不监视文件变化,不过 `status` 会直接 stat 磁盘,报出有多少已索引文件自上次建索引以来改过或被删了。调用方能分清"这份索引还准"和"这份索引已经飘了",不用瞎猜。要刷新就跑 `codegraph_index`。
+- **排除规则是内置默认目录和项目自己的 `.gitignore` 取并集。** 编译产物落在 `node_modules`/`dist`/`build`/`coverage` 之外的目录(比如某些 TypeScript 项目编译到 `lib`)几乎总是被 gitignore 的,不排除的话,同一个符号会在源码和编译产物里各存在一份,调用解析只能在两者间随便选一个。这里只实现了 gitignore 语法的一个够用子集,不支持 `**`、字符类,也不认per-目录的 `.gitignore` 文件。想关掉就设 `respectGitignore: false`。
 - **漏掉的调用边可能不少**,尤其是大量用再导出、动态派发的代码库。具体漏了多少看 `unresolved_count`。
 - **`context` 是按词匹配的**,把任务描述拆成标识符再找。所以一句没提到任何符号名的任务,匹配质量会很差,这里没有语义检索。
 - `dsh` 本身还在 developer preview,迭代快,会有破坏性变更。

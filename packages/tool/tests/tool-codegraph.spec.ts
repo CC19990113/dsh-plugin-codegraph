@@ -288,6 +288,34 @@ describe('result rendering', () => {
     expect(text).toContain('Languages: none.')
   })
 
+  it('says nothing extra about staleness when nothing is stale', () => {
+    const text = renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 1, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], stale_file_count: 0, stale_file_count_truncated: false,
+    })
+    expect(text).not.toContain('codegraph_index to refresh')
+  })
+
+  it('names codegraph_index when the index has drifted from disk', () => {
+    const one = renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 1, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], stale_file_count: 1, stale_file_count_truncated: false,
+    })
+    expect(one).toContain('1 indexed file changed on disk or went missing since indexing. Call codegraph_index to refresh.')
+
+    const many = renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 3, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], stale_file_count: 3, stale_file_count_truncated: false,
+    })
+    expect(many).toContain('3 indexed files changed on disk or went missing since indexing.')
+
+    const capped = renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 1, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], stale_file_count: 1, stale_file_count_truncated: true,
+    })
+    expect(capped).toContain('at least 1 indexed files changed on disk or went missing since indexing.')
+  })
+
   it('renders an index report in plain-fact style', () => {
     const text = renderCodegraph({
       ...base, operation: 'index', files_indexed: 12, files_skipped: 1, symbol_count: 40,
@@ -384,6 +412,7 @@ describe('the tool plugin', () => {
     status: {
       kind: 'status', projectRoot: '/repo', fileCount: 1, nodeCount: 1, edgeCount: 0,
       languages: [{ language: 'typescript', fileCount: 1 }], formatVersion: 4, indexedAt: null,
+      staleFileCount: 1, staleFileCountTruncated: false,
     },
   }
   const seen: CodegraphRequest[] = []

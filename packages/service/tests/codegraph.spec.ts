@@ -20,6 +20,8 @@ const STATUS = {
   languages: [],
   formatVersion: 4,
   indexedAt: null,
+  staleFileCount: 0,
+  staleFileCountTruncated: false,
 }
 
 /** A store that claims the roots it was told to, and answers `status` with a marker. */

@@ -345,6 +345,20 @@ export interface CodegraphStatusResult {
   readonly formatVersion: number
   /** Epoch milliseconds of the most recent index write, or `null` when nothing is indexed. */
   readonly indexedAt: number | null
+  /**
+   * Number of indexed files a direct filesystem check found stale since the index was built: modified
+   * more recently than the mtime the index recorded for them, or missing entirely. This is what makes
+   * an index's age actionable rather than merely displayed — `indexedAt` alone tells a caller how old
+   * the graph is, not whether anything has actually drifted from it. A store with no way to check the
+   * relevant filesystem reports `0` rather than guessing.
+   */
+  readonly staleFileCount: number
+  /**
+   * Whether {@link staleFileCount} stopped short of checking every indexed file and is therefore a
+   * lower bound rather than an exact count. A store enforces some such cap so a `status` call against
+   * a repository with a very large index stays cheap instead of statting every file it indexed.
+   */
+  readonly staleFileCountTruncated: boolean
 }
 
 /**

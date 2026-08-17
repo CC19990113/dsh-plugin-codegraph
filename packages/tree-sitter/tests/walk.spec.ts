@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest'
 import { walkAndExtract } from '../src/walk.ts'
 import { writeProject } from './fixture.ts'
 
-const BASE = { exclude: ['node_modules', '.git'], maxFileBytes: 2_000_000, maxFiles: 50_000, concurrency: 4 }
+const BASE = {
+  exclude: ['node_modules', '.git'],
+  respectGitignore: true,
+  maxFileBytes: 2_000_000,
+  maxFiles: 50_000,
+  concurrency: 4,
+}
 
 describe('walkAndExtract', () => {
   it('finds files across nested directories and skips excluded ones', async () => {
@@ -64,5 +70,34 @@ describe('walkAndExtract', () => {
     await symlink(`${root}/a.ts`, `${root}/link.ts`)
     const { files } = await walkAndExtract(root, BASE)
     expect(files.map(file => file.path)).toEqual(['a.ts'])
+  })
+
+  it('unions the project .gitignore with the configured exclude list', async () => {
+    const root = await writeProject({
+      '.gitignore': 'lib/\n*.generated.ts\n',
+      'src/a.ts': 'export function a() {}\n',
+      'lib/a.ts': 'export function compiled() {}\n',
+      'src/a.generated.ts': 'export function generated() {}\n',
+      'node_modules/dep/index.ts': 'export function ignored() {}\n',
+    })
+    const { files } = await walkAndExtract(root, BASE)
+    expect(files.map(file => file.path).sort()).toEqual(['src/a.ts'])
+  })
+
+  it('ignores the project .gitignore when respectGitignore is false', async () => {
+    const root = await writeProject({
+      '.gitignore': 'lib/\n',
+      'src/a.ts': 'export function a() {}\n',
+      'lib/a.ts': 'export function compiled() {}\n',
+    })
+    const { files } = await walkAndExtract(root, { ...BASE, respectGitignore: false })
+    expect(files.map(file => file.path).sort()).toEqual(['lib/a.ts', 'src/a.ts'])
+  })
+
+  it('behaves the same with or without respectGitignore when there is no .gitignore file', async () => {
+    const root = await writeProject({ 'src/a.ts': 'export function a() {}\n' })
+    const withGitignore = await walkAndExtract(root, BASE)
+    const withoutGitignore = await walkAndExtract(root, { ...BASE, respectGitignore: false })
+    expect(withGitignore.files.map(file => file.path)).toEqual(withoutGitignore.files.map(file => file.path))
   })
 })

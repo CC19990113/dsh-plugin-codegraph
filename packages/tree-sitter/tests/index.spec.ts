@@ -99,6 +99,28 @@ describe('codegraph-tree-sitter plugin', () => {
     expect(report.languages).toEqual([{ language: 'go', fileCount: 1 }, { language: 'python', fileCount: 1 }])
   })
 
+  it('excludes what the project .gitignore names by default, unioned with the built-in exclude list', async () => {
+    const root = await writeProject({
+      '.gitignore': 'lib/\n',
+      'src/a.ts': 'export function a() {}\n',
+      'lib/a.ts': 'export function compiled() {}\n',
+    })
+    const ctx = await seam()
+    const report = await ctx.codegraph.index(root)
+    expect(report.filesIndexed).toBe(1)
+  })
+
+  it('indexes gitignored paths too when respectGitignore is false', async () => {
+    const root = await writeProject({
+      '.gitignore': 'lib/\n',
+      'src/a.ts': 'export function a() {}\n',
+      'lib/a.ts': 'export function compiled() {}\n',
+    })
+    const ctx = await seam({ respectGitignore: false })
+    const report = await ctx.codegraph.index(root)
+    expect(report.filesIndexed).toBe(2)
+  })
+
   it('uses the configured indexer id', async () => {
     const ctx = new Context()
     await ctx.plugin(Codegraph)

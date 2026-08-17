@@ -71,12 +71,12 @@ That last rule is deliberate. The model acts on `callers` output, so a confident
 ## Install
 
 ```sh
-# 1. add the plugin to a profile
 dsh plugin --profile <name> add dsh-plugin-codegraph
 ```
 
+That one command is the whole install: it fetches the package and reconciles the profile's manifest for you, appending `dsh-plugin-codegraph` to `dsh.profile.bundles`. There is no JSON to edit by hand. Afterwards, `$DSH_HOME/profiles/<name>/package.json` — `$DSH_HOME` defaults to `~/.dsh` — reads like this, shown here so you can check it rather than write it:
+
 ```jsonc
-// 2. list it in $DSH_HOME/profiles/<name>/package.json
 {
   "dsh": {
     "profile": {
@@ -86,6 +86,8 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 }
 ```
 
+To confirm the four plugins mounted without spending an API key, run `dsh --profile <name> --dump-default-config`; they appear grouped under a `# == dsh-plugin-codegraph` heading.
+
 The bundle mounts all four plugins in one layer. Retune any of them from the profile's own `cordis.patch.yml`, addressing rows by the ids the bundle declares (`codegraph`, `codegraph-sqlite`, `codegraph-tree-sitter`, `codegraph-tool`):
 
 ```yaml
@@ -93,6 +95,7 @@ The bundle mounts all four plugins in one layer. Retune any of them from the pro
   config:
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
+    respectGitignore: true
 
 - id: codegraph-tool
   config:
@@ -116,7 +119,8 @@ The split is not ceremony. The seam carries no source text and performs no files
 
 ## Known limits
 
-- **Freshness is nobody's job.** This builds an index; it does not watch for changes. A file edited after a `codegraph_index` run keeps its old declarations until the next one.
+- **Freshness is now visible, though still not automatic.** The index does not watch for changes by itself, but `status` reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly. A caller can tell a trustworthy index from a drifted one instead of assuming the best; refresh with `codegraph_index`.
+- **Exclusion unions the built-in default directories with the project's own `.gitignore`.** Build output that lands outside `node_modules`/`dist`/`build`/`coverage` (a `lib` a TypeScript project compiles to, say) is almost always gitignored too, and indexing it alongside its own source would hand call resolution two same-named declarations of one symbol to pick between arbitrarily. Only a practical subset of gitignore syntax is understood — no `**`, character classes, or per-directory `.gitignore` files. Turn it off with `respectGitignore: false`.
 - **The unresolved tail can be large** in a codebase leaning on re-exports or dynamic dispatch. `unresolved_count` measures it.
 - **`context` ranks by identifier-term overlap**, so a task phrased without naming any symbol ranks poorly. There is no semantic matching.
 - `dsh` itself is in developer preview and iterating fast; expect compatibility-breaking changes.

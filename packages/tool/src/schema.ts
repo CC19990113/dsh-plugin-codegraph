@@ -204,6 +204,8 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
       format_version: { type: 'integer' },
       indexed_at: { oneOf: [{ type: 'null' }, { type: 'integer' }] },
       languages: { type: 'array', items: LANGUAGE_COUNT },
+      stale_file_count: { type: 'integer' },
+      stale_file_count_truncated: { type: 'boolean' },
     }),
     member('explore', {
       files: { type: 'array', required: true, items: EXPLORED_FILE },

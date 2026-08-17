@@ -419,6 +419,8 @@ async function run(
           language: entry.language,
           file_count: entry.fileCount,
         })),
+        stale_file_count: result.staleFileCount,
+        stale_file_count_truncated: result.staleFileCountTruncated,
       }
     }
     case 'explore': {

@@ -284,19 +284,81 @@ describe('graph queries', () => {
   it('summarizes index size and freshness, and reports an empty index honestly', async () => {
     const root = await project(SEED)
     const db = openGraph(root)
-    const summary = status(db, root)
+    const summary = status(db, root, 100)
     expect(summary.fileCount).toBe(3)
     expect(summary.nodeCount).toBe(6)
     expect(summary.edgeCount).toBe(4)
     expect(summary.formatVersion).toBe(4)
     expect(summary.indexedAt).toBe(20)
     expect(summary.languages[0]).toEqual({ language: 'typescript', fileCount: 2 })
+    // None of SEED's files carry `text`, so none exist on disk — every one reads as stale-by-missing.
+    expect(summary.staleFileCount).toBe(3)
+    expect(summary.staleFileCountTruncated).toBe(false)
     db.close()
 
     const empty = await project({})
     const emptyDb = openGraph(empty)
-    expect(status(emptyDb, empty).indexedAt).toBeNull()
+    const emptyStatus = status(emptyDb, empty, 100)
+    expect(emptyStatus.indexedAt).toBeNull()
+    expect(emptyStatus.staleFileCount).toBe(0)
+    expect(emptyStatus.staleFileCountTruncated).toBe(false)
     emptyDb.close()
+  })
+})
+
+describe('index staleness', () => {
+  it('finds no stale files when disk matches what the index recorded', async () => {
+    const root = await project({ files: [{ path: 'a.ts', text: 'export const a = 1\n' }] })
+    const db = openGraph(root)
+    const summary = status(db, root, 100)
+    expect(summary.staleFileCount).toBe(0)
+    expect(summary.staleFileCountTruncated).toBe(false)
+    db.close()
+  })
+
+  it('counts a file modified on disk after indexing as stale', async () => {
+    const root = await project({ files: [{ path: 'a.ts', text: 'export const a = 1\n', modifiedAt: 1 }] })
+    const db = openGraph(root)
+    expect(status(db, root, 100).staleFileCount).toBe(1)
+    db.close()
+  })
+
+  it('counts an indexed file that no longer exists as stale', async () => {
+    const root = await project({ files: [{ path: 'gone.ts' }] })
+    const db = openGraph(root)
+    expect(status(db, root, 100).staleFileCount).toBe(1)
+    db.close()
+  })
+
+  it('caps how many files it checks and reports a lower bound once the cap is hit', async () => {
+    const root = await project({ files: [{ path: 'a.ts' }, { path: 'b.ts' }, { path: 'c.ts' }] })
+    const db = openGraph(root)
+    const summary = status(db, root, 1)
+    expect(summary.staleFileCount).toBe(1)
+    expect(summary.staleFileCountTruncated).toBe(true)
+    db.close()
+  })
+
+  it('fails loud on a malformed file path', async () => {
+    const root = await project({ files: [{ path: 'a.ts' }] })
+    const write = new DatabaseSync(databasePath(root))
+    // Same BLOB trick as the malformed-language test: TEXT affinity does not convert it, so it
+    // survives the NOT NULL/PRIMARY KEY constraints and reaches the mapper as the wrong type.
+    write.exec("UPDATE files SET path = x'07' WHERE path = 'a.ts'")
+    write.close()
+    const db = openGraph(root)
+    expect(() => status(db, root, 100)).toThrow(/malformed file path/)
+    db.close()
+  })
+
+  it('fails loud on a malformed file timestamp', async () => {
+    const root = await project({ files: [{ path: 'a.ts' }] })
+    const write = new DatabaseSync(databasePath(root))
+    write.exec("UPDATE files SET modified_at = x'07' WHERE path = 'a.ts'")
+    write.close()
+    const db = openGraph(root)
+    expect(() => status(db, root, 100)).toThrow(/malformed file timestamp/)
+    db.close()
   })
 })
 
@@ -350,6 +412,7 @@ describe('the store plugin', () => {
   it.each([
     ['maxOpenDatabases', { maxOpenDatabases: 0 }],
     ['maxTraversalNodes', { maxTraversalNodes: 1.5 }],
+    ['maxStalenessChecks', { maxStalenessChecks: 0 }],
   ])('fails loading when %s is not a positive integer', async (field, config) => {
     await expect(mount(config)).rejects.toThrow(new RegExp(`${field} must be a positive integer`))
   })
@@ -411,7 +474,7 @@ describe('graphs that are not internally consistent', () => {
     write.exec("UPDATE files SET language = x'07' WHERE path = 'a.ts'")
     write.close()
     const db = openGraph(root)
-    expect(() => status(db, root)).toThrow(/malformed language summary/)
+    expect(() => status(db, root, 100)).toThrow(/malformed language summary/)
     db.close()
   })
 })
@@ -476,7 +539,7 @@ describe('values at the edges of the durable format', () => {
     const db = openGraph(root)
     // node:sqlite raises rather than silently losing precision, because this store reads plain
     // numbers; the store does not dress that up as a graph-format error it cannot distinguish.
-    expect(() => status(db, root)).toThrow(RangeError)
+    expect(() => status(db, root, 100)).toThrow(RangeError)
     db.close()
   })
 

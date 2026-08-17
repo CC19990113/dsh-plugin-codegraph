@@ -14,6 +14,7 @@ import { readdir, readFile, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { createParser } from './grammar.ts'
 import { extractFile } from './extract.ts'
+import { loadGitignore, matchesGitignore } from './gitignore.ts'
 import { languageFor } from './languages.ts'
 import type { ExtractedFile } from './resolve.ts'
 
@@ -29,6 +30,13 @@ export interface WalkConfig {
   readonly concurrency: number
   /** Restrict extraction to these seam language labels when set; every loaded grammar otherwise. */
   readonly languages?: readonly string[]
+  /**
+   * Also exclude whatever the project root's `.gitignore` names, unioned with `exclude`. A project
+   * that compiles to a gitignored directory (`lib`, `dist`, ...) would otherwise hand the same symbol
+   * to the resolver twice — once from source, once from the build output — and "the one unique
+   * workspace-wide name wins" call resolution would pick between them arbitrarily.
+   */
+  readonly respectGitignore: boolean
 }
 
 /** What the walk produced. */
@@ -57,6 +65,7 @@ async function discover(
   signal?: AbortSignal,
 ): Promise<{ candidates: Candidate[]; overflow: number }> {
   const excluded = new Set(config.exclude)
+  const gitignoreRules = config.respectGitignore ? await loadGitignore(projectRoot) : []
   const candidates: Candidate[] = []
   let overflow = 0
 
@@ -64,8 +73,8 @@ async function discover(
     signal?.throwIfAborted()
     const entries = await readdir(posix.join(projectRoot, relativeDir), { withFileTypes: true })
     for (const entry of entries) {
-      if (excluded.has(entry.name)) continue
       const relativePath = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`
+      if (excluded.has(entry.name) || matchesGitignore(gitignoreRules, relativePath, entry.isDirectory())) continue
       if (entry.isDirectory()) {
         await scan(relativePath)
         continue

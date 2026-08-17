@@ -55,6 +55,9 @@ export const DEFAULT_MAX_OPEN_DATABASES = 4
 /** Default ceiling on distinct nodes one `impact` or `trace` walk may visit. */
 export const DEFAULT_MAX_TRAVERSAL_NODES = 20_000
 
+/** Default ceiling on indexed files one `status` call stats on the host filesystem for freshness. */
+export const DEFAULT_MAX_STALENESS_CHECKS = 2_000
+
 /** Plugin configuration: store identity and the bounds the seam's requests cannot express. */
 export interface Config {
   /**
@@ -73,12 +76,19 @@ export interface Config {
    * against a large monorepo returns a truncated answer instead of running unboundedly.
    */
   maxTraversalNodes?: number
+  /**
+   * Largest number of indexed files one `status` call stats on the host filesystem to detect
+   * staleness (default 2000). A repository indexing more files than this gets a lower-bound stale
+   * count instead of a `status` call that stats every file it ever indexed.
+   */
+  maxStalenessChecks?: number
 }
 
 export const Config: z<Config> = z.object({
   storeId: z.string().default(DEFAULT_STORE_ID),
   maxOpenDatabases: z.number().default(DEFAULT_MAX_OPEN_DATABASES),
   maxTraversalNodes: z.number().default(DEFAULT_MAX_TRAVERSAL_NODES),
+  maxStalenessChecks: z.number().default(DEFAULT_MAX_STALENESS_CHECKS),
 })
 
 type ResolvedConfig = Required<Config>
@@ -92,6 +102,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolved = config as ResolvedConfig
   assertPositiveInteger('maxOpenDatabases', resolved.maxOpenDatabases)
   assertPositiveInteger('maxTraversalNodes', resolved.maxTraversalNodes)
+  assertPositiveInteger('maxStalenessChecks', resolved.maxStalenessChecks)
 
   const pool = new GraphPool(resolved.maxOpenDatabases)
   const store: CodegraphStoreProvider = {
@@ -152,7 +163,7 @@ function run<R extends CodegraphRequest>(
     case 'files':
       return files(db, request) as CodegraphResultFor<R>
     case 'status':
-      return status(db, request.projectRoot) as CodegraphResultFor<R>
+      return status(db, request.projectRoot, config.maxStalenessChecks) as CodegraphResultFor<R>
     /* v8 ignore next -- exhaustive over the seam's closed operation union; unreachable. */
     default:
       return assertNever(request, 'codegraph-sqlite request')

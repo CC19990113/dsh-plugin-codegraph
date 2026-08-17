@@ -1,7 +1,7 @@
 // A schema-v4 knowledge graph built in a temp directory, so every test runs against the real
 // on-disk format rather than a stand-in: the store's SQL, its FTS5 search, and its format-version
 // gate are all exercised exactly as they are against an index the external indexer wrote.
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -61,6 +61,13 @@ interface SeedFile {
   nodeCount?: number
   /** Source text written to disk alongside the graph, for the operations that read code. */
   text?: string
+  /**
+   * Epoch milliseconds to record as the index's `modified_at` for this file. Defaults to the real
+   * on-disk mtime when `text` is given (so a freshly written seed file reads as fresh, not stale),
+   * or to `10` when `text` is omitted, since a file with no `text` is never written to disk and is
+   * therefore always "missing" from a staleness check's point of view regardless of this value.
+   */
+  modifiedAt?: number
 }
 
 /** What a seeded project contains. */
@@ -106,14 +113,19 @@ export async function seedProject(seed: Seed): Promise<string> {
 
   const insertFile = db.prepare(`INSERT INTO files
     (path, content_hash, language, size, modified_at, indexed_at, node_count)
-    VALUES (?, 'hash', ?, ?, 10, 20, ?)`)
+    VALUES (?, 'hash', ?, ?, ?, 20, ?)`)
   for (const file of seed.files ?? []) {
-    insertFile.run(file.path, file.language ?? 'typescript', file.size ?? 100, file.nodeCount ?? 0)
+    let modifiedAt = file.modifiedAt ?? 10
     if (file.text !== undefined) {
       const absolute = join(root, file.path)
       await mkdir(join(absolute, '..'), { recursive: true })
       await writeFile(absolute, file.text)
+      // Ceiling rather than rounding: the index's own `modified_at` must be at or after the real
+      // mtime it captured, or a fractional-millisecond mtime rounded down would read back as newer
+      // than what the index recorded and register as a false-positive stale file.
+      if (file.modifiedAt === undefined) modifiedAt = Math.ceil((await stat(absolute)).mtimeMs)
     }
+    insertFile.run(file.path, file.language ?? 'typescript', file.size ?? 100, modifiedAt, file.nodeCount ?? 0)
   }
   db.close()
   return root

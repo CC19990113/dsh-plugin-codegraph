@@ -5,6 +5,8 @@
  * @module dsh-plugin-codegraph-sqlite/queries
  */
 
+import { statSync } from 'node:fs'
+import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { CodegraphError } from 'dsh-plugin-codegraph-service'
 import type {
@@ -306,12 +308,56 @@ export function files(db: DatabaseSync, request: CodegraphFilesRequest): Codegra
 }
 
 /**
+ * Whether one indexed file's on-disk state no longer matches what the index recorded for it.
+ * Missing entirely counts as stale — it is the most unambiguous case there is, and treating a
+ * deleted file as merely "unchanged" would hide the one drift a caller most needs to know about.
+ */
+function isStale(projectRoot: string, relativePath: string, indexedModifiedAt: number): boolean {
+  try {
+    return statSync(join(projectRoot, relativePath)).mtimeMs > indexedModifiedAt
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Count indexed files a direct filesystem check finds stale, capped for cost.
+ * @param db - the open graph connection.
+ * @param projectRoot - the project root the indexed paths are relative to.
+ * @param maxChecks - largest number of indexed files to stat before reporting a lower bound.
+ * @returns the stale count among the checked files, and whether checking stopped short of every
+ * indexed file.
+ */
+function staleness(db: DatabaseSync, projectRoot: string, maxChecks: number): { count: number; truncated: boolean } {
+  // One extra row beyond the cap distinguishes "exactly this many files" from "more than this many"
+  // without a second count query, mirroring the same trick `node`'s alternatives use.
+  const candidates = rows(db, 'SELECT path, modified_at FROM files ORDER BY path LIMIT ?', maxChecks + 1)
+  const truncated = candidates.length > maxChecks
+  const checked = truncated ? candidates.slice(0, maxChecks) : candidates
+  let count = 0
+  for (const row of checked) {
+    const path = row['path']
+    const modifiedAt = row['modified_at']
+    if (typeof path !== 'string') {
+      throw new CodegraphError('the code graph has a malformed file path', 'CODEGRAPH_MALFORMED_INDEX')
+    }
+    if (typeof modifiedAt !== 'number') {
+      throw new CodegraphError('the code graph has a malformed file timestamp', 'CODEGRAPH_MALFORMED_INDEX')
+    }
+    if (isStale(projectRoot, path, modifiedAt)) count += 1
+  }
+  return { count, truncated }
+}
+
+/**
  * Report index size, language coverage, and freshness.
  * @param db - the open graph connection.
  * @param projectRoot - the project root the result echoes back, since the graph does not record it.
+ * @param maxStalenessChecks - largest number of indexed files to stat on the host filesystem when
+ * looking for drift, so a call against a very large index stays cheap.
  * @returns the index summary.
  */
-export function status(db: DatabaseSync, projectRoot: string): CodegraphStatusResult {
+export function status(db: DatabaseSync, projectRoot: string, maxStalenessChecks: number): CodegraphStatusResult {
   const languages = rows(
     db,
     'SELECT language, count(*) AS file_count FROM files GROUP BY language ORDER BY file_count DESC, language',
@@ -325,6 +371,7 @@ export function status(db: DatabaseSync, projectRoot: string): CodegraphStatusRe
     return { language, fileCount: Number(row['file_count']) }
   })
   const indexedAt = scalar(db, 'SELECT MAX(indexed_at) AS indexed_at FROM files')
+  const { count: staleFileCount, truncated: staleFileCountTruncated } = staleness(db, projectRoot, maxStalenessChecks)
   return {
     kind: 'status',
     projectRoot,
@@ -334,5 +381,7 @@ export function status(db: DatabaseSync, projectRoot: string): CodegraphStatusRe
     languages,
     formatVersion: SUPPORTED_FORMAT_VERSION,
     indexedAt: indexedAt === 0 ? null : indexedAt,
+    staleFileCount,
+    staleFileCountTruncated,
   }
 }
