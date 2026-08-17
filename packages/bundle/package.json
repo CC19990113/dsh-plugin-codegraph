@@ -1,0 +1,50 @@
+{
+  "name": "dsh-plugin-codegraph",
+  "version": "0.1.0",
+  "description": "Structural code intelligence for DeepSeek Harness — gives the agent codegraph and codegraph_index tools to find where a symbol is declared, what calls it, what a change reaches, and how one symbol reaches another, from a tree-sitter index it builds itself",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "cordis",
+    "cordis-plugin",
+    "codegraph",
+    "code-graph",
+    "call-graph",
+    "tree-sitter",
+    "code-intelligence",
+    "static-analysis",
+    "ai-agent",
+    "llm-tools",
+    "agent-tools"
+  ],
+  "license": "MIT",
+  "author": "CC19990113",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git",
+    "directory": "packages/bundle"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-codegraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-codegraph/issues",
+  "type": "module",
+  "files": [
+    "cordis.patch.yml"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "dsh-plugin-codegraph-service": "workspace:^",
+    "dsh-plugin-codegraph-sqlite": "workspace:^",
+    "dsh-plugin-codegraph-tool": "workspace:^",
+    "dsh-plugin-codegraph-tree-sitter": "workspace:^"
+  }
+}

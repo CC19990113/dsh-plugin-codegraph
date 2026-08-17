@@ -1,0 +1,10 @@
+{
+  // packages/bundle carries no TypeScript: it ships only cordis.patch.yml.
+  "files": [],
+  "references": [
+    { "path": "./packages/service" },
+    { "path": "./packages/sqlite" },
+    { "path": "./packages/tree-sitter" },
+    { "path": "./packages/tool" }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "name": "dsh-plugin-codegraph-tree-sitter",
+  "version": "0.1.0",
+  "description": "Self-built code-graph indexer for DeepSeek Harness — parses a workspace with web-tree-sitter and writes schema version 4 to .codegraph/codegraph.db, the same on-disk format the codegraph CLI writes, so no external indexer is required",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "codegraph",
+    "code-graph",
+    "tree-sitter",
+    "call-graph",
+    "static-analysis",
+    "code-intelligence",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "author": "CC19990113",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git",
+    "directory": "packages/tree-sitter"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-codegraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-codegraph/issues",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "dsh-plugin-codegraph-service": "workspace:^",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.25.10"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1",
+    "@deepseek-ai/dsh-invariants": ">=0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6"
+  }
+}

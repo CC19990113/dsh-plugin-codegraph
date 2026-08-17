@@ -1,0 +1,30 @@
+# The dsh-plugin-codegraph bundle patch: mounts the whole code-graph capability
+# as ONE layer over an existing dsh profile.
+#
+# Row order carries no load semantics — activation is service-availability
+# driven — so the seam may appear before or after the providers that fill it.
+# The user's own profile patch layer can address any row below by `id` to
+# retune it (last write per row wins), e.g. restricting `languages` on the
+# indexer or lowering `maxLimit` on the tool.
+
+- insert:
+    # Service Definition: publishes ctx.codegraph, the store/indexer registries,
+    # and the eight normalized graph queries. Carries no store of its own.
+    - id: codegraph
+      name: 'dsh-plugin-codegraph-service'
+
+    # Service Provider (read): serves queries from .codegraph/codegraph.db.
+    # Claims a project root only when that file already exists.
+    - id: codegraph-sqlite
+      name: 'dsh-plugin-codegraph-sqlite'
+
+    # Service Provider (write): builds that same schema-v4 file with
+    # web-tree-sitter. Registers ONLY an indexer, never a store, so the seam's
+    # one-claimant-per-root rule stays intact.
+    - id: codegraph-tree-sitter
+      name: 'dsh-plugin-codegraph-tree-sitter'
+
+    # Consumer: the model-facing `codegraph` and `codegraph_index` tools plus
+    # their system-prompt section.
+    - id: codegraph-tool
+      name: 'dsh-plugin-codegraph-tool'

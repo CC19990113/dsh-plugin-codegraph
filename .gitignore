@@ -1,0 +1,9 @@
+node_modules/
+lib/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.codegraph/
+
+# Generated at publish time from the root README (see .github/workflows/publish.yml).
+packages/bundle/README.md

@@ -1,0 +1,53 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for npm provenance: mints the OIDC token that lets npm attest
+      # this tarball was built from this repo at this commit. Without it the
+      # publish still succeeds, but silently drops the provenance badge.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      # Publishing an artifact that does not typecheck or pass its own tests is
+      # not recoverable: npm forbids re-using a version number.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+      # The bundle is what users install, so its npm page must render the
+      # project README. Copied at publish time rather than committed, so the
+      # two can never drift apart.
+      - name: Stage bundle README
+        run: cp README.md packages/bundle/README.md
+
+      # `pnpm -r publish` walks the workspace in dependency order and rewrites
+      # every `workspace:^` range into the concrete published version.
+      - name: Publish
+        run: pnpm -r publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true

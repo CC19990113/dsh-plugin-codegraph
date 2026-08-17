@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // See packages/sqlite/tsconfig.json for why this project clears the
+    // inherited source-to-source `paths` map before building.
+    "paths": {},
+    "rootDir": "src",
+    "outDir": "lib"
+  },
+  "include": ["src"],
+  "references": [{ "path": "../service" }]
+}
