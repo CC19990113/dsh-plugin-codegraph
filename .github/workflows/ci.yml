@@ -24,4 +24,4 @@ jobs:
         run: pnpm run typecheck
 
       - name: Test
-        run: pnpm test
+        run: pnpm run test:coverage
