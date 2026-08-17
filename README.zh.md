@@ -2,81 +2,81 @@
 
 [English](README.md) | 中文
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)提供结构化代码智能。
+给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)加上结构化代码检索能力。
 
-给 agent 两个工具 —— `codegraph` 和 `codegraph_index` —— 让它能问**这个符号声明在哪**、**谁在调用它**、**改动它会波及什么**、**一个符号如何抵达另一个**,答案来自预建索引而不是文本搜索。
+装上之后,agent 多出两个工具:`codegraph` 和 `codegraph_index`。它能直接问"这个函数在哪定义的""谁调用了它""改了它会影响哪些地方""从 A 怎么走到 B",答案来自预先建好的符号索引,不是靠 grep 猜。
 
 ```sh
 dsh plugin --profile <name> add dsh-plugin-codegraph
 ```
 
-## 为什么需要它
+## 解决什么问题
 
-Agent 动手改代码前会先问结构性问题,而它平时手上的工具要么答得很差,要么根本答不了:
+Agent 改代码之前,总要先搞清楚代码之间的关系。但它手上的工具在这件事上都不好使:
 
-- **grep** 会命中注释里、字符串里和无关标识符里的同名文本,而且完全答不了"谁在调用它"。
-- **LSP** 答得精确,但需要每种语言各跑一个服务端、需要预热好的工作区索引,而且要的是**光标位置**而不是名字。
+- **grep** 会把注释、字符串、同名变量全都算作匹配,而且"谁调用了这个函数"这种问题它根本回答不了。
+- **LSP** 答得准,代价是每种语言都要起一个服务端、等索引预热,而且只接受光标位置,不接受函数名。
 
-符号图一次廉价查询就能答完这些。本插件两半都带:一个从磁盘图作答的**存储**,和一个把图建出来的**索引器**,所以全新工作区不需要任何外部工具。
+符号图查一次就能全部答上来。本插件把两半都带齐了:一半负责查(存储),一半负责建(索引器),所以拿到一个全新仓库也不用装别的东西。
 
-## 模型拿到什么
+## Agent 能用什么
 
-两个工具,刻意分开。
+两个工具,分开是有原因的。
 
-### `codegraph` —— 十个只读操作
+### `codegraph` —— 十种只读查询
 
-| 操作 | 回答 | 必填 |
+| 操作 | 回答什么 | 必填参数 |
 |---|---|---|
-| `search` | 某个符号声明在哪? | `query` |
-| `node` | 一个符号连同其直接调用方与被调用方 | `symbol` |
-| `callers` | 什么在调用它? | `symbol` |
-| `callees` | 它调用了什么? | `symbol` |
-| `impact` | 改动它会波及什么? | `symbol` |
-| `trace` | 一个符号如何抵达另一个? | `from`、`to` |
+| `search` | 这个符号在哪定义的? | `query` |
+| `node` | 某个符号,连同调用它的和它调用的 | `symbol` |
+| `callers` | 谁调用了它? | `symbol` |
+| `callees` | 它调用了谁? | `symbol` |
+| `impact` | 改了它会影响到哪些地方? | `symbol` |
+| `trace` | 从 A 是怎么走到 B 的? | `from`、`to` |
 | `files` | 某个目录或 glob 下索引了哪些文件? | — |
-| `status` | 索引多大、多新? | — |
-| `explore` | 若干相关声明连同其源码 | `query` |
-| `context` | 与某个任务相关的一切 | `task` |
+| `status` | 索引多大、什么时候建的? | — |
+| `explore` | 一组相关的定义,连源码一起给 | `query` |
+| `context` | 跟某个任务有关的所有东西 | `task` |
 
-### `codegraph_index` —— 构建或刷新图
+### `codegraph_index` —— 建索引或重建
 
-它是独立工具而不是第十一个操作,因为为大工作区建索引要花几分钟,而一次查询是毫秒级,同时一个工具的超时预算在注册时就定死了。把两者合并会逼出一个"要么对真实构建太紧、要么松到抓不住卡死查询"的共用预算。
+它没有做成第十一个操作,而是单独一个工具,原因很实际:建索引可能要几分钟,查询是毫秒级,而一个工具的超时预算在注册时就写死了。合在一起就只能二选一——预算给小了,大仓库建到一半被掐;给大了,查询卡死也发现不了。
 
-建索引永远是显式的。任何查询都不会隐式触发它:一次悄悄花掉四分钟的 `callers` 调用,在模型看来与工具卡死无从区分。
+建索引永远要显式调用。任何查询都不会顺手帮你建,因为一次 `callers` 悄悄跑了四分钟,在模型看来跟工具挂掉没有区别。
 
-当索引不存在时,`status` 会**如实作答而不是失败** —— 它会说没有索引,并点名 `codegraph_index` 是解法。其余每个操作则会响亮失败,这样"未索引的工作区"永远不会被误读成"空工作区"。
+没有索引的时候,`status` 不会报错,而是直接告诉模型"这里没索引,去调 `codegraph_index`"。其他操作则会明确失败——这样"还没建索引"和"建了但是空的"不会被混为一谈。
 
-## 与 `codegraph` CLI 的互通
+## 和 `codegraph` CLI 的关系
 
-磁盘格式**不是我们的**。本插件读写的是 **`<projectRoot>/.codegraph/codegraph.db` 下的 schema 版本 4** —— 正是 [`@colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph) 写入的同一路径与同一格式。
+磁盘格式不是我们发明的。本插件读写的是 `<projectRoot>/.codegraph/codegraph.db`,schema 版本 4,跟 [`@colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph) 完全一致。
 
-这意味着:
+于是:
 
-- **已经在用 `codegraph` CLI?** 它的索引会被直接接管。挂上插件,完全跳过 `codegraph_index`,直接查。
-- **用本插件建的索引?** CLI 照样读得懂。
-- 一个工作区永远不会出现两份互相矛盾的图。
+- **已经在用 `codegraph` CLI 的**,索引直接拿来就能查,`codegraph_index` 这一步可以跳过。
+- **用本插件建的索引**,CLI 那边照样读得懂。
+- 同一个仓库不会出现两份对不上的图。
 
-## 语言覆盖
+## 支持哪些语言
 
-内置索引器解析 **TypeScript、TSX、JavaScript、JSX、Python 和 Go**。语法按语言懒加载 —— 在首次见到匹配文件时加载 —— 所以纯 Go 的工作区永远不会加载 Python 语法。
+自带的索引器能解析 **TypeScript、TSX、JavaScript、JSX、Python、Go** 六种。语法是按需加载的,只在第一次遇到对应文件时才载入,所以纯 Go 项目不会白白加载 Python 语法。
 
-**存储受格式约束,不受语言约束**:由 `codegraph` CLI 在本索引器不解析的语言上建出来的图,依然可以完整查询。如果你现在就需要更广的索引覆盖,用 CLI 建索引、用本插件查询。
+**但存储端不挑语言,只认格式。** 用 `codegraph` CLI 在其他语言上建出来的图,本插件照样查得动。所以如果你现在就需要更广的语言覆盖,用 CLI 建索引、用插件查,是可行的组合。
 
-## 调用解析绝不猜
+## 宁可漏,不可错
 
-每个调用点按固定顺序解析:落在已索引文件上的 import 胜出;否则全工作区唯一同名者胜出;否则**不产出任何边**,该调用点记为未解析。
+每个调用点按固定顺序解析:先看 import 能不能指向某个已索引的文件;不行就看全仓库是不是只有一个同名定义;还不行,**就不产出这条边**,把它记进未解析计数。
 
-最后这条是刻意的。模型会依据 `callers` 的输出行动,一个自信但错误的调用方会把它送去改错文件,而一个缺失的调用方只是把它送回文本搜索。索引报告里的 `unresolved_count` 让这个缺口的大小可见,而不是把它藏起来。
+最后这条是故意的。模型是拿 `callers` 的结果去干活的——报错一个调用方,它就跑去改错文件;漏报一个,它顶多退回去用文本搜索。前者的代价高得多。索引报告里的 `unresolved_count` 会把漏了多少摆在明面上,不藏着。
 
 ## 安装
 
 ```sh
-# 1. 把插件装进某个 profile
+# 1. 装进某个 profile
 dsh plugin --profile <name> add dsh-plugin-codegraph
 ```
 
 ```jsonc
-// 2. 在 $DSH_HOME/profiles/<name>/package.json 里列出它
+// 2. 在 $DSH_HOME/profiles/<name>/package.json 里登记
 {
   "dsh": {
     "profile": {
@@ -86,7 +86,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 }
 ```
 
-bundle 会用一个层挂载全部四个插件。想调整其中任何一个,在该 profile 自己的 `cordis.patch.yml` 里按 bundle 声明的 id 寻址(`codegraph`、`codegraph-sqlite`、`codegraph-tree-sitter`、`codegraph-tool`):
+一个 bundle 会把四个插件一次挂全。要调其中某个,在 profile 自己的 `cordis.patch.yml` 里按 id 改就行(`codegraph`、`codegraph-sqlite`、`codegraph-tree-sitter`、`codegraph-tool`):
 
 ```yaml
 - id: codegraph-tree-sitter
@@ -100,32 +100,32 @@ bundle 会用一个层挂载全部四个插件。想调整其中任何一个,在
     indexTimeoutMs: 600000
 ```
 
-## 包组成
+## 包结构
 
-装 bundle 就够了;下面列出来是给想手工组合的人看的。
+装 bundle 就够了,下面这张表是给想自己拼的人看的。
 
-| 包 | 角色 |
+| 包 | 干什么的 |
 |---|---|
-| [`dsh-plugin-codegraph`](packages/bundle) | bundle —— 依赖下面四个并提供补丁层 |
-| [`dsh-plugin-codegraph-service`](packages/service) | Service Definition:`ctx.codegraph`、Provider 注册表、查询词汇表 |
-| [`dsh-plugin-codegraph-sqlite`](packages/sqlite) | Service Provider:架在磁盘图之上的只读 SQLite 存储 |
-| [`dsh-plugin-codegraph-tree-sitter`](packages/tree-sitter) | Service Provider:写出那份图的 tree-sitter 索引器 |
-| [`dsh-plugin-codegraph-tool`](packages/tool) | Consumer:模型可见的工具、其边界与呈现 |
+| [`dsh-plugin-codegraph`](packages/bundle) | bundle,依赖下面四个,提供那份补丁层 |
+| [`dsh-plugin-codegraph-service`](packages/service) | 定义 `ctx.codegraph`:Provider 注册表和查询词汇 |
+| [`dsh-plugin-codegraph-sqlite`](packages/sqlite) | 只读 SQLite 存储,负责查 |
+| [`dsh-plugin-codegraph-tree-sitter`](packages/tree-sitter) | tree-sitter 索引器,负责建 |
+| [`dsh-plugin-codegraph-tool`](packages/tool) | 模型可见的工具、边界和输出呈现 |
 
-这个拆分不是形式主义。本 seam 不承载源文本、也不做任何文件系统访问,因此存储完全不需要文件系统能力;取一个声明的源码是在 Consumer 里把图查询与一次 `ctx.fs` 读取组合起来,而 Consumer 是唯一能触达远程工作区文件的角色。
+拆这么细不是为了好看。定义层不碰源码文本、也不做任何文件读写,所以存储根本不需要文件系统权限;要拿一个定义的源码,是在工具层把图查询和一次 `ctx.fs` 读取拼起来完成的——只有工具层够得着远程工作区的文件。
 
-## 已知限制
+## 目前的局限
 
-- **新鲜度没人负责。** 它只建索引,不监视变更。一次 `codegraph_index` 之后被编辑的文件,会保留旧声明直到下一次运行。
-- **未解析的尾巴可能很大**,在大量依赖再导出或动态分发的代码库里尤其如此。`unresolved_count` 度量它。
-- **`context` 按标识符词项重合度排序**,所以完全没点到任何符号名的任务描述排序质量差。不存在语义匹配。
-- `dsh` 自身处于 developer preview 且迭代很快,预期会有破坏性变更。
+- **索引不会自动更新。** 它只管建,不监视文件变化。`codegraph_index` 跑完之后再改的文件,得等下次重建才会反映进去。
+- **漏掉的调用边可能不少**,尤其是大量用再导出、动态派发的代码库。具体漏了多少看 `unresolved_count`。
+- **`context` 是按词匹配的**,把任务描述拆成标识符再找。所以一句没提到任何符号名的任务,匹配质量会很差,这里没有语义检索。
+- `dsh` 本身还在 developer preview,迭代快,会有破坏性变更。
 
 ## 致谢
 
-磁盘图格式 —— `.codegraph/codegraph.db` 下的 schema 版本 4 —— 源自 [`@colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph)(MIT),一个面向 AI agent 的本地优先代码智能工具。本插件刻意采用该格式,以保持两者互相可读;这里的索引器、存储与工具是针对 DeepSeek Harness 插件模型编写的独立实现。
+磁盘格式——`.codegraph/codegraph.db` 里的 schema 版本 4——出自 [`@colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph)(MIT),一个面向 AI agent 的本地代码检索工具。本插件特意沿用这个格式,好让两边的索引能互相读取。索引器、存储和工具本身是照着 DeepSeek Harness 的插件模型另行实现的。
 
-基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 与 [Cordis](https://github.com/cordiverse/cordis) 构建。
+基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 和 [Cordis](https://github.com/cordiverse/cordis)。
 
 ## 许可
 
