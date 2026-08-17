@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Codegraph, { CodegraphError } from 'dsh-plugin-codegraph-service'
 import * as CodegraphTreeSitter from '../src/index.ts'
@@ -163,4 +163,61 @@ describe('codegraph-tree-sitter plugin', () => {
     const root = await writeProject({ 'a.ts': 'export function foo() {}\n' })
     await expect(ctx.codegraph.index(root)).resolves.toMatchObject({ filesIndexed: 1 })
   })
+
+  it('watches a real workspace end to end: a file edit is reflected without a manual codegraph_index', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const ctx = await seam({ watch: true, watchDebounceMs: 200 })
+    // The baseline index() this establishes is also what starts the watcher — see ensureWatching().
+    await ctx.codegraph.index(root)
+
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(`${root}/a.ts`, 'export function second() {}\n')
+
+    try {
+      const deadline = Date.now() + 10_000
+      let names: string[] = []
+      do {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        try {
+          // A fresh connection each poll, not one held open across the rebuild: this test is checking
+          // that the watcher's rebuild happened at all, not re-exercising GraphPool's own reopen
+          // logic (covered in the sqlite package's own tests).
+          const db = new DatabaseSync(`${root}/${DATABASE_RELATIVE_PATH}`, { readOnly: true })
+          try {
+            names = (db.prepare("SELECT name FROM nodes WHERE kind = 'function'").all() as { name: string }[])
+              .map(row => row.name)
+          } finally {
+            db.close()
+          }
+        } catch {
+          // A vanishingly unlikely poll landing exactly mid-rename; just try again next tick.
+        }
+      } while (!names.includes('second') && Date.now() < deadline)
+      expect(names).toEqual(['second'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  }, 15_000)
+
+  it('logs a visible, actionable warning once the watcher degrades permanently', async () => {
+    const root = await writeProject({ 'src/a.ts': 'export function a() {}\n' })
+    const originalPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // Forces the per-directory (Linux) watch strategy to hit its cap on the very first subdirectory,
+      // without needing to actually exhaust an OS watch resource.
+      const ctx = await seam({ watch: true, maxWatchedDirectories: 1 })
+      await ctx.codegraph.index(root)
+      const deadline = Date.now() + 5_000
+      while (errorSpy.mock.calls.length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('stopped permanently'))
+      await ctx.fiber.dispose()
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true })
+      errorSpy.mockRestore()
+    }
+  }, 10_000)
 })

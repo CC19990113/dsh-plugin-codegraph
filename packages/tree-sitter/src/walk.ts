@@ -15,8 +15,29 @@ import { posix } from 'node:path'
 import { createParser } from './grammar.ts'
 import { extractFile } from './extract.ts'
 import { loadGitignore, matchesGitignore } from './gitignore.ts'
+import type { GitignoreRule } from './gitignore.ts'
 import { languageFor } from './languages.ts'
 import type { ExtractedFile } from './resolve.ts'
+
+/**
+ * Whether one directory entry is excluded from both the index and (for `watcher.ts`) the watch tree —
+ * the single definition both consult, so "what the index covers" and "what gets watched" can never
+ * drift apart.
+ * @param name - the entry's own name (not a path), matched against `excluded` verbatim.
+ * @param relativePath - the entry's project-relative path, matched against the `.gitignore` rules.
+ * @param isDirectory - whether the entry is a directory, for `.gitignore`'s directory-only rules.
+ * @param excluded - directory/file segment names never descended into.
+ * @param gitignoreRules - the project's parsed `.gitignore`, or empty when not respected.
+ */
+export function isExcluded(
+  name: string,
+  relativePath: string,
+  isDirectory: boolean,
+  excluded: ReadonlySet<string>,
+  gitignoreRules: readonly GitignoreRule[],
+): boolean {
+  return excluded.has(name) || matchesGitignore(gitignoreRules, relativePath, isDirectory)
+}
 
 /** The walk's tunable bounds, mirroring this package's `Config`. */
 export interface WalkConfig {
@@ -74,7 +95,7 @@ async function discover(
     const entries = await readdir(posix.join(projectRoot, relativeDir), { withFileTypes: true })
     for (const entry of entries) {
       const relativePath = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`
-      if (excluded.has(entry.name) || matchesGitignore(gitignoreRules, relativePath, entry.isDirectory())) continue
+      if (isExcluded(entry.name, relativePath, entry.isDirectory(), excluded, gitignoreRules)) continue
       if (entry.isDirectory()) {
         await scan(relativePath)
         continue

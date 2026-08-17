@@ -15,9 +15,11 @@ export const name = 'codegraph-tree-sitter-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: an indexing run is a one-shot, caller-awaited operation with no owned
- * mutable harness state and no emitted event, so there is no owned relation between two
- * harness-visible values to compare.
+ * No runtime invariant: an indexing run is a one-shot, caller-awaited operation, and the optional file
+ * watcher this package can start keeps its per-root state (`Watcher` instances, debounce timers,
+ * pending-path sets) private to the plugin's own closure — never registered on `ctx` or exposed to
+ * another plugin. There is no cross-plugin relation here for an invariant to describe, only
+ * process-local bookkeeping the plugin's own `ctx.effect` cleanup already tears down on unload.
  */
 const install: InvariantInstaller = () => {}
 

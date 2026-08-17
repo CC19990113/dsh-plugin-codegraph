@@ -26,6 +26,8 @@ import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
 import { resolveWorkspace } from './resolve.ts'
 import { writeGraph } from './schema.ts'
+import { createWatcher } from './watcher.ts'
+import type { Watcher } from './watcher.ts'
 
 export { LANGUAGE_TABLE, languageFor } from './languages.ts'
 export type { DefinitionRule, ImportRule, LanguageSpec } from './languages.ts'
@@ -36,8 +38,10 @@ export type { GitignoreRule } from './gitignore.ts'
 export { resolveWorkspace } from './resolve.ts'
 export type { ExtractedFile, GraphEdge, GraphNode, ResolvedGraph, UnresolvedRef } from './resolve.ts'
 export { SCHEMA_VERSION, writeGraph } from './schema.ts'
-export { walkAndExtract } from './walk.ts'
+export { isExcluded, walkAndExtract } from './walk.ts'
 export type { WalkConfig, WalkResult } from './walk.ts'
+export { createWatcher, nodeWatch } from './watcher.ts'
+export type { DegradeReason, WatchConfig, WatchHandle, WatchPrimitive, Watcher } from './watcher.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'codegraph-tree-sitter'
@@ -62,6 +66,12 @@ export const DEFAULT_MAX_FILES = 50_000
 
 /** Default number of files parsed concurrently. */
 export const DEFAULT_CONCURRENCY = 4
+
+/** Default quiet period after the last change before a watch-triggered refresh runs. */
+export const DEFAULT_WATCH_DEBOUNCE_MS = 2_000
+
+/** Default cap on directories watched individually, on platforms without a recursive `fs.watch`. */
+export const DEFAULT_MAX_WATCHED_DIRECTORIES = 4_000
 
 /** Plugin configuration: the indexer's identity and every deployment-varying bound on a run. */
 export interface Config {
@@ -89,6 +99,20 @@ export interface Config {
   maxFiles?: number
   /** Files parsed concurrently (default 4). */
   concurrency?: number
+  /**
+   * Watch the workspace for file changes and refresh the index automatically after a successful
+   * `index()` call establishes a baseline (default false). A caller that never sets this sees no
+   * change from before this option existed — indexing stays purely explicit.
+   */
+  watch?: boolean
+  /** Quiet period after the last change before a watch-triggered refresh runs, in ms (default 2000). */
+  watchDebounceMs?: number
+  /**
+   * Hard cap on directories watched individually (default 4000). Only relevant on platforms without a
+   * recursive `fs.watch` (Linux); exceeding it degrades that root's watcher rather than covering only
+   * part of the tree.
+   */
+  maxWatchedDirectories?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -99,6 +123,9 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   maxFiles: z.number().default(DEFAULT_MAX_FILES),
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
+  watch: z.boolean().default(false),
+  watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
+  maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
 })
 
 type ResolvedConfig = Required<Config>
@@ -113,6 +140,36 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('maxFileBytes', resolved.maxFileBytes)
   assertPositiveInteger('maxFiles', resolved.maxFiles)
   assertPositiveInteger('concurrency', resolved.concurrency)
+  assertPositiveInteger('watchDebounceMs', resolved.watchDebounceMs)
+  assertPositiveInteger('maxWatchedDirectories', resolved.maxWatchedDirectories)
+
+  // Keyed by project root, private to this plugin instance: never registered on `ctx`, so there is no
+  // cross-plugin relation here for an invariant to describe — just process-local bookkeeping this
+  // effect's cleanup below tears down on unload.
+  const watchers = new Map<string, Watcher>()
+
+  /** Start (or leave running) file watching for `projectRoot`, once it has a baseline to refresh. */
+  function ensureWatching(projectRoot: string): void {
+    if (!resolved.watch || watchers.has(projectRoot)) return
+    const watcher = createWatcher({
+      root: projectRoot,
+      exclude: resolved.exclude,
+      respectGitignore: resolved.respectGitignore,
+      debounceMs: resolved.watchDebounceMs,
+      maxWatchedDirectories: resolved.maxWatchedDirectories,
+      sync: () => runSync(projectRoot, resolved),
+      // No diagnostics service is wired into this package's dependencies; this is the floor for
+      // "degradation must be visible" until one is, per NOTES.local.md.
+      onDegraded: (reason) => {
+        console.error(
+          `codegraph-tree-sitter: file watching for "${projectRoot}" stopped permanently (${reason.code}); ` +
+          'the index will no longer refresh on its own — run codegraph_index manually to update it.',
+        )
+      },
+    })
+    watchers.set(projectRoot, watcher)
+    watcher.start()
+  }
 
   const indexer: CodegraphIndexer = {
     id: CodegraphIndexerId(resolved.indexerId),
@@ -126,12 +183,35 @@ export function apply(ctx: Context, config: Config): void {
         return false
       }
     },
-    index: (projectRoot, signal) => runIndex(projectRoot, resolved, signal),
+    async index(projectRoot, signal) {
+      const report = await runIndex(projectRoot, resolved, signal)
+      // Watching starts only after a successful index establishes the baseline it refreshes — never
+      // from a canIndex() probe or a failed run.
+      ensureWatching(projectRoot)
+      return report
+    },
   }
 
   ctx.effect(function* () {
+    yield () => {
+      for (const watcher of watchers.values()) watcher.stop()
+      watchers.clear()
+    }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
+}
+
+/**
+ * Run one watch-triggered reindex. Always a full rebuild in this version — `runIndex` has no notion of
+ * a file subset — so the watcher's own collected paths are not consulted here.
+ * @param projectRoot - absolute path of the workspace to refresh.
+ * @param config - the resolved plugin configuration.
+ * @returns how many files the rebuild indexed, and how long it took.
+ */
+async function runSync(projectRoot: string, config: ResolvedConfig): Promise<{ filesChanged: number; durationMs: number }> {
+  const startedAt = Date.now()
+  const report = await runIndex(projectRoot, config)
+  return { filesChanged: report.filesIndexed, durationMs: Date.now() - startedAt }
 }
 
 /**
