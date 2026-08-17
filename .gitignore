@@ -7,3 +7,6 @@ coverage/
 
 # Generated at publish time from the root README (see .github/workflows/publish.yml).
 packages/bundle/README.md
+
+# 本地工作笔记(含本机绝对路径,不公开)
+NOTES.local.md
