@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, KOTLIN_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
+import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, KOTLIN_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD, SWIFT_FUNCTION_NAME_FIELD, SWIFT_PROPERTY_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -504,6 +504,132 @@ function kotlinImports(node: SyntaxNode): RawImport[] {
   return [{ localName, importedName, specifier }]
 }
 
+/**
+ * A Swift `property_declaration`'s declared name — see {@link SWIFT_PROPERTY_NAME_FIELD}. Its own
+ * `name` field points to a `pattern` node, not the identifier itself; the identifier is one level
+ * deeper, bound to that `pattern`'s own `bound_identifier` field. Verified against a real parse, not
+ * guessed.
+ */
+function swiftPropertyName(node: SyntaxNode): SyntaxNode | undefined {
+  const pattern = node.childForFieldName('name')
+  if (pattern === null) return undefined
+  const bound = pattern.childForFieldName('bound_identifier')
+  return bound?.type === 'simple_identifier' ? bound : undefined
+}
+
+/**
+ * A Swift `function_declaration`/`protocol_function_declaration`'s declared name — see
+ * {@link SWIFT_FUNCTION_NAME_FIELD}. Uses `childForFieldName` (first match, document order) rather than
+ * `soleNamedField` (all matches, requiring exactly one): a return-typed function binds both its name
+ * and its `return_type` node to this same `name` field in this grammar build, and the name always comes
+ * first syntactically (`func f() -> Int` never writes the return type before the identifier), so the
+ * first match is always correct. Verified against a real parse, not guessed.
+ */
+function swiftFunctionName(node: SyntaxNode): SyntaxNode | undefined {
+  const name = node.childForFieldName('name')
+  return name?.type === 'simple_identifier' ? name : undefined
+}
+
+/** Whether a Swift `property_declaration` was declared with `var` (mutable) rather than `let` —
+ * the keyword sits as a bare anonymous token on the declaration's own `value_binding_pattern` child,
+ * itself one level down from `property_declaration` directly. Verified against a real parse, not
+ * guessed. */
+function swiftIsVar(node: SyntaxNode): boolean {
+  const binding = namedChildren(node).find(child => child.type === 'value_binding_pattern')
+  return binding !== undefined && hasKeywordChild(binding, 'var')
+}
+
+/**
+ * The seam kind a Swift `class_declaration`/`property_declaration` actually reports —
+ * `DefinitionRule.kind` has no way to vary by a field's value or a keyword the way either needs, so
+ * this is computed here instead of in `LANGUAGE_TABLE`, the same "kind computed per node" precedent
+ * Zig's `variable_declaration`/Kotlin's `class_declaration` entries already establish. A
+ * `class_declaration`'s own `declaration_kind` field value node's type is directly `struct`/`class`/
+ * `enum` — an unusual shape (most grammars this package extracts from leave a keyword as a bare
+ * anonymous token, but this one promotes it to its own field value) verified against a real parse, not
+ * guessed. A `property_declaration` reports `field` when it is a class/struct member (inspecting the
+ * node's actual parent, not which of the two Swift `property_declaration` rules fired, so this gives
+ * the right answer regardless), or `constant`/`variable` by {@link swiftIsVar} otherwise.
+ */
+function swiftDeclarationKind(node: SyntaxNode): string {
+  if (node.type === 'class_declaration') {
+    const kind = node.childForFieldName('declaration_kind')?.type
+    return kind === 'struct' || kind === 'class' || kind === 'enum' ? kind : 'class'
+  }
+  if (node.parent?.type === 'class_body') return 'field'
+  return swiftIsVar(node) ? 'variable' : 'constant'
+}
+
+/**
+ * Swift `class_declaration`/`protocol_declaration` heritage extraction from every `inheritance_specifier`
+ * child's `inherits_from` field — Swift draws no distinction between extending a class and conforming to
+ * a protocol in this same colon-separated list, the same ambiguity `pythonClassHeritage`/
+ * `baseListHeritage`/`kotlinHeritage` already document for a comparable shape, so every entry reports
+ * `extends`. Verified against a real parse, not guessed.
+ * @param node - the declaring `class_declaration`/`protocol_declaration` node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the declaration declares.
+ */
+function swiftHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  return namedChildren(node)
+    .filter(child => child.type === 'inheritance_specifier')
+    .map((child) => {
+      const userType = child.childForFieldName('inherits_from')
+      const typeIdentifier = userType?.type === 'user_type' ? namedChildren(userType)[0] : undefined
+      return typeIdentifier?.type === 'type_identifier' ? typeIdentifier.text : undefined
+    })
+    .filter((name): name is string => name !== undefined)
+    .map(targetName => ({ sourceKey, targetName, relation: 'extends' as const }))
+}
+
+/**
+ * A Swift `call_expression`'s callee, resolved down to the trailing simple name — `call_expression`
+ * binds no field of its own for its callee (see `LANGUAGE_TABLE`'s `swift` entry), so this is consulted
+ * directly by `extractFile` instead of through `LanguageSpec.callFunctionField`. A bare call
+ * (`add(1, 2)`)'s first child is the callee `simple_identifier` directly; a member call (`p.length()`)'s
+ * first child is a `navigation_expression` instead, whose own `suffix` field gives a `navigation_suffix`
+ * node, itself carrying the trailing identifier through its own `suffix` field in turn — reading only
+ * this outermost level reaches the correct final segment regardless of a longer dotted chain, the same
+ * "outermost level is enough" shape `kotlinCallee` already documents. Verified against a real parse, not
+ * guessed.
+ * @param node - the `call_expression` node.
+ * @returns the callee's simple-name node, or `undefined` when its shape is not one of the two above.
+ */
+function swiftCallee(node: SyntaxNode): SyntaxNode | undefined {
+  const first = namedChildren(node)[0]
+  if (first === undefined) return undefined
+  if (first.type !== 'navigation_expression') return first
+  const navigationSuffix = first.childForFieldName('suffix')
+  const trailing = navigationSuffix?.childForFieldName('suffix')
+  return trailing === null ? undefined : trailing
+}
+
+/**
+ * Swift `import_declaration` extraction — a whole-module import (`import Foundation`) wraps its dotted
+ * path in a bare `identifier`, whose own last `simple_identifier` segment is the module's own simple
+ * name; like a Go package import, it binds no individual symbol this package tracks by name, so the
+ * local name recorded is that same trailing segment (matching `goImports`'s own convention for a
+ * whole-package binding) rather than the empty-string, side-effect-only marker a `#include`/`require`
+ * binding uses elsewhere in this file. Verified against a real parse, not guessed.
+ * @param node - the `import_declaration` node.
+ * @returns the single import binding this statement introduces.
+ */
+function swiftImports(node: SyntaxNode): RawImport[] {
+  const path = namedChildren(node).find(child => child.type === 'identifier')
+  // `import_declaration` always wraps a dotted path per the grammar; the empty-array case only
+  // satisfies `Array.prototype.find`'s general return type.
+  /* v8 ignore next */
+  if (path === undefined) return []
+  const specifier = path.text
+  const segments = namedChildren(path).filter(child => child.type === 'simple_identifier')
+  const localName = segments.at(-1)?.text
+  // The grammar's `identifier` rule always wraps at least one `simple_identifier` segment; the
+  // empty-array case only satisfies `Array.prototype.at`'s general return type.
+  /* v8 ignore next */
+  if (localName === undefined) return []
+  return [{ localName, importedName: '*', specifier }]
+}
+
 /** The definition rule matching `node`, or `undefined` when it introduces no declaration. */
 function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[]): DefinitionRule | undefined {
   for (const rule of definitions) {
@@ -519,6 +645,8 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
       : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node)
       : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node)
       : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node)
+      : rule.nameField === SWIFT_PROPERTY_NAME_FIELD ? swiftPropertyName(node)
+      : rule.nameField === SWIFT_FUNCTION_NAME_FIELD ? swiftFunctionName(node)
       : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
@@ -1272,12 +1400,17 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
     if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
     if (language === 'php') return phpHeritage(node, sourceKey)
     if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
+    if (language === 'swift') return swiftHeritage(node, sourceKey)
     return tsInterfaceHeritage(node, sourceKey)
   }
-  // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` or C#'s
-  // `struct_declaration` rule — a plain C struct/union has no base-list syntax at all, so
-  // `baseListHeritage` simply finds nothing to report for it.
-  if (kind === 'struct') return baseListHeritage(node, sourceKey, language === 'csharp' ? 'base_list' : 'base_class_clause')
+  // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier`, C#'s
+  // `struct_declaration`, or Swift's own `class_declaration` (`declaration_kind` field `struct`) rule —
+  // a plain C struct/union has no base-list syntax at all, so `baseListHeritage` simply finds nothing to
+  // report for it.
+  if (kind === 'struct') {
+    if (language === 'swift') return swiftHeritage(node, sourceKey)
+    return baseListHeritage(node, sourceKey, language === 'csharp' ? 'base_list' : 'base_class_clause')
+  }
   // `kind === 'enum'` only ever comes from PHP's `enum_declaration` rule today — no other language's
   // enum rule reaches this dispatch (TypeScript's/Java's/C#'s enum kinds carry no heritage syntax of
   // their own this package extracts elsewhere), so every other language reports nothing here.
@@ -1291,6 +1424,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (language === 'php') return phpHeritage(node, sourceKey)
   if (language === 'ruby') return rubyClassHeritage(node, sourceKey)
   if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
+  if (language === 'swift') return swiftHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -1331,6 +1465,8 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
         : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node) as SyntaxNode
         : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node) as SyntaxNode
         : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node) as SyntaxNode
+        : rule.nameField === SWIFT_PROPERTY_NAME_FIELD ? swiftPropertyName(node) as SyntaxNode
+        : rule.nameField === SWIFT_FUNCTION_NAME_FIELD ? swiftFunctionName(node) as SyntaxNode
         : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
@@ -1339,13 +1475,15 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
       if (nameNode !== null) {
         const key = `${node.startPosition.row}:${node.startPosition.column}`
         const parentKey = containerKeys[containerKeys.length - 1] ?? null
-        // Zig's own `variable_declaration` rule and Kotlin's own `class_declaration` rule each report one
-        // fixed placeholder kind in `LANGUAGE_TABLE` (no rule can vary `kind` by a value's shape or a
-        // keyword the way either needs) — the real kind is computed here instead, see
-        // `zigDeclarationKind`/`kotlinClassKind`. Every other language's rule already carries the right
-        // kind.
+        // Zig's own `variable_declaration` rule, Kotlin's own `class_declaration` rule, and Swift's own
+        // `class_declaration`/`property_declaration` rules each report one fixed placeholder kind in
+        // `LANGUAGE_TABLE` (no rule can vary `kind` by a value's shape or a keyword the way any of them
+        // needs) — the real kind is computed here instead, see
+        // `zigDeclarationKind`/`kotlinClassKind`/`swiftDeclarationKind`. Every other language's rule
+        // already carries the right kind.
         const kind = spec.language === 'zig' && node.type === 'variable_declaration' ? zigDeclarationKind(node)
           : spec.language === 'kotlin' && node.type === 'class_declaration' ? kotlinClassKind(node)
+          : spec.language === 'swift' && (node.type === 'class_declaration' || node.type === 'property_declaration') ? swiftDeclarationKind(node)
           : rule.kind
         if (spec.language === 'zig' && node.type === 'variable_declaration') {
           const zigImport = zigImportBinding(node, nameNode.text)
@@ -1391,26 +1529,30 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     }
 
     if (spec.callTypes.includes(node.type)) {
-      // Kotlin's `call_expression` binds no field of its own at all — see `kotlinCallee`'s doc comment
-      // — so this consults it directly instead of `node.childForFieldName`, which could never resolve
-      // anything for this grammar regardless of which field name `LanguageSpec.callFunctionField` names.
-      // Every call-shaped node type in every OTHER language table entry requires its callee field; the
-      // null case only satisfies `childForFieldName`'s general return type.
+      // Kotlin's and Swift's `call_expression` bind no field of their own at all — see `kotlinCallee`'s/
+      // `swiftCallee`'s doc comments — so this consults one of them directly instead of
+      // `node.childForFieldName`, which could never resolve anything for either grammar regardless of
+      // which field name `LanguageSpec.callFunctionField` names. Every call-shaped node type in every
+      // OTHER language table entry requires its callee field; the null case only satisfies
+      // `childForFieldName`'s general return type.
       const calleeField = spec.callFunctionFieldByType?.[node.type] ?? spec.callFunctionField
-      const callee = spec.language === 'kotlin' ? kotlinCallee(node) ?? null : node.childForFieldName(calleeField)
+      const callee = spec.language === 'kotlin' ? kotlinCallee(node) ?? null
+        : spec.language === 'swift' ? swiftCallee(node) ?? null
+        : node.childForFieldName(calleeField)
       /* v8 ignore next */
       const name = callee === null ? undefined : calleeName(callee)
       if (name !== undefined) {
         // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
         // system's view of the field lookup above, not a real possibility here.
         /* v8 ignore next */
-        // Kotlin's `kotlinCallee` already unwraps a member call's receiver chain down to the same
-        // `simple_identifier` node type a bare call's callee is, so its own type alone can no longer
-        // distinguish the two — a bare call's `call_expression` has that `simple_identifier` as its own
-        // first child directly, while a member call's has a `navigation_expression` there instead (see
-        // `kotlinCallee`). Verified against a real parse, not guessed.
+        // Kotlin's `kotlinCallee`/Swift's `swiftCallee` already unwrap a member call's receiver chain
+        // down to the same `simple_identifier` node type a bare call's callee is, so its own type alone
+        // can no longer distinguish the two for either language — a bare call's `call_expression` has
+        // that `simple_identifier` as its own first child directly, while a member call's has a
+        // `navigation_expression` there instead (see `kotlinCallee`/`swiftCallee`). Verified against a
+        // real parse, not guessed.
         const isBareCallee = callee?.type === 'identifier' || callee?.type === 'name'
-          || (spec.language === 'kotlin' && namedChildren(node)[0]?.type === 'simple_identifier')
+          || ((spec.language === 'kotlin' || spec.language === 'swift') && namedChildren(node)[0]?.type === 'simple_identifier')
         calls.push({
           callerKey: containerKeys[containerKeys.length - 1] ?? null,
           calleeName: name,
@@ -1487,6 +1629,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return rustImports(node)
     case 'kotlin':
       return kotlinImports(node)
+    case 'swift':
+      return swiftImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -1596,6 +1740,12 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   if (language === 'kotlin') {
     return !kotlinHasVisibility(node, 'private') && !kotlinHasVisibility(node, 'internal') && !kotlinHasVisibility(node, 'protected')
   }
+  // Swift's default visibility (no keyword at all) is `internal` — visible within the same module, but
+  // not to another module's importer — so unlike Kotlin's default-public convention, this reports `true`
+  // only for an explicit `public`/`open` keyword. Swift wraps its visibility keyword in the very same
+  // `modifiers` → `visibility_modifier` shape Kotlin's grammar does (verified against a real parse), so
+  // `kotlinHasVisibility` is reused directly rather than duplicated under a new name.
+  if (language === 'swift') return kotlinHasVisibility(node, 'public') || kotlinHasVisibility(node, 'open')
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum

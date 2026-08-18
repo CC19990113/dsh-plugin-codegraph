@@ -1658,3 +1658,98 @@ fun main() {
     expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'kotlin.collections' })
   })
 })
+
+describe('Swift extraction', () => {
+  const SOURCE = `
+import Foundation
+
+struct Point {
+    var x: Int
+    let y: Int
+
+    func length() -> Int {
+        return x + y
+    }
+}
+
+class Animal: Base, Shape {
+    func speak() {}
+}
+
+protocol Shape {
+    func area() -> Double
+}
+
+enum Color {
+    case red
+    case green
+    case blue
+}
+
+private func helper() {}
+
+public func add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+func main() {
+    add(a: 1, b: 2)
+    let p = Point(x: 1, y: 2)
+    p.length()
+}
+`
+
+  it('extracts a public top-level function (with a return type) as exported, and a private one as not', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'helper', kind: 'function', isExported: false }))
+  })
+
+  it('defaults a function with no visibility keyword (internal) to not exported', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'main', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a struct with its var/let fields and a return-typed method, all nested under it', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'struct' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'length', kind: 'method', container: ['Point'] }))
+  })
+
+  it('extracts a class and a protocol, distinct kinds, each with a method nested under it', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Animal', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'speak', kind: 'method', container: ['Animal'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'interface' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts an enum with its cases as enum_member', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'green', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'blue', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a colon-separated inheritance list as heritage extends, for both entries', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    const animal = extraction.definitions.find(def => def.name === 'Animal')
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Base', relation: 'extends' })
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Shape', relation: 'extends' })
+  })
+
+  it('extracts a bare call and a dot member call, distinguishing their trust level', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    const main = extraction.definitions.find(def => def.name === 'main')
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'add', isMemberCall: false }))
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'length', isMemberCall: true }))
+  })
+
+  it('extracts a whole-module import binding', async () => {
+    const { extraction } = await extract('.swift', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'Foundation', importedName: '*', specifier: 'Foundation' })
+  })
+})

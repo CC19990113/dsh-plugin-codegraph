@@ -121,6 +121,30 @@ export const PHP_ELEMENT_NAME_FIELD = '@php-element'
  */
 export const KOTLIN_NAME_FIELD = '@kotlin-name'
 
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is Swift-specific: a
+ * `property_declaration`'s own `name` field points to a `pattern` node (`var x: Int`'s `x` sits behind
+ * this wrapper, not bound to a field of `property_declaration` directly), and the actual declared
+ * identifier is one level deeper still, bound to that `pattern` node's own `bound_identifier` field.
+ * See `swiftPropertyName` in `extract.ts`, which this sentinel dispatches to instead of a flat
+ * `childForFieldName` lookup. Verified against a real parse, not guessed.
+ */
+export const SWIFT_PROPERTY_NAME_FIELD = '@swift-property'
+
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is Swift-specific in a
+ * different way: a `function_declaration`/`protocol_function_declaration` with an explicit return type
+ * (`func add() -> Int`) binds *two* nodes to its own `name` field in this grammar build — the declared
+ * identifier itself, and (a verified, unguessed quirk of this specific compiled grammar) its
+ * `return_type` node as well — so `childrenForFieldName('name')` returns both, failing
+ * `soleNamedField`'s "exactly one bound child" uniqueness check the same way Go's genuinely ambiguous
+ * `const a, b = 1, 2` does, and silently dropping every such function from this package's graph. Unlike
+ * that Go case, this is not a real multi-name ambiguity — the identifier always comes first in document
+ * order — so `swiftFunctionName` in `extract.ts` uses `childForFieldName('name')` (first match) instead
+ * of `soleNamedField`'s all-matches check.
+ */
+export const SWIFT_FUNCTION_NAME_FIELD = '@swift-function'
+
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
   /** The tree-sitter node type anchoring one import statement, e.g. `import_statement`. */
@@ -710,6 +734,65 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // this file already declines to capture any local `val`/`var` at all for Kotlin (see above), so
     // there is currently no scope-restricted rule this could matter to.
     bareFunctionScopeTypes: [],
+  },
+  {
+    language: 'swift',
+    extensions: ['.swift'],
+    wasmFile: 'tree-sitter-swift.wasm',
+    definitions: [
+      // `struct`/`class`/`enum` all share this one node type, distinguished by a `declaration_kind`
+      // field whose value node's own type is directly `struct`/`class`/`enum` (an unusual but verified
+      // shape — no other grammar this package extracts from promotes a bare keyword to its own field
+      // value this way) — no rule can vary `kind` by that field's value, so `extractFile` computes it
+      // via `swiftDeclarationKind` instead, the same "kind computed per node" precedent Zig's
+      // `variable_declaration`/Kotlin's `class_declaration` entries already establish above. A
+      // `protocol` is Swift's own separate `protocol_declaration` node type instead — verified against a
+      // real parse, not guessed.
+      { nodeType: 'class_declaration', kind: 'class', nameField: 'name' },
+      { nodeType: 'protocol_declaration', kind: 'interface', nameField: 'name' },
+      // A method is a `function_declaration` directly inside a `class_body` — the same node type a
+      // top-level function uses — tried first, before the unrestricted `function` rule below falls
+      // through to everything else. A protocol's own method *signature* (`func area() -> Double`, no
+      // body) is a distinct node type, `protocol_function_declaration`, always directly inside a
+      // `protocol_body` — unambiguous, so no `parentType` guard is needed for it. Both use
+      // `SWIFT_FUNCTION_NAME_FIELD`, not a plain `'name'` field, because either one with an explicit
+      // return type binds two nodes to that field (see `SWIFT_FUNCTION_NAME_FIELD`'s own doc comment) —
+      // verified against a real parse, not guessed.
+      { nodeType: 'function_declaration', kind: 'method', nameField: SWIFT_FUNCTION_NAME_FIELD, parentType: 'class_body' },
+      { nodeType: 'function_declaration', kind: 'function', nameField: SWIFT_FUNCTION_NAME_FIELD },
+      { nodeType: 'protocol_function_declaration', kind: 'method', nameField: SWIFT_FUNCTION_NAME_FIELD },
+      // An enum case — verified against a real parse, not guessed; can only ever appear directly inside
+      // an `enum_class_body`, so — like every other language's own unambiguous member node type — no
+      // `scopeRestricted`/`parentType` guard is needed.
+      { nodeType: 'enum_entry', kind: 'enum_member', nameField: 'name' },
+      // A struct/class stored property (`var x: Int`/`let x: Int` directly inside a `class_body`) —
+      // `property_declaration` is also how Swift spells a top-level or function-local `var`/`let`
+      // binding (the very same node type, see the fallback rule below), so this is tried first, guarded
+      // to only the class-member shape; a property can never legitimately sit anywhere a
+      // `scopeRestricted` gate would exclude it (a class/struct body is never treated as `'other'`
+      // scope), so this rule itself needs no such gate either.
+      { nodeType: 'property_declaration', kind: 'field', nameField: SWIFT_PROPERTY_NAME_FIELD, parentType: 'class_body' },
+      // A top-level or function-local `var`/`let` binding — `DefinitionRule.kind` cannot vary by the
+      // `value_binding_pattern` child's own keyword the way this needs, so `extractFile` computes
+      // `constant`/`variable` via `swiftDeclarationKind` (the same function also reports `field` for the
+      // rule above's match, since it inspects the node's actual parent rather than trusting which rule
+      // fired — see there). `scopeRestricted` excludes a function-local binding, matching every other
+      // language's own local-variable precedent.
+      { nodeType: 'property_declaration', kind: 'variable', nameField: SWIFT_PROPERTY_NAME_FIELD, scopeRestricted: true },
+    ],
+    // `call_expression` binds no field for its callee at all (verified against a real parse) — see
+    // `swiftCallee` in extract.ts, consulted directly by a dedicated dispatch branch in `extractFile`
+    // rather than through `callFunctionField`, which can never resolve anything for this node type.
+    // `target` is kept only as a placeholder so this table entry still type-checks as a normal
+    // `LanguageSpec`; it is never actually read for Swift.
+    callTypes: ['call_expression'],
+    callFunctionField: 'target',
+    importTypes: ['import_declaration'],
+    // A closure literal (`{ (x: Int) -> Int in ... }`, e.g. a callback argument) is never itself
+    // captured as a definition — but a `let`/`var` inside its body is still closure-local, not a
+    // workspace symbol, the same reasoning `ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES` applies to a callback.
+    // Verified against a real parse, not guessed.
+    bareFunctionScopeTypes: ['lambda_literal'],
   },
 ]
 
