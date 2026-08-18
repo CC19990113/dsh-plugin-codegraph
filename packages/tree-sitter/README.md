@@ -1,6 +1,6 @@
 # dsh-plugin-codegraph-tree-sitter
 
-Self-built code-graph indexer. Parses TypeScript, TSX, JavaScript, JSX, Python, Go, Java, and C with `web-tree-sitter` and writes schema version 4 to `.codegraph/codegraph.db`, so a workspace needs no external indexer. Registers only an indexer, never a store.
+Self-built code-graph indexer. Parses TypeScript, TSX, JavaScript, JSX, Python, Go, Java, C, and C++ with `web-tree-sitter` and writes schema version 4 to `.codegraph/codegraph.db`, so a workspace needs no external indexer. Registers only an indexer, never a store.
 
 Part of **[dsh-plugin-codegraph](https://github.com/CC19990113/dsh-plugin-codegraph)** — structural code intelligence for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 

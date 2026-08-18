@@ -330,6 +330,37 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     importTypes: ['preproc_include'],
     bareFunctionScopeTypes: [],
   },
+  {
+    language: 'cpp',
+    extensions: ['.cpp', '.cc', '.cxx', '.hpp', '.hh', '.hxx'],
+    wasmFile: 'tree-sitter-cpp.wasm',
+    definitions: [
+      { nodeType: 'class_specifier', kind: 'class', nameField: 'name' },
+      { nodeType: 'struct_specifier', kind: 'struct', nameField: 'name' },
+      { nodeType: 'union_specifier', kind: 'struct', nameField: 'name' },
+      { nodeType: 'enum_specifier', kind: 'enum', nameField: 'name' },
+      { nodeType: 'enumerator', kind: 'enum_member', nameField: 'name' },
+      { nodeType: 'type_definition', kind: 'type_alias', nameField: 'declarator' },
+      // A method (including a constructor/destructor) is a `function_definition` directly inside a
+      // class/struct's `field_declaration_list` — the same node type a free function uses, so this rule
+      // (tried first) must claim that shape before the unrestricted `function` rule below falls through
+      // to everything else. Verified against a real parse, not guessed.
+      { nodeType: 'function_definition', kind: 'method', nameField: DECLARATOR_NAME_FIELD, parentType: 'field_declaration_list' },
+      { nodeType: 'function_definition', kind: 'function', nameField: DECLARATOR_NAME_FIELD },
+      // `field_declaration` doubles as a pure-virtual method signature (`virtual void v() = 0;` is still
+      // a `field_declaration`, just with a `function_declarator` for its `declarator`) — the same
+      // function-valued guard `ECMASCRIPT_DEFINITIONS`'s `variable_declarator` rule uses, tried first.
+      { nodeType: 'field_declaration', kind: 'method', nameField: DECLARATOR_NAME_FIELD, value: { field: 'declarator', types: ['function_declarator'] } },
+      { nodeType: 'field_declaration', kind: 'field', nameField: DECLARATOR_NAME_FIELD },
+      { nodeType: 'declaration', kind: 'variable', nameField: DECLARATOR_NAME_FIELD, scopeRestricted: true },
+    ],
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    importTypes: ['preproc_include'],
+    // A lambda body (`[](){ int x = 1; }`) is never itself named, so it never matches a `DefinitionRule`
+    // — but a local variable inside its block body is still function-local.
+    bareFunctionScopeTypes: ['lambda_expression'],
+  },
 ]
 
 /**

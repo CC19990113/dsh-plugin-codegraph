@@ -772,3 +772,106 @@ void call_it(void) {
     expect(extraction.imports).toEqual([{ localName: '', importedName: '*', specifier: '' }])
   })
 })
+
+describe('C++ extraction', () => {
+  const SOURCE = `
+namespace ns {
+
+class Base {};
+class Other {};
+
+class Derived : public Base, private Other {
+public:
+  int x;
+  static void method() { helper(); }
+  virtual void v() = 0;
+
+  Derived() {}
+  ~Derived() {}
+
+  void call_it() {
+    obj.member();
+    ptr->member2();
+    ns::helper();
+  }
+};
+
+struct SPoint : Base {
+  int x;
+};
+
+int freeFunc(int a) { return a; }
+
+}
+`
+
+  it('extracts a class and nests its method under it', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Derived', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'method', kind: 'method', container: ['Derived'], isStatic: true }),
+    )
+  })
+
+  it('extracts a pure-virtual method signature (a field_declaration with a function_declarator) as kind method', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'v', kind: 'method', container: ['Derived'] }))
+  })
+
+  it('extracts a plain field, not confused with the pure-virtual method above', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Derived'] }))
+  })
+
+  it('extracts a constructor and destructor as kind method, keeping the destructor name distinct', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    const derivedMethods = extraction.definitions.filter(def => def.container.includes('Derived') && def.kind === 'method')
+    expect(derivedMethods.map(def => def.name)).toEqual(expect.arrayContaining(['Derived', '~Derived', 'method', 'v', 'call_it']))
+  })
+
+  it('extracts a free function outside any class as kind function, not method', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'freeFunc', kind: 'function', isExported: true }))
+  })
+
+  it('reports a method as not exported, having no linkage concept of its own', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'method', kind: 'method', isExported: false }))
+  })
+
+  it('extracts a struct with a base class, and its own field', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    const spoint = extraction.definitions.find(def => def.name === 'SPoint')
+    expect(spoint).toMatchObject({ kind: 'struct' })
+    expect(extraction.heritage).toContainEqual({ sourceKey: spoint?.key, targetName: 'Base', relation: 'extends' })
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['SPoint'] }))
+  })
+
+  it('extracts every base_class_clause entry as extends, with no extends/implements distinction', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    const derived = extraction.definitions.find(def => def.name === 'Derived')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: derived?.key, targetName: 'Base', relation: 'extends' },
+      { sourceKey: derived?.key, targetName: 'Other', relation: 'extends' },
+    ]))
+  })
+
+  it('extracts call sites, distinguishing a bare call from field- and qualified-name member calls', async () => {
+    const { extraction } = await extract('.cpp', SOURCE)
+    const callIt = extraction.definitions.find(def => def.name === 'call_it')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'member', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'member2', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'helper', isMemberCall: true }),
+    )
+  })
+
+  it('does not name an operator-overload declarator after its operator_name shape', async () => {
+    const { extraction } = await extract('.cpp', 'class C {\n  bool operator==(const C& other) const;\n};\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'C', kind: 'class' })])
+  })
+})

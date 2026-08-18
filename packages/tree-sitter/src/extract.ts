@@ -147,21 +147,23 @@ function javaHasModifier(node: SyntaxNode, keyword: string): boolean {
 }
 
 /**
- * Whether a C declaration carries `keyword` (`static`, …) among its own named children. Unlike every
- * other grammar this package extracts from, C wraps a storage-class keyword like `static` in its own
- * named `storage_class_specifier` node rather than leaving it as a bare anonymous token on the
- * declaration itself — `hasKeywordChild` alone would never see it; checking each named child's own text
- * (not just `storage_class_specifier`'s) finds it in one pass. Verified against a real parse, not guessed.
+ * Whether a C/C++ declaration carries `keyword` (`static`, `virtual`, …) among its own named children.
+ * Unlike every other grammar this package extracts from, C/C++ wraps a storage-class keyword like
+ * `static` in its own named `storage_class_specifier` node rather than leaving it as a bare anonymous
+ * token on the declaration itself — `hasKeywordChild` alone would never see it. `virtual`, by contrast,
+ * is already its own bare named node with no wrapper, so checking each named child's own text (not just
+ * `storage_class_specifier`'s) covers both in one pass. Verified against a real parse, not guessed.
  */
 function cHasStorageClassKeyword(node: SyntaxNode, keyword: string): boolean {
   return namedChildren(node).some(child => child.text === keyword)
 }
 
-/** C node types wrapping another `declarator` field one level further down — see {@link declaratorName}. */
+/** C/C++ node types wrapping another `declarator` field one level further down — see {@link declaratorName}. */
 const DECLARATOR_WRAPPER_TYPES: ReadonlySet<string> = new Set([
   'pointer_declarator',
   'init_declarator',
   'array_declarator',
+  'reference_declarator',
 ])
 
 /**
@@ -178,15 +180,18 @@ function parenthesizedDeclaratorInner(node: SyntaxNode): SyntaxNode | null {
 }
 
 /**
- * The terminal name behind a C declaration's `declarator` field, however many wrapper layers deep —
+ * The terminal name behind a C/C++ declaration's `declarator` field, however many wrapper layers deep —
  * `int *make(int a)`'s `function_definition.declarator` is a `pointer_declarator` wrapping a
  * `function_declarator` wrapping the `identifier` "make"; a plain `int g = 1;` global's `declaration.declarator`
  * is an `init_declarator` wrapping the `identifier` "g" directly; `int (*fp)(void);`'s is a
  * `function_declarator` wrapping a `parenthesized_declarator` wrapping a `pointer_declarator` wrapping
  * the `identifier` "fp". Every wrapper in {@link DECLARATOR_WRAPPER_TYPES}, plus `function_declarator`,
  * exposes the same `declarator` field down to the next layer; `parenthesized_declarator` alone is
- * unwrapped through {@link parenthesizedDeclaratorInner} instead — see there. Terminates at an
- * `identifier`/`field_identifier`. A shape this doesn't recognize returns `undefined` rather than guess a
+ * unwrapped through {@link parenthesizedDeclaratorInner} instead — see there. Stops at an
+ * `identifier`/`field_identifier` (the common case), or at a C++ `destructor_name` (`~C`) kept whole
+ * rather than unwrapped to its inner `identifier` — unwrapping would make a destructor's name collide
+ * with its constructor's plain class name. A shape this doesn't recognize (a C++ operator-overload
+ * declarator's `operator_name`, or a function-pointer typedef) returns `undefined` rather than guess a
  * name from it, the same "don't guess" precedent this file already follows for shapes it does not fully
  * resolve.
  * @param node - the declaration node (`function_definition`, `declaration`, `field_declaration`, …).
@@ -200,19 +205,17 @@ function declaratorName(node: SyntaxNode): SyntaxNode | undefined {
   if (soleNamedField(node, 'declarator') === undefined) return undefined
   let current = node.childForFieldName('declarator')
   while (current !== null) {
-    if (current.type === 'identifier' || current.type === 'field_identifier') return current
+    if (current.type === 'identifier' || current.type === 'field_identifier' || current.type === 'destructor_name') return current
     if (current.type === 'parenthesized_declarator') {
       current = parenthesizedDeclaratorInner(current)
       continue
     }
-    // No known plain-C declarator shape reaches this branch — every wrapper this file's C table can
-    // produce is one of `function_declarator`, {@link DECLARATOR_WRAPPER_TYPES}, or
-    // `parenthesized_declarator` (handled above). Kept as a "don't guess" backstop rather than an
-    // exhaustiveness assumption, the same precedent every other unresolved shape in this file follows.
-    /* v8 ignore next */
     if (current.type !== 'function_declarator' && !DECLARATOR_WRAPPER_TYPES.has(current.type)) return undefined
     current = current.childForFieldName('declarator')
   }
+  // Every wrapper type reaching this point (`function_declarator` or a `DECLARATOR_WRAPPER_TYPES`
+  // member) is required by the grammar to carry its own nested `declarator`; the loop always returns
+  // from inside before `current` could become null.
   /* v8 ignore next */
   return undefined
 }
@@ -258,9 +261,13 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
  */
 function calleeName(callee: SyntaxNode): string | undefined {
   if (callee.type === 'identifier') return callee.text
+  // `name` covers C++'s `qualified_identifier` (`ns::func`) — no other call-callee shape in this file's
+  // language tables binds a field called `name` for anything else, verified against a real parse, not
+  // guessed.
   const property = callee.childForFieldName('property')
     ?? callee.childForFieldName('field')
     ?? callee.childForFieldName('attribute')
+    ?? callee.childForFieldName('name')
   if (property !== null && property.type !== 'computed_property_name') return property.text
   return undefined
 }
@@ -488,7 +495,7 @@ function javaImports(node: SyntaxNode): RawImport[] {
 }
 
 /**
- * C `#include` extraction. A system include (`#include <stdio.h>`) parses as a `system_lib_string`
+ * C/C++ `#include` extraction. A system include (`#include <stdio.h>`) parses as a `system_lib_string`
  * token holding the whole `<...>` text; a local include (`#include "local.h"`) wraps a `string_literal`
  * around a `string_content` child holding the bare path. Neither binds an individual symbol this
  * package tracks by name — like a Go whole-package import, it is recorded for completeness with no
@@ -625,13 +632,30 @@ function javaInterfaceHeritage(node: SyntaxNode, sourceKey: string): RawHeritage
 }
 
 /**
- * Dispatch heritage extraction to the language family that owns a captured class or interface node's
- * syntax. Go is absent: its interfaces are satisfied structurally, never declared at the implementing
- * type, so there is no static reference here to extract. C's `struct`/`union` kind is likewise absent:
- * a plain C aggregate has no base-list syntax at all, so it falls through the `kind !== 'class'` check
- * below to an empty result.
- * @param node - the captured `class`- or `interface`-kind definition node.
- * @param kind - the captured definition's seam kind (`'class'` or `'interface'`).
+ * C++ base-list heritage extraction from a `class_specifier`/`struct_specifier`'s `base_class_clause`
+ * child, found by node type — neither binds it to a dedicated field name, matching
+ * `ecmascriptClassHeritage`'s same fallback for plain JavaScript. C++ draws no syntactic distinction
+ * between an extended base class and an implemented interface in this list — the same ambiguity
+ * `pythonClassHeritage` already documents for Python's `argument_list` bases — so every entry reports
+ * `extends`. Verified against a real parse, not guessed.
+ * @param node - the declaring `class_specifier`/`struct_specifier` node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the definition declares.
+ */
+function cppBaseHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const clause = namedChildren(node).find(child => child.type === 'base_class_clause')
+  if (clause === undefined) return []
+  return namedChildren(clause)
+    .filter(isHeritageName)
+    .map(target => ({ sourceKey, targetName: target.text, relation: 'extends' as const }))
+}
+
+/**
+ * Dispatch heritage extraction to the language family that owns a captured class, struct, or interface
+ * node's syntax. Go is absent: its interfaces are satisfied structurally, never declared at the
+ * implementing type, so there is no static reference here to extract.
+ * @param node - the captured `class`-, `struct`-, or `interface`-kind definition node.
+ * @param kind - the captured definition's seam kind (`'class'`, `'struct'`, or `'interface'`).
  * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
  * @param language - the seam language label the file was parsed as.
  * @returns every heritage reference the definition declares.
@@ -640,10 +664,15 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's or Java's `interface_declaration`
   // rule — no other language in LANGUAGE_TABLE produces it.
   if (kind === 'interface') return language === 'java' ? javaInterfaceHeritage(node, sourceKey) : tsInterfaceHeritage(node, sourceKey)
+  // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` rule — a plain
+  // C aggregate has no base-list syntax at all, so `cppBaseHeritage` simply finds nothing to report for
+  // it, and there is no need to further branch on `language` here.
+  if (kind === 'struct') return cppBaseHeritage(node, sourceKey)
   if (kind !== 'class') return []
   if (language === 'python') return pythonClassHeritage(node, sourceKey)
   // `kind === 'class'` from Java's `class_declaration`/`record_declaration` rules — see `javaClassHeritage`.
   if (language === 'java') return javaClassHeritage(node, sourceKey)
+  if (language === 'cpp') return cppBaseHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -702,10 +731,10 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           isExported: isExported(node, spec.language, nameNode.text, commonJsExports),
           isAsync: hasKeywordChild(node, 'async'),
           // Java nests every modifier keyword one level down inside a `modifiers` node rather than as
-          // a direct child of the declaration itself — see `javaHasModifier`. C wraps `static` in a
+          // a direct child of the declaration itself — see `javaHasModifier`. C/C++ wrap `static` in a
           // `storage_class_specifier` — see `cHasStorageClassKeyword`.
           isStatic: spec.language === 'java' ? javaHasModifier(node, 'static')
-            : spec.language === 'c' ? cHasStorageClassKeyword(node, 'static')
+            : spec.language === 'c' || spec.language === 'cpp' ? cHasStorageClassKeyword(node, 'static')
             : hasKeywordChild(node, 'static'),
           decorators: pythonDecorators(node, spec.language),
         })
@@ -782,6 +811,7 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
     case 'java':
       return javaImports(node)
     case 'c':
+    case 'cpp':
       return cIncludeImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
@@ -844,10 +874,12 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
  * keyword at all is not detected, matching this function's existing refusal to infer visibility from
  * anything but an explicit language construct; C's is external vs. internal *linkage* — a top-level
  * function or variable without `static` has external linkage (visible to other translation units), the
- * same real-rule precedent Go's capitalization check follows rather than a guess, reporting `false` for
- * every other kind (`struct`, `enum`, `type_alias`), which has no comparable linkage concept of its own;
- * Python defines no export construct at all, so every Python declaration reports `false` rather than
- * guess one from a naming convention or an `__all__` list the extractor does not read.
+ * same real-rule precedent Go's capitalization check follows rather than a guess; C++ inherits that same
+ * rule for its own free (non-member) functions and variables, but reports `false` for a class/struct
+ * member — a method or field has no comparable linkage concept of its own, and neither does any other
+ * kind (`struct`, `enum`, `type_alias`); Python defines no export construct at all, so every Python
+ * declaration reports `false` rather than guess one from a naming convention or an `__all__` list the
+ * extractor does not read.
  * @param node - the definition node.
  * @param language - the seam language label the file was parsed as.
  * @param name - the declaration's simple name.
@@ -857,10 +889,13 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
 function isExported(node: SyntaxNode, language: string, name: string, commonJsExports: ReadonlySet<string>): boolean {
   if (language === 'go') return /^\p{Lu}/u.test(name)
   if (language === 'java') return javaHasModifier(node, 'public')
-  if (language === 'c') {
+  if (language === 'c' || language === 'cpp') {
+    // A C++ method is a `function_definition` directly inside a class/struct's `field_declaration_list`
+    // — the same node type a free function uses, but with no linkage concept of its own to report.
+    if (node.type === 'function_definition') return node.parent?.type !== 'field_declaration_list' && !cHasStorageClassKeyword(node, 'static')
     // A top-level `declaration` (kind `variable`) is always module-scope — `scopeRestricted` already
     // excludes the function-local case, so no further scope check is needed here.
-    if (node.type === 'function_definition' || node.type === 'declaration') return !cHasStorageClassKeyword(node, 'static')
+    if (node.type === 'declaration') return !cHasStorageClassKeyword(node, 'static')
     return false
   }
   if (language === 'python') return false

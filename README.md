@@ -66,7 +66,7 @@ A plugin can wrap `@colbymchenry/codegraph`'s own CLI instead of reimplementing 
 
 ## Language coverage
 
-The bundled indexer parses **TypeScript, TSX, JavaScript, JSX, Python, Go, Java, and C**. Grammars load lazily — one per language, on first sight of a matching file — so a Go-only workspace never loads a Python grammar.
+The bundled indexer parses **TypeScript, TSX, JavaScript, JSX, Python, Go, Java, C, and C++**. Grammars load lazily — one per language, on first sight of a matching file — so a Go-only workspace never loads a Python grammar.
 
 The **store is format-bound, not language-bound**: a graph built by the `codegraph` CLI over languages this indexer does not parse is still fully queryable. If you need broader indexing coverage today, index with the CLI and query through this plugin.
 
