@@ -339,7 +339,18 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
       syncFailureCount = 0
       pendingPaths.clear()
       if (process.platform === 'darwin' || process.platform === 'win32') {
+        // Started immediately, unlike the per-directory branch below, because the recursive `fs.watch`
+        // call itself must stay synchronous within start() — nothing here should make callers await a
+        // gitignore read just to get a watch installed. `gitignoreRules` starts empty and is filled in
+        // once the read resolves; every event that arrives before then is a startup-window race no
+        // different in kind from the FSEvents kernel-side warm-up delay already documented above, and
+        // resolves in the time to read one small file, not the time a human takes to edit one.
         startRecursive()
+        if (config.respectGitignore) {
+          void loadGitignore(config.root).then(rules => {
+            if (running) gitignoreRules = rules
+          })
+        }
         return
       }
       void (async () => {

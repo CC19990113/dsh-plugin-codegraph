@@ -62,8 +62,12 @@ export const DATABASE_RELATIVE_PATH = '.codegraph/codegraph.db'
 /** Default branded identity this indexer reserves on the seam. */
 export const DEFAULT_INDEXER_ID = 'codegraph-tree-sitter'
 
-/** Directory segments never descended into by default. */
-export const DEFAULT_EXCLUDE = ['node_modules', 'dist', 'build', 'coverage', '.git']
+/**
+ * Directory segments never descended into by default. Includes this package's own `.codegraph`
+ * output — without it, a watcher would treat its own `writeGraph()` as an in-scope change and
+ * rebuild forever.
+ */
+export const DEFAULT_EXCLUDE = ['node_modules', 'dist', 'build', 'coverage', '.git', '.codegraph']
 
 /** Default ceiling on a single file's size before it is skipped. */
 export const DEFAULT_MAX_FILE_BYTES = 2_000_000
@@ -108,8 +112,8 @@ export interface Config {
   concurrency?: number
   /**
    * Watch the workspace for file changes and refresh the index automatically after a successful
-   * `index()` call establishes a baseline (default false). A caller that never sets this sees no
-   * change from before this option existed — indexing stays purely explicit.
+   * `index()` call establishes a baseline (default true). Set `watch: false` to keep indexing purely
+   * explicit instead.
    *
    * Overridden off by default on a WSL2 kernel watching a path mounted in from the Windows host
    * (`/mnt/<drive>/...`), since inotify does not reliably deliver events over that 9P mount — see
@@ -135,7 +139,7 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   maxFiles: z.number().default(DEFAULT_MAX_FILES),
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
-  watch: z.boolean().default(false),
+  watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
 })

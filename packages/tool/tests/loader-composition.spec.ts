@@ -255,6 +255,8 @@ async function bootWithIndexer(projectRoot: string): Promise<Context> {
     "- name: 'dsh-plugin-codegraph-service'",
     "- name: 'dsh-plugin-codegraph-sqlite'",
     "- name: 'dsh-plugin-codegraph-tree-sitter'",
+    '  config:',
+    '    watch: false', // this test exercises Loader composition, not live watching
     "- name: 'dsh-plugin-codegraph-tool'",
     '',
   ].join('\n'))

@@ -9,7 +9,9 @@ import { writeProject } from './fixture.ts'
 async function seam(config?: Record<string, unknown>): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(Codegraph)
-  await ctx.plugin(CodegraphTreeSitter, config)
+  // Tests that don't care about watching stay on the old no-watch behavior; the watch-specific tests
+  // below override this back to `true` via their own explicit config.
+  await ctx.plugin(CodegraphTreeSitter, { watch: false, ...config })
   return ctx
 }
 
@@ -156,9 +158,7 @@ describe('codegraph-tree-sitter plugin', () => {
   })
 
   it('uses the configured indexer id', async () => {
-    const ctx = new Context()
-    await ctx.plugin(Codegraph)
-    await ctx.plugin(CodegraphTreeSitter, { indexerId: 'custom-id' })
+    const ctx = await seam({ indexerId: 'custom-id' })
     expect(DEFAULT_INDEXER_ID).toBe('codegraph-tree-sitter')
     const root = await writeProject({ 'a.ts': 'export function foo() {}\n' })
     await expect(ctx.codegraph.index(root)).resolves.toMatchObject({ filesIndexed: 1 })
@@ -191,6 +191,93 @@ describe('codegraph-tree-sitter plugin', () => {
           // A fresh connection each poll, not one held open across the rebuild: this test is checking
           // that the watcher's rebuild happened at all, not re-exercising GraphPool's own reopen
           // logic (covered in the sqlite package's own tests).
+          const db = new DatabaseSync(`${root}/${DATABASE_RELATIVE_PATH}`, { readOnly: true })
+          try {
+            names = (db.prepare("SELECT name FROM nodes WHERE kind = 'function'").all() as { name: string }[])
+              .map(row => row.name)
+          } finally {
+            db.close()
+          }
+        } catch {
+          // A vanishingly unlikely poll landing exactly mid-rename; just try again next tick.
+        }
+      } while (!names.includes('second') && Date.now() < deadline)
+      expect(names).toEqual(['second'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  }, 15_000)
+
+  it('settles after one edit instead of rebuilding forever from its own .codegraph write', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const ctx = await seam({ watch: true, watchDebounceMs: 100 })
+    await ctx.codegraph.index(root)
+
+    const { writeFile, stat } = await import('node:fs/promises')
+    const dbPath = `${root}/${DATABASE_RELATIVE_PATH}`
+
+    try {
+      // Same FSEvents startup-lag workaround as the test above: re-issue the edit every second until
+      // the rebuild it causes is observed.
+      const observeDeadline = Date.now() + 10_000
+      let lastWriteAt = 0
+      let names: string[] = []
+      do {
+        if (Date.now() - lastWriteAt >= 1_000) {
+          await writeFile(`${root}/a.ts`, 'export function second() {}\n')
+          lastWriteAt = Date.now()
+        }
+        await new Promise(resolve => setTimeout(resolve, 100))
+        try {
+          const db = new DatabaseSync(dbPath, { readOnly: true })
+          try {
+            names = (db.prepare("SELECT name FROM nodes WHERE kind = 'function'").all() as { name: string }[])
+              .map(row => row.name)
+          } finally {
+            db.close()
+          }
+        } catch {
+          // A vanishingly unlikely poll landing exactly mid-rename; just try again next tick.
+        }
+      } while (!names.includes('second') && Date.now() < observeDeadline)
+      expect(names).toEqual(['second'])
+
+      // No further edits from here on. If the watcher treated its own `writeGraph()` write to
+      // `.codegraph/` as an in-scope change, it would keep re-triggering itself roughly every
+      // `watchDebounceMs` forever — so watch for that instead of trusting a single sample.
+      const mtimeAfterEdit = (await stat(dbPath)).mtimeMs
+      await new Promise(resolve => setTimeout(resolve, 800))
+      const mtimeAfterIdle = (await stat(dbPath)).mtimeMs
+      expect(mtimeAfterIdle).toBe(mtimeAfterEdit)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  }, 15_000)
+
+  it('watches by default when `watch` is left unset', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const ctx = new Context()
+    await ctx.plugin(Codegraph)
+    // Bypasses seam()'s `watch: false` override on purpose — this is the one test asserting the
+    // plugin's actual shipped default, not the opt-out most other tests here use to stay isolated.
+    await ctx.plugin(CodegraphTreeSitter, { watchDebounceMs: 200 })
+    await ctx.codegraph.index(root)
+
+    const { writeFile } = await import('node:fs/promises')
+
+    try {
+      const deadline = Date.now() + 10_000
+      // Same FSEvents startup-lag workaround as the test above: re-issue the write every second until
+      // the rebuild is observed, instead of trusting the very first write reached a fully-armed watch.
+      let lastWriteAt = 0
+      let names: string[] = []
+      do {
+        if (Date.now() - lastWriteAt >= 1_000) {
+          await writeFile(`${root}/a.ts`, 'export function second() {}\n')
+          lastWriteAt = Date.now()
+        }
+        await new Promise(resolve => setTimeout(resolve, 100))
+        try {
           const db = new DatabaseSync(`${root}/${DATABASE_RELATIVE_PATH}`, { readOnly: true })
           try {
             names = (db.prepare("SELECT name FROM nodes WHERE kind = 'function'").all() as { name: string }[])

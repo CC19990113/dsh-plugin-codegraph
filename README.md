@@ -56,6 +56,14 @@ That means:
 - **Indexed with this plugin?** The CLI still reads it.
 - There is never a second, disagreeing graph for one workspace.
 
+## Why not just spawn the CLI
+
+A plugin can wrap `@colbymchenry/codegraph`'s own CLI instead of reimplementing the store and indexer: `spawn` it as a subprocess, expose each of its commands as a separate tool, done in an afternoon. This plugin chose not to, for three concrete reasons:
+
+- **No second thing to install.** Shelling out to a CLI means the host needs that binary on `PATH`, at a version the plugin was actually tested against — an extra install step, and an extra way for the two to drift out of sync. `npm install` is the whole story here; the indexer and store run in-process.
+- **Fewer tools, not more.** Every tool's schema rides along in the system prompt on every turn, whether or not it gets called that turn. Ten single-purpose tools (one per CLI subcommand) cost more of that budget, every turn, than the two this plugin exposes — `codegraph`'s `operation` field is a dispatch, not a compromise.
+- **No incremental reparse, on purpose.** "Sync only the changed files" sounds obviously faster, but the rule this graph resolves calls by — one unique name wins workspace-wide — is global: adding a symbol in file A that collides with one already indexed from file B should invalidate edges that point at B, even though B never changed. A parser that reparses only the touched files and patches in their own new edges has no way to notice that. `codegraph_index` always rebuilds the whole graph instead — cheaper to reparse everything than to get that invalidation wrong — leaving incremental reparse as a future optimization only once it's an actual, measured bottleneck, not a default.
+
 ## Language coverage
 
 The bundled indexer parses **TypeScript, TSX, JavaScript, JSX, Python, and Go**. Grammars load lazily — one per language, on first sight of a matching file — so a Go-only workspace never loads a Python grammar.
@@ -96,7 +104,7 @@ The bundle mounts all four plugins in one layer. Retune any of them from the pro
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
-    watch: true
+    watch: true # the default; shown for clarity — set false to keep indexing purely explicit
 
 - id: codegraph-tool
   config:
@@ -120,7 +128,7 @@ The split is not ceremony. The seam carries no source text and performs no files
 
 ## Known limits
 
-- **Watching is opt-in, and self-limiting where it wouldn't help.** Set `watch: true` and a successful `codegraph_index` starts watching that root automatically — a single recursive `fs.watch` on macOS/Windows, one inotify watch per directory on Linux — refreshing the index after a debounced quiet period. It stays off by default, and is overridden back off on a WSL2 kernel watching a path mounted in from the Windows host (`/mnt/<drive>/...`), since inotify doesn't reliably deliver events over that mount; `CODEGRAPH_FORCE_WATCH=1` and `CODEGRAPH_NO_WATCH=1` override that default either way. Whether or not watching is on, `status` still reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly, so a caller can always tell a trustworthy index from a drifted one instead of assuming the best.
+- **Watching is on by default, and self-limiting where it wouldn't help.** A successful `codegraph_index` starts watching that root automatically — a single recursive `fs.watch` on macOS/Windows, one inotify watch per directory on Linux — refreshing the index after a debounced quiet period. Set `watch: false` to keep indexing purely explicit instead. It's overridden back off on a WSL2 kernel watching a path mounted in from the Windows host (`/mnt/<drive>/...`), since inotify doesn't reliably deliver events over that mount; `CODEGRAPH_FORCE_WATCH=1` and `CODEGRAPH_NO_WATCH=1` override that default either way. Whether or not watching is on, `status` still reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly, so a caller can always tell a trustworthy index from a drifted one instead of assuming the best.
 - **Git hooks and worktree detection ship as library functions only** — `installGitHooks`/`uninstallGitHooks` (a `post-checkout`/`post-merge`/`post-commit`/`post-rewrite` hook running a command of your choosing, for environments where live watching isn't available) and `detectWorktree` (whether a root is a linked `git worktree`, and where its main repository lives). Neither is wired into plugin load or exposed as a model-visible tool: `.git/hooks/*` is shared, ambient state this package doesn't own, so installing it is left to a caller's own init script, never automatic.
 - **Exclusion unions the built-in default directories with the project's own `.gitignore`.** Build output that lands outside `node_modules`/`dist`/`build`/`coverage` (a `lib` a TypeScript project compiles to, say) is almost always gitignored too, and indexing it alongside its own source would hand call resolution two same-named declarations of one symbol to pick between arbitrarily. Only a practical subset of gitignore syntax is understood — no `**`, character classes, or per-directory `.gitignore` files. Turn it off with `respectGitignore: false`.
 - **The unresolved tail can be large**, and most of it is not a gap. `unresolved_count` includes every member call and already-imported name a type-free resolver could never have settled; `unresolved_likely_internal_count` is the narrower number that reflects re-exports and dynamic dispatch the graph actually missed.

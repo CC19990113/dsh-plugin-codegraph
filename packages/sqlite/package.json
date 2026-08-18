@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph-sqlite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only SQLite store for the DeepSeek Harness code-graph seam — serves structural queries from the schema-v4 graph at .codegraph/codegraph.db, the same on-disk format the codegraph CLI writes",
   "keywords": [
     "dsh",

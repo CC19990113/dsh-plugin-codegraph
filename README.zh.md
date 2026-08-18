@@ -56,6 +56,14 @@ Agent 改代码之前,总要先搞清楚代码之间的关系。但它手上的�
 - **用本插件建的索引**,CLI 那边照样读得懂。
 - 同一个仓库不会出现两份对不上的图。
 
+## 为什么不干脆去 spawn 那个 CLI
+
+完全可以做另一种插件:把 `@colbymchenry/codegraph` 自己的 CLI 包一层——`spawn` 成子进程,把它的每个命令包成一个工具,一下午就能做完。这个仓库没走这条路,理由很具体:
+
+- **没有第二个要装的东西。** Shell 出去调 CLI,意味着宿主机得装那个二进制、还得是插件真正测过的那个版本——多一步安装,也多一个两边版本漂移不同步的风险点。这里 `npm install` 就是全部——索引器和存储都在进程内跑,不 spawn 任何东西。
+- **工具越少越好,不是越多越好。** 每个工具的 schema 不管这一轮用不用都会跟着塞进 system prompt。十个各管一件事的工具(CLI 每个子命令包一个)每一轮都比这里的两个更吃这份预算——`codegraph` 的 `operation` 字段是分发,不是妥协。
+- **故意不做增量重解析。**"只同步改动的文件"听起来显然更快,但这张图靠"全仓库唯一同名者胜出"这条规则解析调用关系,而这条规则是**全局**的:A 文件新增一个和 B 文件里已索引符号重名的定义,应该让原本指向 B 的边失效,哪怕 B 自己一行没改。只重新解析改动文件、再把它自己的新边贴进去的解析器,没法察觉到这一层。`codegraph_index` 永远全量重建整张图——宁可重新解析所有东西,也不要把这个失效判断做错——增量重解析被留作以后的优化项,等它真的被 profiling 数据证明是瓶颈再做,不是默认要做的事。
+
 ## 支持哪些语言
 
 自带的索引器能解析 **TypeScript、TSX、JavaScript、JSX、Python、Go** 六种。语法是按需加载的,只在第一次遇到对应文件时才载入,所以纯 Go 项目不会白白加载 Python 语法。
@@ -96,7 +104,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
-    watch: true
+    watch: true # 这是默认值,写出来只是为了清楚——想关掉设 false
 
 - id: codegraph-tool
   config:
@@ -120,7 +128,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 
 ## 目前的局限
 
-- **文件监听是可选开启的,该关的地方也会自己关。** 设 `watch: true`,一次成功的 `codegraph_index` 之后就会自动开始监听那个 root——macOS/Windows 用单个递归 `fs.watch`,Linux 每个目录一个 inotify watch——防抖静默期过后自动刷新索引。默认关闭;在 WSL2 内核监听一个从 Windows 主机挂进来的路径(`/mnt/<盘符>/...`)时会被自动改回关闭,因为 inotify 在这种挂载上投递事件不可靠,`CODEGRAPH_FORCE_WATCH=1` 和 `CODEGRAPH_NO_WATCH=1` 可以双向覆盖这个默认值。不管监听开没开,`status` 都会直接 stat 磁盘,报出有多少已索引文件自上次建索引以来改过或被删了,调用方始终能分清"这份索引还准"和"这份索引已经飘了",不用瞎猜。
+- **文件监听默认开启,该关的地方也会自己关。** 一次成功的 `codegraph_index` 之后就会自动开始监听那个 root——macOS/Windows 用单个递归 `fs.watch`,Linux 每个目录一个 inotify watch——防抖静默期过后自动刷新索引。设 `watch: false` 可以关掉,回到纯手动建索引。在 WSL2 内核监听一个从 Windows 主机挂进来的路径(`/mnt/<盘符>/...`)时会被自动改回关闭,因为 inotify 在这种挂载上投递事件不可靠,`CODEGRAPH_FORCE_WATCH=1` 和 `CODEGRAPH_NO_WATCH=1` 可以双向覆盖这个默认值。不管监听开没开,`status` 都会直接 stat 磁盘,报出有多少已索引文件自上次建索引以来改过或被删了,调用方始终能分清"这份索引还准"和"这份索引已经飘了",不用瞎猜。
 - **Git hooks 和 worktree 探测只以库函数形式提供**——`installGitHooks`/`uninstallGitHooks`(装一个 `post-checkout`/`post-merge`/`post-commit`/`post-rewrite` 钩子去跑你指定的命令,适合用不了实时监听的环境)和 `detectWorktree`(判断某个 root 是不是一个 `git worktree`,以及它的主仓库在哪)。两者都没有接进插件加载流程,也没有暴露成模型可见工具:`.git/hooks/*` 是共享的、这个包并不拥有的环境状态,装不装由调用方在自己的初始化脚本里决定,绝不自动执行。
 - **排除规则是内置默认目录和项目自己的 `.gitignore` 取并集。** 编译产物落在 `node_modules`/`dist`/`build`/`coverage` 之外的目录(比如某些 TypeScript 项目编译到 `lib`)几乎总是被 gitignore 的,不排除的话,同一个符号会在源码和编译产物里各存在一份,调用解析只能在两者间随便选一个。这里只实现了 gitignore 语法的一个够用子集,不支持 `**`、字符类,也不认per-目录的 `.gitignore` 文件。想关掉就设 `respectGitignore: false`。
 - **未解析尾巴可能很大,但大部分不是漏边。** `unresolved_count` 把成员调用和已 import 的名字都算进去了,这些本来就不是无类型解析器能 settle 的对象;真正反映再导出、动态派发漏了多少的,是口径更窄的 `unresolved_likely_internal_count`。

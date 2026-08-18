@@ -402,6 +402,45 @@ describe('createWatcher on macOS/Windows (single recursive watch)', () => {
       expect(watches).toHaveLength(0)
     })
   })
+
+  it('eventually respects .gitignore on the recursive watch too, once the initial read resolves', async () => {
+    // The recursive install itself must stay synchronous (every test above depends on that), so the
+    // gitignore read here is fire-and-forget — real fs I/O, which needs the real clock to settle.
+    vi.useRealTimers()
+    const root = await writeProject({ '.gitignore': 'lib/\n', 'src/a.ts': 'export const a = 1\n', 'lib/a.ts': '' })
+    await withPlatform('darwin', async () => {
+      const { primitive, watches } = fakePrimitive()
+      const sync = vi.fn(noopSync)
+      const watcher = createWatcher({
+        root, exclude: [], respectGitignore: true, debounceMs: 50,
+        maxWatchedDirectories: 10, sync,
+      }, primitive)
+      watcher.start()
+      await sleep(100)
+      const rootWatch = watches.find(w => w.path === root)!
+      rootWatch.emit('change', 'lib/a.ts')
+      await sleep(150)
+      expect(sync).not.toHaveBeenCalled()
+    })
+  })
+
+  it('does not apply a gitignore read that resolves after stop() already ran', async () => {
+    vi.useRealTimers()
+    const root = await writeProject({ '.gitignore': 'lib/\n', 'src/a.ts': 'export const a = 1\n' })
+    await withPlatform('darwin', async () => {
+      const { primitive, watches } = fakePrimitive()
+      const watcher = createWatcher({
+        root, exclude: [], respectGitignore: true, debounceMs: 50,
+        maxWatchedDirectories: 10, sync: noopSync,
+      }, primitive)
+      watcher.start()
+      watcher.stop()
+      // The fire-and-forget gitignore read is still in flight; let it resolve and confirm it does not
+      // throw or resurrect state on a watcher that already tore down.
+      await sleep(100)
+      expect(watches[0]!.closed).toBe(true)
+    })
+  })
 })
 
 describe('createWatcher on Linux (per-directory watches)', () => {
