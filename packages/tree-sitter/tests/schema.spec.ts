@@ -15,17 +15,19 @@ const FILE: ExtractedFile = {
   modifiedAt: NOW,
   contentHash: 'deadbeef',
   lineCount: 3,
-  extraction: { definitions: [], calls: [], imports: [] },
+  extraction: { definitions: [], calls: [], imports: [], heritage: [] },
 }
 
 const NODES: GraphNode[] = [
   {
     id: 'file:a.ts', kind: 'file', name: 'a.ts', qualifiedName: 'a.ts', filePath: 'a.ts', language: 'typescript',
-    startLine: 1, endLine: 3, startColumn: 0, endColumn: 0, isExported: false, isAsync: false, isStatic: false, updatedAt: NOW,
+    startLine: 1, endLine: 3, startColumn: 0, endColumn: 0, isExported: false, isAsync: false, isStatic: false,
+    decorators: [], updatedAt: NOW,
   },
   {
     id: 'a.ts:1:0', kind: 'function', name: 'foo', qualifiedName: 'a.ts::foo', filePath: 'a.ts', language: 'typescript',
-    startLine: 1, endLine: 2, startColumn: 0, endColumn: 1, isExported: true, isAsync: true, isStatic: true, updatedAt: NOW,
+    startLine: 1, endLine: 2, startColumn: 0, endColumn: 1, isExported: true, isAsync: true, isStatic: true,
+    decorators: ['staticmethod'], updatedAt: NOW,
   },
 ]
 
@@ -64,6 +66,8 @@ describe('writeGraph', () => {
       { content_hash: string; node_count: number }
     // The file node itself is not counted; only the one declaration node is.
     expect(file).toEqual({ content_hash: 'deadbeef', node_count: 1 })
+    const decorators = db.prepare('SELECT decorators FROM nodes WHERE id = ?').get('a.ts:1:0') as { decorators: string }
+    expect(JSON.parse(decorators.decorators)).toEqual(['staticmethod'])
     db.close()
   })
 

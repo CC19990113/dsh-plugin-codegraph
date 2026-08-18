@@ -9,11 +9,11 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { SCOPE_RESTRICTED_KINDS, SELF_NAME_FIELD } from './languages.ts'
+import { SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
-/** The scope a definition sits in, tracked so {@link SCOPE_RESTRICTED_KINDS} kinds can be skipped once
- * the walk has descended into a function or method body. */
+/** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
+ * skipped once the walk has descended into a function or method body. */
 type ScopeKind = 'module' | 'class' | 'other'
 
 /** One declaration this file introduces, before cross-file resolution. */
@@ -33,6 +33,13 @@ export interface RawDefinition {
   readonly isExported: boolean
   readonly isAsync: boolean
   readonly isStatic: boolean
+  /**
+   * Decorator names applied to this declaration — recorded as descriptive metadata only, never
+   * resolved to an edge (a decorator can be an arbitrary call, e.g. `@app.route('/x')`, with no
+   * reliable single "target" the way an import or a base class has one). Empty for every language but
+   * Python today.
+   */
+  readonly decorators: readonly string[]
 }
 
 /** One call site this file contains, before callee resolution. */
@@ -245,6 +252,55 @@ function ecmascriptImports(node: SyntaxNode): RawImport[] {
 }
 
 /**
+ * One Python `decorator` node's name — a bare `@staticmethod` names its own `identifier`; `@app.route`
+ * names its dotted `attribute` verbatim (not just the rightmost segment, unlike `calleeName`'s call-site
+ * ambiguity — a decorator name is metadata, not something this package resolves, so there is no reason
+ * to throw away the qualifying prefix); `@app.route('/x')` first unwraps the `call` to its `function`
+ * field, then applies the same rule. Any other shape (e.g. a subscript, `@decorators[0]`) is not named —
+ * the "don't guess" precedent this file already follows elsewhere.
+ * @param decorator - the `decorator` node.
+ * @returns the decorator's name, or `undefined` when its expression is not identifier/attribute-shaped.
+ */
+function pythonDecoratorName(decorator: SyntaxNode): string | undefined {
+  let expr = namedChildren(decorator)[0]
+  // A decorator's expression is required by the grammar (`@` alone does not parse); the undefined case
+  // only satisfies `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  if (expr === undefined) return undefined
+  if (expr.type === 'call') {
+    // A call node's `function` field is required by the grammar; the null case only satisfies
+    // `childForFieldName`'s general return type.
+    const callee = expr.childForFieldName('function')
+    /* v8 ignore next */
+    if (callee === null) return undefined
+    expr = callee
+  }
+  if (expr.type === 'identifier' || expr.type === 'attribute') return expr.text
+  return undefined
+}
+
+/**
+ * Every decorator name applied to a Python `function_definition`/`class_definition`, from its enclosing
+ * `decorated_definition`'s `decorator` children (a decorated declaration is wrapped one level up by the
+ * grammar, not marked on the declaration node itself — verified against a real parse, not guessed).
+ * Empty when the language is not Python or the declaration is undecorated.
+ * @param node - the `function_definition`/`class_definition` node.
+ * @param language - the seam language label the file was parsed as.
+ * @returns every decorator name applied, outermost first.
+ */
+function pythonDecorators(node: SyntaxNode, language: string): readonly string[] {
+  if (language !== 'python') return []
+  if (node.parent?.type !== 'decorated_definition') return []
+  const names: string[] = []
+  for (const child of namedChildren(node.parent)) {
+    if (child.type !== 'decorator') continue
+    const name = pythonDecoratorName(child)
+    if (name !== undefined) names.push(name)
+  }
+  return names
+}
+
+/**
  * One `dotted_name` or `aliased_import` child of a Python import statement, resolved to a binding.
  * @param child - the `dotted_name` or `aliased_import` node.
  * @param bindsSymbol - whether this statement binds one module-level name (`from x import y`) rather
@@ -413,17 +469,16 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
   const containerKeys: (string | null)[] = [null]
   const commonJsExports = ECMASCRIPT_LANGUAGES.has(spec.language) ? commonJsExportedNames(tree.rootNode) : EMPTY_NAME_SET
   // Tracks whether the node currently being visited sits at module top level, directly inside a class
-  // body, or inside a function/method body — see `SCOPE_RESTRICTED_KINDS` and
+  // body, or inside a function/method body — see `DefinitionRule.scopeRestricted` and
   // `LanguageSpec.bareFunctionScopeTypes`.
   const scopeKinds: ScopeKind[] = ['module']
 
   function visit(node: SyntaxNode): void {
     const rule = matchDefinition(node, spec.definitions)
-    // A scope-restricted kind (`variable`/`constant`/`field`) matched inside a function/method body is
-    // treated as no match at all — the node still gets visited below, just without becoming a
-    // definition or a container.
+    // A `scopeRestricted` rule matched inside a function/method body is treated as no match at all —
+    // the node still gets visited below, just without becoming a definition or a container.
     const captured = rule !== undefined
-      && (!SCOPE_RESTRICTED_KINDS.has(rule.kind) || scopeKinds[scopeKinds.length - 1] !== 'other')
+      && (rule.scopeRestricted !== true || scopeKinds[scopeKinds.length - 1] !== 'other')
     if (captured) {
       const nameNode = rule.nameField === SELF_NAME_FIELD ? node : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
@@ -446,6 +501,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           isExported: isExported(node, spec.language, nameNode.text, commonJsExports),
           isAsync: hasKeywordChild(node, 'async'),
           isStatic: hasKeywordChild(node, 'static'),
+          decorators: pythonDecorators(node, spec.language),
         })
         heritage.push(...extractHeritage(node, rule.kind, key, spec.language))
         containerNames.push(nameNode.text)
@@ -534,8 +590,8 @@ function isModuleExportsExpression(node: SyntaxNode | null): boolean {
  * — distinguishing a shorthand property from a computed or renamed one adds a second layer of "don't
  * guess" cases this pass does not need yet; only the two unambiguous forms above are recognized.
  * Restricted to true top-level statements, matching this file's existing module/class-only scope
- * restriction for `SCOPE_RESTRICTED_KINDS` — a conditional or function-body export assignment is not a
- * module's public surface in the same unconditional sense.
+ * restriction for a `scopeRestricted` `DefinitionRule` — a conditional or function-body export
+ * assignment is not a module's public surface in the same unconditional sense.
  * @param root - the file's parsed root (`program`) node.
  * @returns every name a CommonJS export assignment binds.
  */

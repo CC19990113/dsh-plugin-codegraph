@@ -43,6 +43,22 @@ export interface DefinitionRule {
    * any parent matches.
    */
   readonly parentType?: string
+  /**
+   * True only for a rule this package extracts solely directly inside a module's top level or a class
+   * body — never inside a function or method body. Unlike a function or class declaration (captured at
+   * any depth, however deeply nested), a function-local variable is not a workspace "symbol" anyone
+   * would search for by name, and capturing it would flood the cross-file name index `resolve.ts` uses
+   * to settle calls — more names means more collisions, which means more calls silently dropped to
+   * `unresolved`. See `resolve.ts`'s "an ambiguous edge is worse than a missing one" rule.
+   *
+   * This is a property of the *rule*, not of {@link kind} in general: JS/TS's `field_definition` rule
+   * (kind `field`) sets this because a class field could in principle sit at any depth a class does —
+   * but Go's struct-field rule, also kind `field`, must not, because its enclosing `type_spec` is itself
+   * never scope-restricted (a Go type declaration is captured at any depth, like a function), so a
+   * scope-restricted struct-field rule could never fire at all. Absent (the common case), always
+   * extracted regardless of depth.
+   */
+  readonly scopeRestricted?: boolean
 }
 
 /**
@@ -52,16 +68,6 @@ export interface DefinitionRule {
  * `nameField` target, *is* the name.
  */
 export const SELF_NAME_FIELD = '@self'
-
-/**
- * Kinds this package only extracts directly inside a module's top level or a class body — never
- * inside a function or method body. Unlike a function or class declaration (captured at any depth,
- * however deeply nested), a function-local variable is not a workspace "symbol" anyone would search
- * for by name, and capturing it would flood the cross-file name index `resolve.ts` uses to settle
- * calls — more names means more collisions, which means more calls silently dropped to `unresolved`.
- * See `resolve.ts`'s "an ambiguous edge is worse than a missing one" rule.
- */
-export const SCOPE_RESTRICTED_KINDS: ReadonlySet<string> = new Set(['variable', 'constant', 'field'])
 
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
@@ -90,7 +96,7 @@ export interface LanguageSpec {
    * definition — a callback (`arr.forEach(function(item) { ... })`) or an IIFE's `function_expression`
    * never matches a {@link DefinitionRule} (only a *named* declaration, or one assigned through a
    * captured `variable_declarator`, does), but a `const`/`var` inside its body is exactly the
-   * function-local binding {@link SCOPE_RESTRICTED_KINDS} exists to exclude. Empty for a language with
+   * function-local binding a `scopeRestricted` {@link DefinitionRule} exists to exclude. Empty for a language with
    * no anonymous-function shape that can contain a statement (Python's `lambda` body is a single
    * expression, never a block).
    */
@@ -114,7 +120,7 @@ const ECMASCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
   // `nameNodeTypes` rejects a destructuring pattern (`const {a, b} = x`) rather than name it after its
   // pattern text — the same "don't guess a name" precedent `pythonBinding`/`ecmascriptImports` already
   // follow for shapes this package does not resolve.
-  { nodeType: 'variable_declarator', kind: 'variable', nameField: 'name', nameNodeTypes: ['identifier'] },
+  { nodeType: 'variable_declarator', kind: 'variable', nameField: 'name', nameNodeTypes: ['identifier'], scopeRestricted: true },
 ]
 
 /** Definitions TypeScript and TSX add on top of {@link ECMASCRIPT_DEFINITIONS}. */
@@ -131,7 +137,7 @@ const TYPESCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
   { nodeType: 'enum_assignment', kind: 'enum_member', nameField: 'name' },
   // The TypeScript/TSX grammars name a class field node differently from plain JavaScript's
   // `field_definition` (see JAVASCRIPT_DEFINITIONS) — verified against a real parse, not guessed.
-  { nodeType: 'public_field_definition', kind: 'field', nameField: 'name' },
+  { nodeType: 'public_field_definition', kind: 'field', nameField: 'name', scopeRestricted: true },
 ]
 
 /** Definitions JavaScript and JSX add on top of {@link ECMASCRIPT_DEFINITIONS}. */
@@ -140,7 +146,7 @@ const JAVASCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
   // The plain JavaScript grammar's class field node names its field-name field `property`, not `name`
   // as TypeScript's `public_field_definition` does (see TYPESCRIPT_DEFINITIONS) — verified against a
   // real parse, not guessed.
-  { nodeType: 'field_definition', kind: 'field', nameField: 'property' },
+  { nodeType: 'field_definition', kind: 'field', nameField: 'property', scopeRestricted: true },
 ]
 
 const ECMASCRIPT_CALL_TYPES = ['call_expression'] as const
@@ -203,7 +209,7 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
       // Module- and class-level `x = ...`; `nameNodeTypes` rejects a tuple assignment (`a, b = 1, 2`,
       // `left` is a `pattern_list`) and an attribute target (`self.x = 1`, `left` is an `attribute`) —
       // verified against a real parse, not guessed.
-      { nodeType: 'assignment', kind: 'variable', nameField: 'left', nameNodeTypes: ['identifier'] },
+      { nodeType: 'assignment', kind: 'variable', nameField: 'left', nameNodeTypes: ['identifier'], scopeRestricted: true },
     ],
     callTypes: ['call'],
     callFunctionField: 'function',
@@ -222,8 +228,18 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
       // tagged with the same `name` field. `matchDefinition`'s single-name-field requirement rejects
       // the multi-name form entirely rather than capture only the first — a partial, silently
       // misleading result would be worse than none, per this file's existing "don't guess" precedent.
-      { nodeType: 'const_spec', kind: 'constant', nameField: 'name' },
-      { nodeType: 'var_spec', kind: 'variable', nameField: 'name' },
+      { nodeType: 'const_spec', kind: 'constant', nameField: 'name', scopeRestricted: true },
+      { nodeType: 'var_spec', kind: 'variable', nameField: 'name', scopeRestricted: true },
+      // A struct field (`field_declaration`) and an interface method signature (`method_spec`) both sit
+      // inside a `type_spec`'s `struct_type`/`interface_type` body — `type_spec` itself (kind
+      // `type_alias`) is not scope-restricted (a Go type can be declared inside a function, like `type
+      // Local struct {...}` in `func f() {...}`), so these must not be either: a scope-restricted rule
+      // here could never fire, since the enclosing `type_spec` always pushes `'other'` for its children
+      // regardless of where it itself sits. An embedded (anonymous) field — `Nested` with no separate
+      // name — has no child bound to the `name` field at all, so `matchDefinition`'s name-arity check
+      // already excludes it without a dedicated rule; verified against a real parse, not guessed.
+      { nodeType: 'field_declaration', kind: 'field', nameField: 'name' },
+      { nodeType: 'method_spec', kind: 'method', nameField: 'name' },
     ],
     callTypes: ['call_expression'],
     callFunctionField: 'function',

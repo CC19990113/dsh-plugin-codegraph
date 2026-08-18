@@ -49,6 +49,9 @@ export interface GraphNode {
   readonly isExported: boolean
   readonly isAsync: boolean
   readonly isStatic: boolean
+  /** Decorator names applied to this declaration — see `RawDefinition.decorators`. Empty for a file
+   * node and for every declaration this package does not currently extract decorators from. */
+  readonly decorators: readonly string[]
   readonly updatedAt: number
 }
 
@@ -245,6 +248,7 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
       isExported: false,
       isAsync: false,
       isStatic: false,
+      decorators: [],
       updatedAt: now,
     }
     nodes.push(fileNode)
@@ -271,6 +275,7 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
         isExported: def.isExported,
         isAsync: def.isAsync,
         isStatic: def.isStatic,
+        decorators: def.decorators,
         updatedAt: now,
       })
     }

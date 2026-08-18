@@ -92,13 +92,14 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
 
       const insertNode = db.prepare(`INSERT INTO nodes
         (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column,
-         end_column, is_exported, is_async, is_static, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         end_column, is_exported, is_async, is_static, decorators, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       for (const node of input.nodes) {
         insertNode.run(
           node.id, node.kind, node.name, node.qualifiedName, node.filePath, node.language,
           node.startLine, node.endLine, node.startColumn, node.endColumn,
-          node.isExported ? 1 : 0, node.isAsync ? 1 : 0, node.isStatic ? 1 : 0, node.updatedAt,
+          node.isExported ? 1 : 0, node.isAsync ? 1 : 0, node.isStatic ? 1 : 0,
+          JSON.stringify(node.decorators), node.updatedAt,
         )
       }
 

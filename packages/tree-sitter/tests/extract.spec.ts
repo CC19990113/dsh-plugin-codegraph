@@ -394,6 +394,31 @@ import os
     const { extraction } = await extract('.py', 'class Foo:\n    pass\n')
     expect(extraction.heritage).toEqual([])
   })
+
+  it('extracts no decorators from an undecorated definition', async () => {
+    const { extraction } = await extract('.py', 'def foo():\n    pass\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'foo', decorators: [] })])
+  })
+
+  it('extracts a bare decorator name', async () => {
+    const { extraction } = await extract('.py', '@staticmethod\ndef foo():\n    pass\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'foo', decorators: ['staticmethod'] })])
+  })
+
+  it('extracts multiple decorators, including a called one named by its dotted attribute', async () => {
+    const { extraction } = await extract('.py', "@app.route('/x')\n@login_required\ndef bar():\n    pass\n")
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'bar', decorators: ['app.route', 'login_required'] })])
+  })
+
+  it('extracts a decorated class\'s decorator too, not just decorated functions', async () => {
+    const { extraction } = await extract('.py', '@dataclass\nclass Foo:\n    pass\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'Foo', decorators: ['dataclass'] })])
+  })
+
+  it('does not name a decorator whose expression is not identifier/attribute-shaped', async () => {
+    const { extraction } = await extract('.py', '@decorators[0]\ndef foo():\n    pass\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'foo', decorators: [] })])
+  })
 })
 
 describe('Go extraction', () => {
@@ -467,5 +492,26 @@ func unexported() {}
       'package main\nvar f, g = func() {\n  var x = 1\n  _ = x\n}, func() {}\n',
     )
     expect(extraction.definitions).toEqual([])
+  })
+
+  it('extracts named struct fields, nested under the struct, excluding an embedded (anonymous) field', async () => {
+    const { extraction } = await extract('.go', 'package main\ntype Point struct {\n\tX int\n\tY int\n\tNested\n}\n')
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('X')).toMatchObject({ kind: 'field', container: ['Point'] })
+    expect(byName.get('Y')).toMatchObject({ kind: 'field', container: ['Point'] })
+    expect(byName.get('Nested')).toBeUndefined()
+  })
+
+  it('extracts an interface method signature, nested under the interface', async () => {
+    const { extraction } = await extract('.go', 'package main\ntype Shape interface {\n\tArea() float64\n}\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Area', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts a struct field even when the struct type itself is declared inside a function body', async () => {
+    const { extraction } = await extract(
+      '.go',
+      'package main\nfunc inner() {\n\ttype Local struct {\n\t\tA int\n\t}\n\t_ = Local{}\n}\n',
+    )
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'A', kind: 'field', container: ['inner', 'Local'] }))
   })
 })
