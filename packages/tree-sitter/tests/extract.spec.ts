@@ -1467,3 +1467,102 @@ top_level_fn()
     expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'require', callerKey: null }))
   })
 })
+
+describe('Zig extraction', () => {
+  const SOURCE = `
+const std = @import("std");
+
+const Point = struct {
+    x: i32,
+    y: i32,
+
+    pub fn init(x: i32, y: i32) Point {
+        return Point{ .x = x, .y = y };
+    }
+
+    fn helper(self: Point) i32 {
+        return self.x + self.y;
+    }
+};
+
+const Color = enum { red, green, blue };
+
+pub fn add(a: i32, b: i32) i32 {
+    const sum = a + b;
+    return sum;
+}
+
+fn callSite() void {
+    add(1, 2);
+    const p = Point.init(1, 2);
+    p.helper();
+}
+
+test "example" {
+    const local_in_test = 1;
+}
+`
+
+  it('extracts a top-level function, exported by a bare pub', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'callSite', kind: 'function', isExported: false }))
+  })
+
+  it('does not capture a function-local constant, nor one inside a test block, as a definition', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    expect(extraction.definitions.find(def => def.name === 'sum')).toBeUndefined()
+    expect(extraction.definitions.find(def => def.name === 'local_in_test')).toBeUndefined()
+  })
+
+  it('extracts a const-bound struct as kind struct, with its fields and methods nested under it', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'struct' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'init', kind: 'method', container: ['Point'], isExported: true }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'helper', kind: 'method', container: ['Point'], isExported: false }),
+    )
+  })
+
+  it('extracts a const-bound enum as kind enum, with its members as enum_member, not field', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'green', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'blue', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a bare call and two dot member calls, distinguishing their trust level', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    const callSite = extraction.definitions.find(def => def.name === 'callSite')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callSite?.key, calleeName: 'add', isMemberCall: false }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callSite?.key, calleeName: 'init', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callSite?.key, calleeName: 'helper', isMemberCall: true }),
+    )
+  })
+
+  it('extracts an @import-bound const as both an import binding and an ordinary constant', async () => {
+    const { extraction } = await extract('.zig', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'std', importedName: '*', specifier: 'std' })
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'std', kind: 'constant', isExported: false }))
+  })
+
+  it('reports a var declaration as kind variable, not constant', async () => {
+    const { extraction } = await extract('.zig', 'var counter: i32 = 0;\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'counter', kind: 'variable' }))
+  })
+
+  it('extracts a union as kind struct, matching the C/C++/Rust precedent', async () => {
+    const { extraction } = await extract('.zig', 'const Slot = union { a: i32, b: f32 };\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Slot', kind: 'struct' }))
+  })
+})

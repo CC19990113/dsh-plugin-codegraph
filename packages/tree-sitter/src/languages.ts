@@ -594,6 +594,65 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // applies to a callback. Verified against a real parse, not guessed.
     bareFunctionScopeTypes: ['block', 'do_block', 'lambda'],
   },
+  {
+    language: 'zig',
+    extensions: ['.zig'],
+    wasmFile: 'tree-sitter-zig.wasm',
+    definitions: [
+      // A method is a `function_declaration` directly inside a struct/enum/union's own body — the same
+      // node type a free function uses (Zig draws no separate node type the way most languages with a
+      // dedicated method/function split do), so each container kind gets its own `parentType`-guarded
+      // rule, tried before the unrestricted `function` rule below falls through to everything else — the
+      // same precedent C++'s method rule follows for its own shared `function_definition` node type.
+      // Verified against a real parse, not guessed.
+      { nodeType: 'function_declaration', kind: 'method', nameField: 'name', parentType: 'struct_declaration' },
+      { nodeType: 'function_declaration', kind: 'method', nameField: 'name', parentType: 'enum_declaration' },
+      { nodeType: 'function_declaration', kind: 'method', nameField: 'name', parentType: 'union_declaration' },
+      { nodeType: 'function_declaration', kind: 'function', nameField: 'name' },
+      // An enum member and a struct/union member share the very same `container_field` node type —
+      // unlike every other language's dedicated bare-enum-member shape, Zig draws no grammar-level
+      // distinction at all, so this is the one `parentType` this file needs to split them back apart;
+      // tried first, before the unrestricted `field` rule below falls through to a struct/union member.
+      // Verified against a real parse, not guessed.
+      { nodeType: 'container_field', kind: 'enum_member', nameField: 'name', parentType: 'enum_declaration' },
+      { nodeType: 'container_field', kind: 'field', nameField: 'name' },
+      // Zig has no dedicated struct/enum/union *statement* the way C/C++/Rust/Java do — a named
+      // container type is always a plain `const`/`var` declaration whose value happens to be a
+      // `struct_declaration`/`enum_declaration`/`union_declaration` literal (`const Point = struct {
+      // ... };`), and this same node type is also how Zig spells an ordinary top-level constant, a
+      // mutable global, *and* a std-library import (`const std = @import("std");`) — verified against a
+      // real parse. `variable_declaration` binds neither its name nor its value to a field at all (both
+      // are purely positional children, unlike every other grammar this package extracts a name from),
+      // so this uses `FIRST_CHILD_NAME_FIELD` for the name; the reported `kind` (`struct`/`enum`/
+      // `constant`/`variable`) is not fixed by this one static rule at all — `DefinitionRule.kind` has no
+      // way to vary by a value's shape the way this needs, so `extractFile` computes it per node via
+      // `zigDeclarationKind` instead (see there), and an `@import(...)` value is additionally recorded as
+      // an import binding via `zigImportBinding`, the same "also captured as an ordinary variable"
+      // precedent CommonJS's `require()` already sets. `scopeRestricted` applies uniformly to every kind
+      // this rule can produce, including a locally-declared struct/enum/union — unlike a Rust `fn` nested
+      // in another `fn` (still captured at any depth, since Rust's grammar gives a nested function its
+      // own distinct, unambiguous node type), Zig's local type declaration shares its node type with an
+      // ordinary local variable with no structural way to split the two without inspecting the value
+      // first, and this file's `scopeRestricted` gate runs before that inspection — a local type
+      // declaration inside a function is rare enough in idiomatic Zig that this file accepts missing it,
+      // the same "prefer a clean uniform rule over a fiddly special case" precedent already guiding this
+      // package's simpler choices elsewhere.
+      { nodeType: 'variable_declaration', kind: 'variable', nameField: FIRST_CHILD_NAME_FIELD, scopeRestricted: true },
+    ],
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    // No dedicated import-statement node type exists — `@import(...)` is an ordinary builtin-function
+    // call bound through the same `variable_declaration` shape the type/constant/variable rule above
+    // already matches (see `zigImportBinding` in extract.ts), not a distinct node type this table could
+    // name here.
+    importTypes: [],
+    // `test "name" { ... }` and `comptime { ... }` are Zig's own top-level block constructs — neither is
+    // itself captured as a definition (matching this file's existing "block, not a symbol" treatment of
+    // an anonymous callback), but a `const`/`var` directly inside either is still block-local, not a
+    // workspace symbol, so both push `'other'` scope for their body the same way a callback's function
+    // value does elsewhere in this file. Verified against a real parse, not guessed.
+    bareFunctionScopeTypes: ['test_declaration', 'comptime_declaration'],
+  },
 ]
 
 /**

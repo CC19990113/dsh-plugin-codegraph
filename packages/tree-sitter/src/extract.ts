@@ -316,6 +316,63 @@ function soleNamedField(node: SyntaxNode, field: string): SyntaxNode | undefined
   return named.length === 1 ? named[0] : undefined
 }
 
+/**
+ * A Zig `variable_declaration`'s initializer value — its last named child, when one is present. Neither
+ * the declared name nor its value binds to a field of its own (both are purely positional), but an
+ * explicit type annotation (`var counter: i32 = 0;`) does bind to a `type` field — when present, the
+ * value always follows it, so comparing the last named child against that field tells an initializer
+ * apart from a type-only forward declaration with no value at all (`extern var x: i32;`, which this
+ * package never sees paired with a captured name in practice, but which `matchDefinition`'s general
+ * "don't guess" precedent still guards against misreading as its own type). Verified against a real
+ * parse, not guessed.
+ */
+function zigDeclarationValue(node: SyntaxNode): SyntaxNode | undefined {
+  const typeNode = node.childForFieldName('type')
+  const last = namedChildren(node).at(-1)
+  if (last === undefined) return undefined
+  if (typeNode !== null && last.equals(typeNode)) return undefined
+  return last
+}
+
+/**
+ * The seam kind a Zig `variable_declaration` actually reports — `DefinitionRule.kind` is fixed per rule,
+ * with no way to vary by a value's shape, so this is computed here instead of in `LANGUAGE_TABLE`. A
+ * `struct_declaration`/`union_declaration` value reports `struct` (matching this file's existing
+ * union→`struct` precedent for C/C++/Rust); an `enum_declaration` value reports `enum`; anything else
+ * falls back to `constant`/`variable` by whether the declaration's own keyword is `const` or `var`.
+ * Verified against a real parse, not guessed.
+ */
+function zigDeclarationKind(node: SyntaxNode): string {
+  const value = zigDeclarationValue(node)
+  if (value?.type === 'struct_declaration' || value?.type === 'union_declaration') return 'struct'
+  if (value?.type === 'enum_declaration') return 'enum'
+  return hasKeywordChild(node, 'var') ? 'variable' : 'constant'
+}
+
+/**
+ * A Zig `const name = @import("...")` recognized as an import binding — the only way Zig brings in
+ * another file or the standard library, spelled as an ordinary builtin-function call bound through the
+ * same `variable_declaration` shape `zigDeclarationKind` already classifies as an unremarkable constant
+ * (both are recorded — the same "also captured as an ordinary variable" precedent CommonJS's
+ * `require()`-bound `const` already sets). Neither `builtin_function` nor its own `arguments` wrapper
+ * binds a field of its own; both are purely positional, verified against a real parse, not guessed.
+ * @param node - the `variable_declaration` node.
+ * @param localName - the declaration's own bound name, already resolved by the caller.
+ * @returns the import binding, or `undefined` when `node`'s value is not an `@import(...)` call.
+ */
+function zigImportBinding(node: SyntaxNode, localName: string): RawImport | undefined {
+  const value = zigDeclarationValue(node)
+  if (value?.type !== 'builtin_function') return undefined
+  const [builtinIdentifier, argsNode] = namedChildren(value)
+  if (builtinIdentifier?.type !== 'builtin_identifier' || builtinIdentifier.text !== '@import') return undefined
+  if (argsNode?.type !== 'arguments') return undefined
+  const args = namedChildren(argsNode)
+  const specifierNode = args.length === 1 ? args[0] : undefined
+  if (specifierNode?.type !== 'string') return undefined
+  const specifier = namedChildren(specifierNode)[0]?.text ?? specifierNode.text.slice(1, -1)
+  return { localName, importedName: '*', specifier }
+}
+
 /** The definition rule matching `node`, or `undefined` when it introduces no declaration. */
 function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[]): DefinitionRule | undefined {
   for (const rule of definitions) {
@@ -376,9 +433,12 @@ function calleeName(callee: SyntaxNode): string | undefined {
   // (`obj.Method()`), and Rust's `scoped_identifier` (`Type::method()`, `std::mem::swap()`) — no other
   // call-callee shape in this file's language tables binds a field called `name` for anything else,
   // and Rust's `field_expression` (`obj.method()`) binds `field` instead, already covered below.
+  // `member` covers Zig's own `field_expression` (`obj.method()`, `Point.init()`) instead — Zig's
+  // grammar names this field `member`, not `field`, the only grammar in this file's tables to do so.
   // Verified against a real parse, not guessed.
   const property = callee.childForFieldName('property')
     ?? callee.childForFieldName('field')
+    ?? callee.childForFieldName('member')
     ?? callee.childForFieldName('attribute')
     ?? callee.childForFieldName('name')
   if (property !== null && property.type !== 'computed_property_name') return property.text
@@ -1141,10 +1201,18 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
       if (nameNode !== null) {
         const key = `${node.startPosition.row}:${node.startPosition.column}`
         const parentKey = containerKeys[containerKeys.length - 1] ?? null
+        // Zig's own `variable_declaration` rule reports one fixed placeholder kind in `LANGUAGE_TABLE`
+        // (no rule can vary `kind` by a value's shape) — the real kind is computed here instead, see
+        // `zigDeclarationKind`. Every other language's rule already carries the right kind.
+        const kind = spec.language === 'zig' && node.type === 'variable_declaration' ? zigDeclarationKind(node) : rule.kind
+        if (spec.language === 'zig' && node.type === 'variable_declaration') {
+          const zigImport = zigImportBinding(node, nameNode.text)
+          if (zigImport !== undefined) imports.push(zigImport)
+        }
         definitions.push({
           key,
           parentKey,
-          kind: rule.kind,
+          kind,
           name: nameNode.text,
           container: [...containerNames],
           startLine: node.startPosition.row + 1,
@@ -1164,14 +1232,14 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
             : hasKeywordChild(node, 'static'),
           decorators: pythonDecorators(node, spec.language),
         })
-        heritage.push(...extractHeritage(node, rule.kind, key, spec.language))
+        heritage.push(...extractHeritage(node, kind, key, spec.language))
         containerNames.push(nameNode.text)
         containerKeys.push(key)
         // A C/C++/C# `struct` is scoped exactly like a `class` for this purpose — a `scopeRestricted`
         // field rule must fire directly inside either body, not just a `class` one. Rust's `mod`
         // (`namespace`) is scoped like the module top level it nests, not like a function body — a
         // `scopeRestricted` `const`/`static` rule must still fire directly inside one.
-        scopeKinds.push(rule.kind === 'class' || rule.kind === 'struct' ? 'class' : rule.kind === 'namespace' ? 'module' : 'other')
+        scopeKinds.push(kind === 'class' || kind === 'struct' ? 'class' : kind === 'namespace' ? 'module' : 'other')
         for (const child of namedChildren(node)) visit(child)
         scopeKinds.pop()
         containerKeys.pop()
@@ -1361,6 +1429,11 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   // module-level export construct at all — matching Python's precedent, every Ruby declaration reports
   // `false` rather than guess one from tracking those calls' effect through the file.
   if (language === 'ruby') return false
+  // Zig marks a declaration exported by an explicit bare `pub` keyword — a plain, always-anonymous
+  // token directly on the declaration itself, the same shape Rust's bare `pub` `visibility_modifier`
+  // has (see `rustIsPublic`), except Zig's grammar gives this token no named-child wrapper of its own
+  // to check `hasKeywordChild` still finds it. Verified against a real parse, not guessed.
+  if (language === 'zig') return hasKeywordChild(node, 'pub')
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum
