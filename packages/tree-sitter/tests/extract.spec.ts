@@ -127,6 +127,22 @@ type Alias = number
     expect(byName.get('#priv')).toMatchObject({ kind: 'field' })
   })
 
+  it('extracts a bare enum member as an enum_member nested under its enum', async () => {
+    const { extraction } = await extract('.ts', 'enum Color { Red, Blue }\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Blue', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a valued enum member (enum_assignment) as an enum_member', async () => {
+    const { extraction } = await extract('.ts', 'enum Color { Green = 5 }\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Green', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('does not mistake an ordinary property_identifier (e.g. a method name) for an enum member', async () => {
+    const { extraction } = await extract('.ts', 'class Foo {\n  bar() {}\n}\n')
+    expect(extraction.definitions).not.toContainEqual(expect.objectContaining({ kind: 'enum_member' }))
+  })
+
   it('does not extract a computed callee as a call site', async () => {
     const { extraction } = await extract('.ts', 'obj[key](x)\n')
     expect(extraction.calls).toEqual([])
@@ -170,6 +186,38 @@ describe('CommonJS require() import detection', () => {
     const { extraction } = await extract('.js', "const a = require(modulePath)\n")
     expect(extraction.imports).toEqual([])
     expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'require' }))
+  })
+})
+
+describe('CommonJS module.exports/exports export detection', () => {
+  it('marks a declaration exported via module.exports.NAME = ...', async () => {
+    const { extraction } = await extract('.js', 'function foo() {}\nmodule.exports.foo = foo\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'foo', isExported: true }))
+  })
+
+  it('marks a declaration exported via exports.NAME = ...', async () => {
+    const { extraction } = await extract('.js', 'function bar() {}\nexports.bar = bar\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'bar', isExported: true }))
+  })
+
+  it('marks the single declaration a whole-module `module.exports = NAME` reassignment names', async () => {
+    const { extraction } = await extract('.js', 'function whole() {}\nmodule.exports = whole\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'whole', isExported: true }))
+  })
+
+  it('does not export a plain top-level reassignment (left side is not a member expression)', async () => {
+    const { extraction } = await extract('.js', 'let x = 1\nx = 2\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', isExported: false }))
+  })
+
+  it('does not export anything from an unrelated member assignment', async () => {
+    const { extraction } = await extract('.js', 'function thing() {}\nsomeOther.thing = 1\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'thing', isExported: false }))
+  })
+
+  it('does not export anything from module.exports = <non-identifier>', async () => {
+    const { extraction } = await extract('.js', 'function foo() {}\nmodule.exports = 42\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'foo', isExported: false }))
   })
 })
 

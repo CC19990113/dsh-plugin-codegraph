@@ -36,7 +36,22 @@ export interface DefinitionRule {
    * node this package does not attempt to name. Absent, any node type in {@link nameField} matches.
    */
   readonly nameNodeTypes?: readonly string[]
+  /**
+   * Present only when this rule must not match the same node type wherever it appears — a bare
+   * `property_identifier` names an enum member only directly inside an `enum_body`; the same node
+   * type also names a method, a class field, and a member-expression property everywhere else. Absent,
+   * any parent matches.
+   */
+  readonly parentType?: string
 }
+
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose matched node has no separate
+ * name-bearing child — a bare enum member (`enum_body`'s `Red` in `enum Color { Red }`) parses as a
+ * lone `property_identifier` token with no fields of its own; the node itself, unlike every other
+ * `nameField` target, *is* the name.
+ */
+export const SELF_NAME_FIELD = '@self'
 
 /**
  * Kinds this package only extracts directly inside a module's top level or a class body — never
@@ -108,6 +123,12 @@ const TYPESCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
   { nodeType: 'interface_declaration', kind: 'interface', nameField: 'name' },
   { nodeType: 'type_alias_declaration', kind: 'type_alias', nameField: 'name' },
   { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+  // `enum Color { Red, Green = 5 }` — a bare member (`Red`) parses as a lone `property_identifier`
+  // naming itself, tagged with `enum_body`'s own repeated `name` field; a valued member (`Green = 5`)
+  // wraps its own `property_identifier` in a distinct `enum_assignment` node instead. Both verified
+  // against a real parse, not guessed.
+  { nodeType: 'property_identifier', kind: 'enum_member', nameField: SELF_NAME_FIELD, parentType: 'enum_body' },
+  { nodeType: 'enum_assignment', kind: 'enum_member', nameField: 'name' },
   // The TypeScript/TSX grammars name a class field node differently from plain JavaScript's
   // `field_definition` (see JAVASCRIPT_DEFINITIONS) — verified against a real parse, not guessed.
   { nodeType: 'public_field_definition', kind: 'field', nameField: 'name' },

@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { SCOPE_RESTRICTED_KINDS } from './languages.ts'
+import { SCOPE_RESTRICTED_KINDS, SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so {@link SCOPE_RESTRICTED_KINDS} kinds can be skipped once
@@ -118,11 +118,12 @@ function soleNamedField(node: SyntaxNode, field: string): SyntaxNode | undefined
 function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[]): DefinitionRule | undefined {
   for (const rule of definitions) {
     if (node.type !== rule.nodeType) continue
+    if (rule.parentType !== undefined && node.parent?.type !== rule.parentType) continue
     if (rule.value !== undefined) {
       const value = node.childForFieldName(rule.value.field)
       if (value === null || !rule.value.types.includes(value.type)) continue
     }
-    const nameNode = soleNamedField(node, rule.nameField)
+    const nameNode = rule.nameField === SELF_NAME_FIELD ? node : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
     return rule
@@ -148,8 +149,11 @@ function calleeName(callee: SyntaxNode): string | undefined {
   return undefined
 }
 
-/** Seam language labels using the ECMAScript-family grammars, for CommonJS `require` detection. */
+/** Seam language labels using the ECMAScript-family grammars, for CommonJS `require`/export detection. */
 const ECMASCRIPT_LANGUAGES: ReadonlySet<string> = new Set(['typescript', 'tsx', 'javascript', 'jsx'])
+
+/** Shared empty set for a non-ECMAScript file, which never has CommonJS export assignments to find. */
+const EMPTY_NAME_SET: ReadonlySet<string> = new Set()
 
 /**
  * A CommonJS `require('./foo')` call recognized as an import binding: `const foo = require('./foo')`
@@ -305,6 +309,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
   const imports: RawImport[] = []
   const containerNames: string[] = []
   const containerKeys: (string | null)[] = [null]
+  const commonJsExports = ECMASCRIPT_LANGUAGES.has(spec.language) ? commonJsExportedNames(tree.rootNode) : EMPTY_NAME_SET
   // Tracks whether the node currently being visited sits at module top level, directly inside a class
   // body, or inside a function/method body — see `SCOPE_RESTRICTED_KINDS` and
   // `LanguageSpec.bareFunctionScopeTypes`.
@@ -318,7 +323,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     const captured = rule !== undefined
       && (!SCOPE_RESTRICTED_KINDS.has(rule.kind) || scopeKinds[scopeKinds.length - 1] !== 'other')
     if (captured) {
-      const nameNode = node.childForFieldName(rule.nameField)
+      const nameNode = rule.nameField === SELF_NAME_FIELD ? node : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
       // anonymous default export) parses as a different node type this rule never matches.
@@ -336,7 +341,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           endLine: node.endPosition.row + 1,
           startColumn: node.startPosition.column,
           endColumn: node.endPosition.column,
-          isExported: isExported(node, spec.language, nameNode.text),
+          isExported: isExported(node, spec.language, nameNode.text, commonJsExports),
           isAsync: hasKeywordChild(node, 'async'),
           isStatic: hasKeywordChild(node, 'static'),
         })
@@ -411,20 +416,69 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
   }
 }
 
+/** Whether `node` is the two-level `module.exports` member expression itself (not `module.exports.x`). */
+function isModuleExportsExpression(node: SyntaxNode | null): boolean {
+  return node?.type === 'member_expression'
+    && node.childForFieldName('object')?.type === 'identifier'
+    && node.childForFieldName('object')?.text === 'module'
+    && node.childForFieldName('property')?.text === 'exports'
+}
+
+/**
+ * Every name a top-level CommonJS export assignment marks exported: `module.exports.NAME = ...` /
+ * `exports.NAME = ...` (named export), and `module.exports = NAME` (whole-module reassignment to a
+ * single local declaration). `module.exports = { a, b }` (object-literal reassignment) is not handled
+ * — distinguishing a shorthand property from a computed or renamed one adds a second layer of "don't
+ * guess" cases this pass does not need yet; only the two unambiguous forms above are recognized.
+ * Restricted to true top-level statements, matching this file's existing module/class-only scope
+ * restriction for `SCOPE_RESTRICTED_KINDS` — a conditional or function-body export assignment is not a
+ * module's public surface in the same unconditional sense.
+ * @param root - the file's parsed root (`program`) node.
+ * @returns every name a CommonJS export assignment binds.
+ */
+function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const statement of namedChildren(root)) {
+    if (statement.type !== 'expression_statement') continue
+    const expr = namedChildren(statement)[0]
+    if (expr?.type !== 'assignment_expression') continue
+    const left = expr.childForFieldName('left')
+    if (left?.type !== 'member_expression') continue
+    const object = left.childForFieldName('object')
+    const property = left.childForFieldName('property')
+    if (isModuleExportsExpression(object) || (object?.type === 'identifier' && object.text === 'exports')) {
+      // `property` is required by the grammar's `member_expression` rule; the null case only
+      // satisfies `childForFieldName`'s general return type.
+      /* v8 ignore next */
+      if (property !== null) names.add(property.text)
+      continue
+    }
+    if (isModuleExportsExpression(left)) {
+      const right = expr.childForFieldName('right')
+      if (right?.type === 'identifier') names.add(right.text)
+    }
+  }
+  return names
+}
+
 /**
  * Whether a declaration is exported from its module, by the export construct its own language
- * defines: ECMAScript wraps an exported statement in `export_statement`; Go's spec defines an
- * exported identifier as one starting with an uppercase letter, with no separate keyword; Python
- * defines no export construct at all, so every Python declaration reports `false` rather than guess
- * one from a naming convention or an `__all__` list the extractor does not read.
+ * defines: ECMAScript wraps an exported statement in `export_statement`, or — for CommonJS code, still
+ * common outside pure-ESM projects — is named by a top-level `module.exports`/`exports` assignment (see
+ * {@link commonJsExportedNames}); Go's spec defines an exported identifier as one starting with an
+ * uppercase letter, with no separate keyword; Python defines no export construct at all, so every
+ * Python declaration reports `false` rather than guess one from a naming convention or an `__all__`
+ * list the extractor does not read.
  * @param node - the definition node.
  * @param language - the seam language label the file was parsed as.
  * @param name - the declaration's simple name.
+ * @param commonJsExports - every name a CommonJS export assignment in this file binds.
  * @returns whether the language's own export rule marks this declaration exported.
  */
-function isExported(node: SyntaxNode, language: string, name: string): boolean {
+function isExported(node: SyntaxNode, language: string, name: string, commonJsExports: ReadonlySet<string>): boolean {
   if (language === 'go') return /^\p{Lu}/u.test(name)
   if (language === 'python') return false
+  if (commonJsExports.has(name)) return true
   let current: SyntaxNode | null = node.parent
   while (current !== null) {
     if (current.type === 'export_statement') return true
