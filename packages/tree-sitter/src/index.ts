@@ -45,6 +45,10 @@ export { createWatcher, nodeWatch } from './watcher.ts'
 export type { DegradeReason, WatchConfig, WatchHandle, WatchPrimitive, Watcher } from './watcher.ts'
 export { decideWatch, readProcVersion } from './watch-policy.ts'
 export type { WatchDecision, WatchPolicyInput } from './watch-policy.ts'
+export { detectWorktree, execGit } from './worktree.ts'
+export type { GitExec, WorktreeInfo } from './worktree.ts'
+export { HOOK_MARKER_BEGIN, HOOK_MARKER_END, installGitHooks, uninstallGitHooks } from './git-hooks.ts'
+export type { GitHooksOptions } from './git-hooks.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'codegraph-tree-sitter'

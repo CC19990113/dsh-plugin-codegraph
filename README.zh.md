@@ -96,6 +96,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
+    watch: true
 
 - id: codegraph-tool
   config:
@@ -119,7 +120,8 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 
 ## 目前的局限
 
-- **索引会不会过时现在看得见了,但还是不会自动更新。** 它本身不监视文件变化,不过 `status` 会直接 stat 磁盘,报出有多少已索引文件自上次建索引以来改过或被删了。调用方能分清"这份索引还准"和"这份索引已经飘了",不用瞎猜。要刷新就跑 `codegraph_index`。
+- **文件监听是可选开启的,该关的地方也会自己关。** 设 `watch: true`,一次成功的 `codegraph_index` 之后就会自动开始监听那个 root——macOS/Windows 用单个递归 `fs.watch`,Linux 每个目录一个 inotify watch——防抖静默期过后自动刷新索引。默认关闭;在 WSL2 内核监听一个从 Windows 主机挂进来的路径(`/mnt/<盘符>/...`)时会被自动改回关闭,因为 inotify 在这种挂载上投递事件不可靠,`CODEGRAPH_FORCE_WATCH=1` 和 `CODEGRAPH_NO_WATCH=1` 可以双向覆盖这个默认值。不管监听开没开,`status` 都会直接 stat 磁盘,报出有多少已索引文件自上次建索引以来改过或被删了,调用方始终能分清"这份索引还准"和"这份索引已经飘了",不用瞎猜。
+- **Git hooks 和 worktree 探测只以库函数形式提供**——`installGitHooks`/`uninstallGitHooks`(装一个 `post-checkout`/`post-merge`/`post-commit`/`post-rewrite` 钩子去跑你指定的命令,适合用不了实时监听的环境)和 `detectWorktree`(判断某个 root 是不是一个 `git worktree`,以及它的主仓库在哪)。两者都没有接进插件加载流程,也没有暴露成模型可见工具:`.git/hooks/*` 是共享的、这个包并不拥有的环境状态,装不装由调用方在自己的初始化脚本里决定,绝不自动执行。
 - **排除规则是内置默认目录和项目自己的 `.gitignore` 取并集。** 编译产物落在 `node_modules`/`dist`/`build`/`coverage` 之外的目录(比如某些 TypeScript 项目编译到 `lib`)几乎总是被 gitignore 的,不排除的话,同一个符号会在源码和编译产物里各存在一份,调用解析只能在两者间随便选一个。这里只实现了 gitignore 语法的一个够用子集,不支持 `**`、字符类,也不认per-目录的 `.gitignore` 文件。想关掉就设 `respectGitignore: false`。
 - **未解析尾巴可能很大,但大部分不是漏边。** `unresolved_count` 把成员调用和已 import 的名字都算进去了,这些本来就不是无类型解析器能 settle 的对象;真正反映再导出、动态派发漏了多少的,是口径更窄的 `unresolved_likely_internal_count`。
 - **`context` 是按词匹配的**,把任务描述拆成标识符再找。所以一句没提到任何符号名的任务,匹配质量会很差,这里没有语义检索。

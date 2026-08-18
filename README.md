@@ -96,6 +96,7 @@ The bundle mounts all four plugins in one layer. Retune any of them from the pro
     languages: ['typescript', 'tsx']
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
+    watch: true
 
 - id: codegraph-tool
   config:
@@ -119,7 +120,8 @@ The split is not ceremony. The seam carries no source text and performs no files
 
 ## Known limits
 
-- **Freshness is now visible, though still not automatic.** The index does not watch for changes by itself, but `status` reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly. A caller can tell a trustworthy index from a drifted one instead of assuming the best; refresh with `codegraph_index`.
+- **Watching is opt-in, and self-limiting where it wouldn't help.** Set `watch: true` and a successful `codegraph_index` starts watching that root automatically — a single recursive `fs.watch` on macOS/Windows, one inotify watch per directory on Linux — refreshing the index after a debounced quiet period. It stays off by default, and is overridden back off on a WSL2 kernel watching a path mounted in from the Windows host (`/mnt/<drive>/...`), since inotify doesn't reliably deliver events over that mount; `CODEGRAPH_FORCE_WATCH=1` and `CODEGRAPH_NO_WATCH=1` override that default either way. Whether or not watching is on, `status` still reports how many indexed files have gone stale — modified or removed since the last run — found by statting the filesystem directly, so a caller can always tell a trustworthy index from a drifted one instead of assuming the best.
+- **Git hooks and worktree detection ship as library functions only** — `installGitHooks`/`uninstallGitHooks` (a `post-checkout`/`post-merge`/`post-commit`/`post-rewrite` hook running a command of your choosing, for environments where live watching isn't available) and `detectWorktree` (whether a root is a linked `git worktree`, and where its main repository lives). Neither is wired into plugin load or exposed as a model-visible tool: `.git/hooks/*` is shared, ambient state this package doesn't own, so installing it is left to a caller's own init script, never automatic.
 - **Exclusion unions the built-in default directories with the project's own `.gitignore`.** Build output that lands outside `node_modules`/`dist`/`build`/`coverage` (a `lib` a TypeScript project compiles to, say) is almost always gitignored too, and indexing it alongside its own source would hand call resolution two same-named declarations of one symbol to pick between arbitrarily. Only a practical subset of gitignore syntax is understood — no `**`, character classes, or per-directory `.gitignore` files. Turn it off with `respectGitignore: false`.
 - **The unresolved tail can be large**, and most of it is not a gap. `unresolved_count` includes every member call and already-imported name a type-free resolver could never have settled; `unresolved_likely_internal_count` is the narrower number that reflects re-exports and dynamic dispatch the graph actually missed.
 - **`context` ranks by identifier-term overlap**, so a task phrased without naming any symbol ranks poorly. There is no semantic matching.
