@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
+import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -243,6 +243,57 @@ function firstChildName(node: SyntaxNode): SyntaxNode | undefined {
 }
 
 /**
+ * PHP's bare `name` node — either directly (`const_element`'s first named child) or one level deeper
+ * inside a `variable_name` wrapper (`property_element`'s and a closure-binding `assignment_expression`'s
+ * first named child) — see {@link PHP_ELEMENT_NAME_FIELD}. Rejects anything else (a destructuring
+ * `list_literal` target, a member/subscript assignment target) rather than name a declaration after a
+ * shape this package does not attempt to resolve, the same "don't guess" precedent every other
+ * unresolved shape in this file already follows. Verified against a real parse, not guessed.
+ */
+function phpElementName(node: SyntaxNode): SyntaxNode | undefined {
+  const first = namedChildren(node)[0]
+  // Every node this is called on (`const_element`, `property_element`, a value-guarded
+  // `assignment_expression`) is required by the grammar to carry at least one named child; the
+  // undefined case only satisfies `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  if (first === undefined) return undefined
+  if (first.type === 'name') return first
+  if (first.type !== 'variable_name') return undefined
+  const inner = namedChildren(first)[0]
+  // The grammar's `variable_name` rule always wraps exactly one bare `name`; the fallback only satisfies
+  // `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  return inner?.type === 'name' ? inner : undefined
+}
+
+/**
+ * PHP's own modifier host for `keyword`: a class/method/interface/trait/enum declaration carries its
+ * `visibility_modifier`/`static_modifier` directly, but a captured `const_element`/`property_element`
+ * carries neither — like Java's `variable_declarator` (see {@link javaModifiersNode}), its modifiers sit
+ * one level up, on the enclosing `const_declaration`/`property_declaration` this falls back to.
+ */
+function phpModifierHost(node: SyntaxNode): SyntaxNode {
+  // Every `const_element`/`property_element` the walk visits sits inside a `const_declaration`/
+  // `property_declaration`, never at the tree's root; the `?? node` fallback only satisfies `.parent`'s
+  // general `SyntaxNode | null` type.
+  /* v8 ignore next */
+  if (node.type === 'const_element' || node.type === 'property_element') return node.parent ?? node
+  return node
+}
+
+/** Whether a PHP declaration carries an explicit `public` (or other) `visibility_modifier` — see
+ * {@link phpModifierHost}. Verified against a real parse, not guessed. */
+function phpHasVisibility(node: SyntaxNode, keyword: string): boolean {
+  return namedChildren(phpModifierHost(node)).some(child => child.type === 'visibility_modifier' && child.text === keyword)
+}
+
+/** Whether a PHP declaration carries a `static_modifier` — see {@link phpModifierHost}. Verified against
+ * a real parse, not guessed. */
+function phpHasStaticModifier(node: SyntaxNode): boolean {
+  return namedChildren(phpModifierHost(node)).some(child => child.type === 'static_modifier')
+}
+
+/**
  * The lone named child bound to `field`, or `undefined` when zero or more than one is bound. A field
  * ordinarily binds exactly one child (a declaration's name); Go's `const a, b = 1, 2` is the exception
  * — both identifiers share the `name` field on one `const_spec` node — and this package extracts a
@@ -266,6 +317,7 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
     const nameNode = rule.nameField === SELF_NAME_FIELD ? node
       : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node)
       : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node)
+      : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node)
       : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
@@ -285,6 +337,21 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
  */
 function calleeName(callee: SyntaxNode): string | undefined {
   if (callee.type === 'identifier') return callee.text
+  // PHP's bare-name node type — the resolved `callFunctionFieldByType` field value for all three of its
+  // call shapes (`function_call_expression`'s simple case, `member_call_expression`'s and
+  // `scoped_call_expression`'s method name) is this node type directly, never wrapped in a further
+  // field. Verified against a real parse, not guessed.
+  if (callee.type === 'name') return callee.text
+  // PHP's namespaced free-function call (`Foo\bar()`) — `qualified_name` binds neither its namespace
+  // prefix nor its final segment to a field of its own (unlike C++'s `qualified_identifier`, below); the
+  // final segment is always its last named child. Verified against a real parse, not guessed.
+  if (callee.type === 'qualified_name') {
+    const last = namedChildren(callee).at(-1)
+    // The grammar's `qualified_name` rule always wraps at least one final segment of this type; the
+    // fallback only satisfies `Array.prototype.at`'s general return type.
+    /* v8 ignore next */
+    return last?.type === 'name' ? last.text : undefined
+  }
   // `name` covers C++'s `qualified_identifier` (`ns::func`) and C#'s `member_access_expression`
   // (`obj.Method()`) — no other call-callee shape in this file's language tables binds a field called
   // `name` for anything else, verified against a real parse, not guessed.
@@ -565,11 +632,83 @@ function csharpUsingImports(node: SyntaxNode): RawImport[] {
   return [{ localName, importedName: '*', specifier }]
 }
 
+/**
+ * One `namespace_use_clause`'s bound name and optional alias — `use App\Contracts\Cacheable;` binds a
+ * `qualified_name` (its final segment is always the last named child, with no field of its own, matching
+ * `calleeName`'s same `qualified_name` handling); a single-segment `use Foo;` binds a bare `name`
+ * directly instead. An `as` rename wraps a `namespace_aliasing_clause` sibling. Verified against a real
+ * parse, not guessed.
+ * @param clause - the `namespace_use_clause` node.
+ * @returns the imported name and its local binding, or `undefined` when the clause's target is a shape
+ * this package does not name (never observed in practice, but `qualified_name`'s grammar rule allows no
+ * other target).
+ */
+function phpUseClauseBinding(clause: SyntaxNode): { readonly importedName: string, readonly localName: string, readonly specifier: string } {
+  // `namespace_use_clause` always wraps exactly one of these two node types per the grammar; the
+  // fallback (`clause` itself) only satisfies `Array.prototype.find`'s general return type.
+  /* v8 ignore next */
+  const target = namedChildren(clause).find(child => child.type === 'qualified_name' || child.type === 'name') ?? clause
+  const specifier = target.text
+  // The grammar's `qualified_name` rule always wraps at least one final segment; the fallback only
+  // satisfies `Array.prototype.at`'s general return type.
+  /* v8 ignore next */
+  const importedName = target.type === 'qualified_name' ? (namedChildren(target).at(-1)?.text ?? specifier) : specifier
+  const alias = namedChildren(clause).find(child => child.type === 'namespace_aliasing_clause')
+  // The grammar's `namespace_aliasing_clause` rule always wraps exactly one `name`; the fallback only
+  // satisfies `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  const localName = alias === undefined ? importedName : (namedChildren(alias)[0]?.text ?? importedName)
+  return { importedName, localName, specifier }
+}
+
+/**
+ * PHP `namespace_use_declaration` extraction, covering both its shapes: a comma-separated list of
+ * `namespace_use_clause` siblings (`use A\B, C\D as E;`), and a group `use App\{Foo, Bar as Baz};` — the
+ * group form's shared prefix sits in a bare `namespace_name` sibling of the `namespace_use_group`, and
+ * each `namespace_use_group_clause` inside it repeats the same name-plus-optional-alias shape as a plain
+ * clause. The `function`/`const` keyword a `use function …`/`use const …` statement adds is an anonymous
+ * token the grammar tacks onto the same shape either way, so no separate handling is needed. Verified
+ * against a real parse, not guessed.
+ * @param node - the `namespace_use_declaration` node.
+ * @returns every import binding this statement introduces.
+ */
+function phpImports(node: SyntaxNode): RawImport[] {
+  const group = namedChildren(node).find(child => child.type === 'namespace_use_group')
+  if (group !== undefined) {
+    // The grammar always pairs a `namespace_use_group` with a preceding `namespace_name` prefix; the
+    // undefined case only satisfies `Array.prototype.find`'s general return type.
+    const prefix = namedChildren(node).find(child => child.type === 'namespace_name')
+    /* v8 ignore next */
+    const prefixText = prefix?.text ?? ''
+    return namedChildren(group)
+      .filter(child => child.type === 'namespace_use_group_clause')
+      .map((clause) => {
+        // A group clause's own name is always a bare `namespace_name` (itself wrapping a single `name`
+        // token, even for a single-segment clause) — never a `qualified_name`, since the shared prefix
+        // already carries every segment before it. Verified against a real parse, not guessed.
+        const nameNode = namedChildren(clause).find(child => child.type === 'namespace_name')
+        // The grammar always binds one per `namespace_use_group_clause`; the undefined case only
+        // satisfies `Array.prototype.find`'s general return type.
+        /* v8 ignore next */
+        const segment = nameNode?.text ?? ''
+        const alias = namedChildren(clause).find(child => child.type === 'namespace_aliasing_clause')
+        // The grammar's `namespace_aliasing_clause` rule always wraps exactly one `name`; the fallback
+        // only satisfies `namedChildren`'s general array-access return type.
+        /* v8 ignore next */
+        const localName = alias === undefined ? segment : (namedChildren(alias)[0]?.text ?? segment)
+        return { localName, importedName: segment, specifier: `${prefixText}\\${segment}` }
+      })
+  }
+  return namedChildren(node)
+    .filter(child => child.type === 'namespace_use_clause')
+    .map(clause => phpUseClauseBinding(clause))
+}
+
 /** Whether `node` is a bare name this package resolves heritage references against — a member
  * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
  * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
 function isHeritageName(node: SyntaxNode): boolean {
-  return node.type === 'identifier' || node.type === 'type_identifier'
+  return node.type === 'identifier' || node.type === 'type_identifier' || node.type === 'name'
 }
 
 /**
@@ -706,6 +845,39 @@ function baseListHeritage(node: SyntaxNode, sourceKey: string, clauseType: strin
 }
 
 /**
+ * PHP `class_declaration`/`interface_declaration`/`enum_declaration` heritage extraction. A class's
+ * single `extends` base sits in its own `base_clause` (PHP classes have no multiple inheritance); an
+ * interface's possibly-multiple `extends` bases reuse that same `base_clause` node type; a class's or
+ * enum's `implements` list sits in a `class_interface_clause` — neither clause binds to a field of its
+ * own, found by node type instead, matching `ecmascriptClassHeritage`'s same fallback for plain
+ * JavaScript. One function covers all three kinds since neither clause is exclusive to one of them (an
+ * interface never has a `class_interface_clause`, an enum never has a `base_clause`), so there is no
+ * ambiguity in reporting the relation `base_clause` → `extends` and `class_interface_clause` →
+ * `implements` regardless of which kind is declaring. A trait's `use` of another trait is not
+ * `extends`/`implements` shaped and is not reported here — see `extractHeritage`'s call site. Verified
+ * against a real parse, not guessed.
+ * @param node - the declaring class/interface/enum node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the definition declares.
+ */
+function phpHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const refs: RawHeritageRef[] = []
+  const base = namedChildren(node).find(child => child.type === 'base_clause')
+  if (base !== undefined) {
+    for (const target of namedChildren(base)) {
+      if (isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'extends' })
+    }
+  }
+  const iface = namedChildren(node).find(child => child.type === 'class_interface_clause')
+  if (iface !== undefined) {
+    for (const target of namedChildren(iface)) {
+      if (isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'implements' })
+    }
+  }
+  return refs
+}
+
+/**
  * Dispatch heritage extraction to the language family that owns a captured class, struct, or interface
  * node's syntax. Go is absent: its interfaces are satisfied structurally, never declared at the
  * implementing type, so there is no static reference here to extract.
@@ -721,18 +893,24 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (kind === 'interface') {
     if (language === 'java') return javaInterfaceHeritage(node, sourceKey)
     if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
+    if (language === 'php') return phpHeritage(node, sourceKey)
     return tsInterfaceHeritage(node, sourceKey)
   }
   // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` or C#'s
   // `struct_declaration` rule — a plain C struct/union has no base-list syntax at all, so
   // `baseListHeritage` simply finds nothing to report for it.
   if (kind === 'struct') return baseListHeritage(node, sourceKey, language === 'csharp' ? 'base_list' : 'base_class_clause')
+  // `kind === 'enum'` only ever comes from PHP's `enum_declaration` rule today — no other language's
+  // enum rule reaches this dispatch (TypeScript's/Java's/C#'s enum kinds carry no heritage syntax of
+  // their own this package extracts elsewhere), so every other language reports nothing here.
+  if (kind === 'enum') return language === 'php' ? phpHeritage(node, sourceKey) : []
   if (kind !== 'class') return []
   if (language === 'python') return pythonClassHeritage(node, sourceKey)
   // `kind === 'class'` from Java's `class_declaration`/`record_declaration` rules — see `javaClassHeritage`.
   if (language === 'java') return javaClassHeritage(node, sourceKey)
   if (language === 'cpp') return baseListHeritage(node, sourceKey, 'base_class_clause')
   if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
+  if (language === 'php') return phpHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -771,6 +949,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
       const nameNode = rule.nameField === SELF_NAME_FIELD ? node
         : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node) as SyntaxNode
         : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node) as SyntaxNode
+        : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node) as SyntaxNode
         : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
@@ -798,6 +977,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           isStatic: spec.language === 'java' ? javaHasModifier(node, 'static')
             : spec.language === 'c' || spec.language === 'cpp' ? cHasStorageClassKeyword(node, 'static')
             : spec.language === 'csharp' ? csharpHasModifier(node, 'static')
+            : spec.language === 'php' ? phpHasStaticModifier(node)
             : hasKeywordChild(node, 'static'),
           decorators: pythonDecorators(node, spec.language),
         })
@@ -818,23 +998,31 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     if (spec.callTypes.includes(node.type)) {
       // Every call-shaped node type in every language table entry requires its callee field; the null
       // case only satisfies `childForFieldName`'s general return type.
-      const callee = node.childForFieldName(spec.callFunctionField)
+      const calleeField = spec.callFunctionFieldByType?.[node.type] ?? spec.callFunctionField
+      const callee = node.childForFieldName(calleeField)
       /* v8 ignore next */
       const name = callee === null ? undefined : calleeName(callee)
       if (name !== undefined) {
+        // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
+        // system's view of the field lookup above, not a real possibility here.
+        /* v8 ignore next */
+        const isBareCallee = callee?.type === 'identifier' || callee?.type === 'name'
         calls.push({
           callerKey: containerKeys[containerKeys.length - 1] ?? null,
           calleeName: name,
           line: node.startPosition.row + 1,
           column: node.startPosition.column,
-          // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
-          // system's view of the field lookup above, not a real possibility here. The `object` check
-          // covers Java's `method_invocation`, whose `name` field is always a bare identifier — the
-          // receiver, if any, sits in a separate sibling field instead of wrapping the callee the way
-          // every other grammar's member expression does; no other call-type node in LANGUAGE_TABLE
-          // binds an `object` field, so this is a no-op for every other language.
-          /* v8 ignore next */
-          isMemberCall: callee?.type !== 'identifier' || node.childForFieldName('object') !== null,
+          // The `object` check covers Java's `method_invocation` and PHP's `member_call_expression`,
+          // whose `name` field is always a bare identifier — the receiver, if any, sits in a separate
+          // sibling field instead of wrapping the callee the way every other grammar's member expression
+          // does. The `scope` check covers PHP's `scoped_call_expression` (`Class::method()`), whose
+          // receiver sits in a sibling `scope` field instead of `object`; no other call-type node in
+          // LANGUAGE_TABLE binds either field, so both are a no-op for every other language. Without
+          // `isBareCallee` also accepting PHP's `'name'` type alongside `'identifier'`, every PHP call —
+          // including an ordinary global `function_call_expression` — would be misclassified as
+          // member-like, since PHP's bare-name node type is `name`, never `identifier`. Verified against
+          // a real parse, not guessed.
+          isMemberCall: !isBareCallee || node.childForFieldName('object') !== null || node.childForFieldName('scope') !== null,
         })
       }
     }
@@ -880,6 +1068,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return cIncludeImports(node)
     case 'csharp':
       return csharpUsingImports(node)
+    case 'php':
+      return phpImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -968,6 +1158,13 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
     return false
   }
   if (language === 'python') return false
+  // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
+  // language has no export construct for them, matching Python's precedent, and this reports `false`
+  // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum
+  // member (`const`/property/method) does carry one, mirroring Java's/C#'s explicit-`public`-only
+  // convention: an interface member's implicit `public` with no keyword at all is not detected either,
+  // the same refusal to infer visibility from anything but an explicit language construct.
+  if (language === 'php') return phpHasVisibility(node, 'public')
   if (commonJsExports.has(name)) return true
   let current: SyntaxNode | null = node.parent
   while (current !== null) {

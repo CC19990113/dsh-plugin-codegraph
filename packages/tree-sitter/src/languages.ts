@@ -97,6 +97,17 @@ export const DECLARATOR_NAME_FIELD = '@declarator'
  */
 export const FIRST_CHILD_NAME_FIELD = '@first-child'
 
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is PHP-specific: a bare `name`
+ * node directly (`const_element`'s `VERSION` in `const VERSION = "1"`), or one nested a level deeper
+ * inside a `variable_name` child (`property_element`'s `$name` in `public string $name;`, and an
+ * `assignment_expression`'s `$fn` in `$fn = function () {}` — both bind their bare `name` behind the
+ * same `$`-prefixed wrapper). See `phpElementName` in `extract.ts`, which this sentinel dispatches to
+ * instead of a flat `childForFieldName` lookup — none of these three shapes bind their name to a field
+ * of its own.
+ */
+export const PHP_ELEMENT_NAME_FIELD = '@php-element'
+
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
   /** The tree-sitter node type anchoring one import statement, e.g. `import_statement`. */
@@ -115,8 +126,17 @@ export interface LanguageSpec {
   readonly definitions: readonly DefinitionRule[]
   /** Node types whose {@link callFunctionField} names the callee. */
   readonly callTypes: readonly string[]
-  /** Field on a call node holding the callee expression. */
+  /** Field on a call node holding the callee expression, used for any {@link callTypes} member absent
+   * from {@link callFunctionFieldByType}. */
   readonly callFunctionField: string
+  /**
+   * Present only when different {@link callTypes} members name their callee through different fields —
+   * PHP's `member_call_expression` ($obj->method()) and `scoped_call_expression` (Class::method()) both
+   * use `name`, while `function_call_expression` uses `function`; every other language's call types
+   * (today, always exactly one) share a single field, so this is absent for all of them. Overrides
+   * {@link callFunctionField} for the node types it lists.
+   */
+  readonly callFunctionFieldByType?: Readonly<Record<string, string>>
   /** Node types anchoring one import statement. */
   readonly importTypes: readonly string[]
   /**
@@ -412,6 +432,55 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // A lambda body (`() => { int x = 1; }`) is never itself named, so it never matches a
     // `DefinitionRule` — but a local variable inside its block body is still function-local.
     bareFunctionScopeTypes: ['lambda_expression', 'anonymous_method_expression'],
+  },
+  {
+    language: 'php',
+    extensions: ['.php'],
+    wasmFile: 'tree-sitter-php.wasm',
+    definitions: [
+      { nodeType: 'function_definition', kind: 'function', nameField: 'name' },
+      { nodeType: 'method_declaration', kind: 'method', nameField: 'name' },
+      { nodeType: 'class_declaration', kind: 'class', nameField: 'name' },
+      { nodeType: 'interface_declaration', kind: 'interface', nameField: 'name' },
+      { nodeType: 'trait_declaration', kind: 'trait', nameField: 'name' },
+      { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+      // `enum_case` carries its own `name` field directly, unlike TypeScript's bare enum member —
+      // verified against a real parse, not guessed.
+      { nodeType: 'enum_case', kind: 'enum_member', nameField: 'name' },
+      // `const_element` (`const VERSION = "1"`) and `property_element` (`public string $name;`) neither
+      // bind their name to a field of their own — see `PHP_ELEMENT_NAME_FIELD`. Unlike a JS/Go/Python
+      // local binding, neither is `scopeRestricted`: a PHP `const`/property only legitimately appears at
+      // namespace scope or directly inside a class/interface/trait/enum body, and every non-class body
+      // here (`interface`/`trait`/`enum`) pushes `'other'` scope, not `'class'` — the same "must not be
+      // scopeRestricted" reasoning Go's struct-field rule documents, since a restricted rule could never
+      // fire inside one. The one shape this misses is already invalid PHP the grammar merely tolerates
+      // (a `const`/property statement directly inside a function body), so capturing it there costs
+      // nothing in practice.
+      { nodeType: 'const_element', kind: 'constant', nameField: PHP_ELEMENT_NAME_FIELD },
+      { nodeType: 'property_element', kind: 'field', nameField: PHP_ELEMENT_NAME_FIELD },
+      // `$fn = function () {}` / `$fn = fn($a) => $a` — the same function-valued-binding rule
+      // ECMASCRIPT_DEFINITIONS's `variable_declarator` follows, captured at any depth like a named
+      // function declaration (not `scopeRestricted`) since a named closure is as much a workspace symbol
+      // as one. Unlike ECMASCRIPT_DEFINITIONS, no bare-variable fallback rule follows it: PHP draws no
+      // `const`/`let`-style distinction for `$x = 5;` — it is an unremarkable, ubiquitous assignment, and
+      // capturing every one would flood `resolve.ts`'s cross-file name index with noise no caller wants.
+      {
+        nodeType: 'assignment_expression',
+        kind: 'function',
+        nameField: PHP_ELEMENT_NAME_FIELD,
+        value: { field: 'right', types: ['anonymous_function_creation_expression', 'arrow_function'] },
+      },
+    ],
+    callTypes: ['function_call_expression', 'member_call_expression', 'scoped_call_expression'],
+    callFunctionField: 'function',
+    // `member_call_expression` ($obj->method()) and `scoped_call_expression` (Class::method()) both name
+    // their callee through a `name` field, not `function` — verified against a real parse, not guessed.
+    callFunctionFieldByType: { member_call_expression: 'name', scoped_call_expression: 'name' },
+    importTypes: ['namespace_use_declaration'],
+    // A closure's block body (`function () { ... }`) can contain a statement, so it must flip scope like
+    // JS's `function_expression`; an arrow function's body is always a single expression (like Python's
+    // `lambda`, never a block), so it is omitted, matching that same precedent.
+    bareFunctionScopeTypes: ['anonymous_function_creation_expression'],
   },
 ]
 

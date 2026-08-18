@@ -968,3 +968,192 @@ public interface IBar : IFoo {}
     expect(extraction.definitions.map(def => def.name)).toEqual(['C', 'M'])
   })
 })
+
+describe('PHP extraction', () => {
+  const SOURCE = `<?php
+namespace App;
+
+use Countable;
+use App\\Contracts\\Cacheable;
+use App\\Traits\\HasSlug as Sluggable;
+use App\\{Foo, Bar as Baz};
+
+interface Shape {
+    const UNIT = "m";
+    public function area(): float;
+}
+
+trait Loggable {
+    protected string $tag = "log";
+    public function log(string $msg): void {
+        echo $msg;
+    }
+}
+
+abstract class Base implements Shape {
+    use Loggable;
+
+    const VERSION = "1.0";
+    public static int $count = 0;
+    protected string $name;
+
+    public function __construct(string $name) {
+        $this->name = $name;
+        self::$count++;
+    }
+
+    public static function make(string $name): self {
+        return new self($name);
+    }
+
+    abstract public function area(): float;
+}
+
+class Circle extends Base {
+    public function area(): float {
+        return $this->radius();
+    }
+
+    public function radius(): float {
+        return 1.0;
+    }
+}
+
+function make_circle(string $name): Circle {
+    return new Circle($name);
+}
+
+enum Suit: string implements JsonSerializable {
+    case Hearts = 'H';
+    case Spades = 'S';
+}
+
+$greet = function (string $name) {
+    echo $name;
+};
+
+$double = fn($x) => $x * 2;
+
+$x = 5;
+
+make_circle("c1");
+Base::make("b1");
+$circle = new Circle("c2");
+$circle->area();
+Helpers\\format_date("now");
+`
+
+  it('extracts a namespace-scoped function, not exported (PHP has no top-level export keyword)', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'make_circle', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a class, an interface, a trait, and an enum', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Base', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Circle', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'interface' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Loggable', kind: 'trait' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Suit', kind: 'enum' }))
+  })
+
+  it('extracts enum cases nested under the enum', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Hearts', kind: 'enum_member', container: ['Suit'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Spades', kind: 'enum_member', container: ['Suit'] }))
+  })
+
+  it('extracts a method (including a static one, an interface signature, and an abstract one)', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'make', kind: 'method', container: ['Base'], isStatic: true, isExported: true }),
+    )
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: '__construct', kind: 'method', container: ['Base'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'radius', kind: 'method', container: ['Circle'] }))
+  })
+
+  it('extracts a class constant and an interface constant, neither scope-restricted', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'VERSION', kind: 'constant', container: ['Base'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'UNIT', kind: 'constant', container: ['Shape'] }))
+  })
+
+  it('extracts a static and non-static property, and a trait property, each mapped to kind field', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'count', kind: 'field', container: ['Base'], isStatic: true }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'name', kind: 'field', container: ['Base'], isStatic: false }),
+    )
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'tag', kind: 'field', container: ['Loggable'] }))
+  })
+
+  it('extracts a closure and an arrow function bound to a variable as kind function', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'greet', kind: 'function', container: [] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'double', kind: 'function', container: [] }))
+  })
+
+  it('does not capture a plain variable assignment as a definition', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.definitions.find(def => def.name === 'x')).toBeUndefined()
+  })
+
+  it('does not name a closure bound to a member-access target after its member_access_expression shape', async () => {
+    const { extraction } = await extract('.php', '<?php\n$this->handler = function () {};\n')
+    expect(extraction.definitions).toEqual([])
+  })
+
+  it('extracts extends and implements, including an enum implementing an interface', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    const base = extraction.definitions.find(def => def.name === 'Base')
+    const circle = extraction.definitions.find(def => def.name === 'Circle')
+    const suit = extraction.definitions.find(def => def.name === 'Suit')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: base?.key, targetName: 'Shape', relation: 'implements' },
+      { sourceKey: circle?.key, targetName: 'Base', relation: 'extends' },
+      { sourceKey: suit?.key, targetName: 'JsonSerializable', relation: 'implements' },
+    ]))
+  })
+
+  it('extracts a bare call, a static call, and a member call, distinguishing their trust level', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    const area = extraction.definitions.find(def => def.name === 'area' && def.container.includes('Circle'))
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: null, calleeName: 'make_circle', isMemberCall: false }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: null, calleeName: 'make', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: null, calleeName: 'area', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: area?.key, calleeName: 'radius', isMemberCall: true }),
+    )
+  })
+
+  it('extracts a namespaced free-function call by its qualified_name final segment', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: null, calleeName: 'format_date', isMemberCall: true }),
+    )
+  })
+
+  it('extracts a plain use, an aliased use, and a group use with its shared prefix', async () => {
+    const { extraction } = await extract('.php', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'Countable', importedName: 'Countable', specifier: 'Countable' })
+    expect(extraction.imports).toContainEqual({ localName: 'Cacheable', importedName: 'Cacheable', specifier: 'App\\Contracts\\Cacheable' })
+    expect(extraction.imports).toContainEqual({ localName: 'Sluggable', importedName: 'HasSlug', specifier: 'App\\Traits\\HasSlug' })
+    expect(extraction.imports).toContainEqual({ localName: 'Foo', importedName: 'Foo', specifier: 'App\\Foo' })
+    expect(extraction.imports).toContainEqual({ localName: 'Baz', importedName: 'Bar', specifier: 'App\\Bar' })
+  })
+
+  it('does not name a fully-qualified extends or implements target after its qualified_name shape', async () => {
+    const { extraction } = await extract('.php', '<?php\nclass D extends \\Foo\\Bar implements \\Foo\\Baz {}\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'D', kind: 'class' })])
+    expect(extraction.heritage).toEqual([])
+  })
+})
