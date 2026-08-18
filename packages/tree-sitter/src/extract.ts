@@ -294,6 +294,18 @@ function phpHasStaticModifier(node: SyntaxNode): boolean {
 }
 
 /**
+ * Whether a Rust declaration carries a bare `pub` `visibility_modifier` among its own named children.
+ * Every Rust item this package captures places its visibility keyword there directly, unlike Java's
+ * wrapping `modifiers` node or C's `storage_class_specifier` — but `pub(crate)`/`pub(super)`/`pub(self)`
+ * restrict visibility to inside the crate rather than truly exporting it, so only the bare, unrestricted
+ * keyword counts, mirroring Java's/C#'s explicit-`public`-only convention. Verified against a real parse,
+ * not guessed.
+ */
+function rustIsPublic(node: SyntaxNode): boolean {
+  return namedChildren(node).some(child => child.type === 'visibility_modifier' && child.text === 'pub')
+}
+
+/**
  * The lone named child bound to `field`, or `undefined` when zero or more than one is bound. A field
  * ordinarily binds exactly one child (a declaration's name); Go's `const a, b = 1, 2` is the exception
  * — both identifiers share the `name` field on one `const_spec` node — and this package extracts a
@@ -336,6 +348,14 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
  * computed or parenthesized callee, for instance).
  */
 function calleeName(callee: SyntaxNode): string | undefined {
+  // Rust's turbofish call (`collect::<Vec<_>>()`) wraps the real callee expression in its own
+  // `generic_function` node, pairing a `function` field with a sibling `type_arguments` field for the
+  // explicit generics — unwrap to the inner expression and resolve it the same way as any other call.
+  // Verified against a real parse, not guessed.
+  if (callee.type === 'generic_function') {
+    const inner = callee.childForFieldName('function')
+    return inner === null ? undefined : calleeName(inner)
+  }
   if (callee.type === 'identifier') return callee.text
   // PHP's bare-name node type — the resolved `callFunctionFieldByType` field value for all three of its
   // call shapes (`function_call_expression`'s simple case, `member_call_expression`'s and
@@ -352,9 +372,11 @@ function calleeName(callee: SyntaxNode): string | undefined {
     /* v8 ignore next */
     return last?.type === 'name' ? last.text : undefined
   }
-  // `name` covers C++'s `qualified_identifier` (`ns::func`) and C#'s `member_access_expression`
-  // (`obj.Method()`) — no other call-callee shape in this file's language tables binds a field called
-  // `name` for anything else, verified against a real parse, not guessed.
+  // `name` covers C++'s `qualified_identifier` (`ns::func`), C#'s `member_access_expression`
+  // (`obj.Method()`), and Rust's `scoped_identifier` (`Type::method()`, `std::mem::swap()`) — no other
+  // call-callee shape in this file's language tables binds a field called `name` for anything else,
+  // and Rust's `field_expression` (`obj.method()`) binds `field` instead, already covered below.
+  // Verified against a real parse, not guessed.
   const property = callee.childForFieldName('property')
     ?? callee.childForFieldName('field')
     ?? callee.childForFieldName('attribute')
@@ -704,6 +726,98 @@ function phpImports(node: SyntaxNode): RawImport[] {
     .map(clause => phpUseClauseBinding(clause))
 }
 
+/** A path's final `::`-separated segment, or the whole text when it has none. */
+function rustLastSegment(path: string): string {
+  const index = path.lastIndexOf('::')
+  return index === -1 ? path : path.slice(index + 2)
+}
+
+/** `prefix::segment`, or just `segment` when there is no enclosing prefix yet. */
+function combineRustPrefix(prefix: string, segment: string): string {
+  return prefix === '' ? segment : `${prefix}::${segment}`
+}
+
+/**
+ * One Rust `use` clause target, resolved to zero or more import bindings — recursive because a
+ * `scoped_use_list`/`use_list` can nest arbitrarily (`use std::{fmt::{self, Display}, io};`).
+ * @param node - a `_use_clause` node: `identifier`, `self`, `scoped_identifier`, `use_wildcard`,
+ * `use_as_clause`, `scoped_use_list`, or `use_list`. `crate`/`super` never reach this function on their
+ * own — the grammar only ever produces them as a `scoped_identifier`'s `path` field, never as a
+ * standalone use target.
+ * @param prefix - the module path text accumulated from enclosing `scoped_use_list` wrappers, or `''`
+ * at the top of a `use_declaration`.
+ * @returns every import binding this clause (and any it nests) introduces.
+ */
+function rustUseTarget(node: SyntaxNode, prefix: string): RawImport[] {
+  if (node.type === 'identifier') {
+    return [{ localName: node.text, importedName: node.text, specifier: combineRustPrefix(prefix, node.text) }]
+  }
+  if (node.type === 'self') {
+    // `self` inside a `use_list` (`use std::fmt::{self, Display};`) imports the enclosing module path
+    // itself, bound to its own last segment rather than a member of it. Verified against a real parse.
+    const name = rustLastSegment(prefix)
+    return [{ localName: name, importedName: name, specifier: prefix }]
+  }
+  if (node.type === 'scoped_identifier') {
+    // `name` is required by the grammar; the fallback only satisfies `childForFieldName`'s general
+    // return type.
+    const name = node.childForFieldName('name')
+    /* v8 ignore next */
+    const localName = name?.text ?? node.text
+    return [{ localName, importedName: localName, specifier: combineRustPrefix(prefix, node.text) }]
+  }
+  if (node.type === 'use_wildcard') {
+    // The grammar's `use_wildcard` rule always wraps exactly one path node before the `*`; the
+    // undefined case only satisfies `namedChildren`'s general array-access return type.
+    const path = namedChildren(node)[0]
+    /* v8 ignore next */
+    const specifier = path === undefined ? prefix : combineRustPrefix(prefix, path.text)
+    // A glob import binds no individual symbol this package tracks by name, matching Go's
+    // whole-package-import convention.
+    return [{ localName: '', importedName: '*', specifier }]
+  }
+  if (node.type === 'use_as_clause') {
+    const path = node.childForFieldName('path')
+    const alias = node.childForFieldName('alias')
+    // Both fields are required by the grammar's `use_as_clause` rule; the empty-array case only
+    // satisfies `childForFieldName`'s general return type.
+    /* v8 ignore next */
+    if (path === null || alias === null) return []
+    const [binding] = rustUseTarget(path, prefix)
+    // `rustUseTarget` always returns exactly one binding for the node types `path` can hold here
+    // (`identifier`, `self`, `scoped_identifier`); the undefined case only satisfies the general
+    // array-destructuring return type.
+    /* v8 ignore next */
+    return binding === undefined ? [] : [{ ...binding, localName: alias.text }]
+  }
+  if (node.type === 'scoped_use_list') {
+    const path = node.childForFieldName('path')
+    const list = node.childForFieldName('list')
+    // `list` is required by the grammar's `scoped_use_list` rule; the empty-array case only satisfies
+    // `childForFieldName`'s general return type.
+    /* v8 ignore next */
+    if (list === null) return []
+    const newPrefix = path === null ? prefix : combineRustPrefix(prefix, path.text)
+    return namedChildren(list).flatMap(child => rustUseTarget(child, newPrefix))
+  }
+  if (node.type === 'use_list') {
+    return namedChildren(node).flatMap(child => rustUseTarget(child, prefix))
+  }
+  // No other node type is a valid `_use_clause` alternative per the grammar.
+  /* v8 ignore next */
+  return []
+}
+
+/** Rust `use_declaration` extraction, dispatching to {@link rustUseTarget} on its `argument` field. */
+function rustImports(node: SyntaxNode): RawImport[] {
+  const argument = node.childForFieldName('argument')
+  // `argument` is required by the grammar's `use_declaration` rule; the empty-array case only satisfies
+  // `childForFieldName`'s general return type.
+  /* v8 ignore next */
+  if (argument === null) return []
+  return rustUseTarget(argument, '')
+}
+
 /** Whether `node` is a bare name this package resolves heritage references against — a member
  * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
  * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
@@ -878,16 +992,40 @@ function phpHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
 }
 
 /**
+ * Rust `trait_item` supertrait extraction from its `bounds` field (`trait Shape: Debug + Display {}`).
+ * Every supertrait requirement is reported as `extends`, matching `tsInterfaceHeritage`'s and
+ * `javaInterfaceHeritage`'s convention for a multi-base interface declaration; a `impl Trait for Type`
+ * block's own trait relationship is not extracted here or anywhere else in this package — unlike a
+ * class/struct/trait declaration, an `impl` block is never itself captured as a `RawDefinition` (it
+ * introduces no name of its own the seam's `container`/qualified-name scheme could attach to), so it has
+ * no {@link RawDefinition.key} to source a heritage reference from. Verified against a real parse, not
+ * guessed.
+ * @param node - the `trait_item` node.
+ * @param sourceKey - the declaring trait's own {@link RawDefinition.key}.
+ * @returns every heritage reference the trait declares.
+ */
+function rustTraitHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const bounds = node.childForFieldName('bounds')
+  if (bounds === null) return []
+  return namedChildren(bounds)
+    .filter(isHeritageName)
+    .map(target => ({ sourceKey, targetName: target.text, relation: 'extends' as const }))
+}
+
+/**
  * Dispatch heritage extraction to the language family that owns a captured class, struct, or interface
  * node's syntax. Go is absent: its interfaces are satisfied structurally, never declared at the
  * implementing type, so there is no static reference here to extract.
- * @param node - the captured `class`-, `struct`-, or `interface`-kind definition node.
- * @param kind - the captured definition's seam kind (`'class'`, `'struct'`, or `'interface'`).
+ * @param node - the captured `class`-, `struct`-, `interface`-, or `trait`-kind definition node.
+ * @param kind - the captured definition's seam kind (`'class'`, `'struct'`, `'interface'`, or `'trait'`).
  * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
  * @param language - the seam language label the file was parsed as.
  * @returns every heritage reference the definition declares.
  */
 function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, language: string): RawHeritageRef[] {
+  // `kind === 'trait'` only ever comes from Rust's `trait_item` rule — no other language in
+  // LANGUAGE_TABLE produces it.
+  if (kind === 'trait') return rustTraitHeritage(node, sourceKey)
   // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's, Java's, or C#'s
   // `interface_declaration` rule — no other language in LANGUAGE_TABLE produces it.
   if (kind === 'interface') {
@@ -985,8 +1123,10 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
         containerNames.push(nameNode.text)
         containerKeys.push(key)
         // A C/C++/C# `struct` is scoped exactly like a `class` for this purpose — a `scopeRestricted`
-        // field rule must fire directly inside either body, not just a `class` one.
-        scopeKinds.push(rule.kind === 'class' || rule.kind === 'struct' ? 'class' : 'other')
+        // field rule must fire directly inside either body, not just a `class` one. Rust's `mod`
+        // (`namespace`) is scoped like the module top level it nests, not like a function body — a
+        // `scopeRestricted` `const`/`static` rule must still fire directly inside one.
+        scopeKinds.push(rule.kind === 'class' || rule.kind === 'struct' ? 'class' : rule.kind === 'namespace' ? 'module' : 'other')
         for (const child of namedChildren(node)) visit(child)
         scopeKinds.pop()
         containerKeys.pop()
@@ -1070,6 +1210,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return csharpUsingImports(node)
     case 'php':
       return phpImports(node)
+    case 'rust':
+      return rustImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -1137,7 +1279,9 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
  * kind (`struct`, `enum`, `type_alias`); C# marks a declaration exported by an explicit `public` modifier
  * (see {@link csharpHasModifier}), mirroring Java; Python defines no export construct at all, so every
  * Python declaration reports `false` rather than guess one from a naming convention or an `__all__` list
- * the extractor does not read.
+ * the extractor does not read; Rust marks a declaration exported by an explicit bare `pub`
+ * `visibility_modifier` (see {@link rustIsPublic}) — a restricted `pub(crate)`/`pub(super)`/`pub(self)`
+ * does not count, mirroring Java's/C#'s explicit-`public`-only convention.
  * @param node - the definition node.
  * @param language - the seam language label the file was parsed as.
  * @param name - the declaration's simple name.
@@ -1165,6 +1309,7 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   // convention: an interface member's implicit `public` with no keyword at all is not detected either,
   // the same refusal to infer visibility from anything but an explicit language construct.
   if (language === 'php') return phpHasVisibility(node, 'public')
+  if (language === 'rust') return rustIsPublic(node)
   if (commonJsExports.has(name)) return true
   let current: SyntaxNode | null = node.parent
   while (current !== null) {

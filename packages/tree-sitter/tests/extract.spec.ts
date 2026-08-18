@@ -1157,3 +1157,206 @@ Helpers\\format_date("now");
     expect(extraction.heritage).toEqual([])
   })
 })
+
+describe('Rust extraction', () => {
+  const SOURCE = `
+use std::collections::HashMap;
+use std::fmt::{self, Display};
+use std::io::*;
+use std::cmp::Ordering as Ord2;
+
+pub const MAX: i32 = 10;
+pub static COUNT: i32 = 0;
+
+pub fn add(a: i32, b: i32) -> i32 {
+    let sum = a + b;
+    fn nested() {}
+    helper();
+    sum
+}
+
+fn helper() {}
+
+pub struct Point {
+    pub x: i32,
+    y: i32,
+}
+
+pub trait Shape: Display {
+    fn area(&self) -> f64;
+    fn name(&self) -> String {
+        String::from("shape")
+    }
+}
+
+impl Shape for Point {
+    fn area(&self) -> f64 {
+        0.0
+    }
+}
+
+impl Point {
+    pub fn new(x: i32, y: i32) -> Self {
+        Point { x, y }
+    }
+
+    fn describe(&self) -> String {
+        self.name();
+        Point::helper_fn();
+        format!("Point({}, {})", self.x, self.y).parse::<String>().unwrap()
+    }
+}
+
+pub enum Color {
+    Red,
+    Custom(i32, i32, i32),
+}
+
+pub mod geometry {
+    pub const PI: f64 = 3.14;
+    pub fn area() {}
+}
+
+type Alias = i32;
+
+add(1, 2);
+`
+
+  it('extracts a top-level function, exported by a bare pub', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'helper', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a function nested inside another function, as kind function under its container', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'nested', kind: 'function', container: ['add'] }))
+  })
+
+  it('does not capture a let binding as a definition', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions.find(def => def.name === 'sum')).toBeUndefined()
+  })
+
+  it('does not capture a function-local let binding, const, or static as a definition', async () => {
+    const { extraction } = await extract(
+      '.rs',
+      'fn scoped() {\n    let x = 1;\n    const LOCAL: i32 = 1;\n    static LOCAL_STATIC: i32 = 2;\n}\n',
+    )
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'scoped', kind: 'function' })])
+  })
+
+  it('extracts a top-level const (exported) and static (not exported), the static also flagged isStatic', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'MAX', kind: 'constant', isExported: true }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'COUNT', kind: 'variable', isExported: true, isStatic: true }),
+    )
+  })
+
+  it('extracts a struct and its public and private fields', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'struct', isExported: true }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'], isExported: true }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'], isExported: false }),
+    )
+  })
+
+  it('extracts a union as kind struct, matching the C/C++ precedent', async () => {
+    const { extraction } = await extract('.rs', 'union Slot {\n    a: i32,\n    b: f32,\n}\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Slot', kind: 'struct' }))
+  })
+
+  it('extracts a trait, its body-less method signature, and its default-body method, both under the trait container', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'trait', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'name', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts a supertrait bound as heritage extends', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    const shape = extraction.definitions.find(def => def.name === 'Shape')
+    expect(extraction.heritage).toContainEqual({ sourceKey: shape?.key, targetName: 'Display', relation: 'extends' })
+  })
+
+  it('extracts an impl method with no container, since an impl block is never itself a definition', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'new', kind: 'method', container: [], isExported: true }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'describe', kind: 'method', container: [], isExported: false }),
+    )
+    // Two distinct `impl_item` blocks each define a method named `area` — both still resolve to kind
+    // `method` with no container, since neither impl block is captured as a definition.
+    expect(extraction.definitions.filter(def => def.name === 'area' && def.kind === 'method' && def.container.length === 0))
+      .toHaveLength(1)
+  })
+
+  it('extracts an enum and its variants nested under it', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Custom', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a mod as kind namespace, with its own const and function nested under it', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'geometry', kind: 'namespace', isExported: true }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'PI', kind: 'constant', container: ['geometry'], isExported: true }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'area', kind: 'function', container: ['geometry'], isExported: true }),
+    )
+  })
+
+  it('extracts a type alias, not exported without a bare pub', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Alias', kind: 'type_alias', isExported: false }))
+  })
+
+  it('extracts a bare call, a member call, and a qualified (Type::method) call', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    const add = extraction.definitions.find(def => def.name === 'add')
+    const describe = extraction.definitions.find(def => def.name === 'describe')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: add?.key, calleeName: 'helper', isMemberCall: false }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: describe?.key, calleeName: 'name', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: describe?.key, calleeName: 'helper_fn', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: null, calleeName: 'add', isMemberCall: false }),
+    )
+  })
+
+  it('resolves a turbofish (generic_function) call to its unwrapped callee name', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    const describe = extraction.definitions.find(def => def.name === 'describe')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: describe?.key, calleeName: 'parse', isMemberCall: true }),
+    )
+  })
+
+  it('does not extract a macro invocation as a call', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.calls.find(call => call.calleeName === 'format')).toBeUndefined()
+  })
+
+  it('extracts a plain use, a grouped use with self and a nested member, a wildcard use, and an aliased use', async () => {
+    const { extraction } = await extract('.rs', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'HashMap', importedName: 'HashMap', specifier: 'std::collections::HashMap' })
+    expect(extraction.imports).toContainEqual({ localName: 'fmt', importedName: 'fmt', specifier: 'std::fmt' })
+    expect(extraction.imports).toContainEqual({ localName: 'Display', importedName: 'Display', specifier: 'std::fmt::Display' })
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'std::io' })
+    expect(extraction.imports).toContainEqual({ localName: 'Ord2', importedName: 'Ordering', specifier: 'std::cmp::Ordering' })
+  })
+})

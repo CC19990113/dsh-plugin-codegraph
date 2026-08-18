@@ -482,6 +482,60 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // `lambda`, never a block), so it is omitted, matching that same precedent.
     bareFunctionScopeTypes: ['anonymous_function_creation_expression'],
   },
+  {
+    language: 'rust',
+    extensions: ['.rs'],
+    wasmFile: 'tree-sitter-rust.wasm',
+    definitions: [
+      { nodeType: 'struct_item', kind: 'struct', nameField: 'name' },
+      // No dedicated `union` seam kind exists; `struct` is the closest existing fit, matching C/C++'s
+      // same union→`struct` precedent — a Rust `union_item` shares `struct_item`'s exact body shape
+      // (`field_declaration_list`), verified against a real parse.
+      { nodeType: 'union_item', kind: 'struct', nameField: 'name' },
+      { nodeType: 'enum_item', kind: 'enum', nameField: 'name' },
+      // `enum_variant` carries its own `name` field directly, unlike TypeScript's bare enum member —
+      // verified against a real parse, not guessed.
+      { nodeType: 'enum_variant', kind: 'enum_member', nameField: 'name' },
+      { nodeType: 'trait_item', kind: 'trait', nameField: 'name' },
+      { nodeType: 'mod_item', kind: 'namespace', nameField: 'name' },
+      { nodeType: 'type_item', kind: 'type_alias', nameField: 'name' },
+      // A method — including a trait's default-body method — is a `function_item` directly inside an
+      // `impl_item`'s or `trait_item`'s `declaration_list`, the same node type a free function uses;
+      // mod's `declaration_list` shares that exact node type too, so only the grandparent (not the
+      // immediate parent) tells a method apart from a module-level function. Tried first, before the
+      // unrestricted `function` rule below falls through to everything else — the same precedent C++'s
+      // method rule follows for its own shared `function_definition` node type. Verified against a real
+      // parse, not guessed.
+      { nodeType: 'function_item', kind: 'method', nameField: 'name', grandparentType: 'impl_item' },
+      { nodeType: 'function_item', kind: 'method', nameField: 'name', grandparentType: 'trait_item' },
+      { nodeType: 'function_item', kind: 'function', nameField: 'name' },
+      // A trait method declared with no body (`fn area(&self) -> f64;`) parses as a distinct node type
+      // from one with a body, and only ever appears directly inside a trait's `declaration_list` — an
+      // `impl_item` must supply a body for every method it defines. Verified against a real parse.
+      { nodeType: 'function_signature_item', kind: 'method', nameField: 'name', grandparentType: 'trait_item' },
+      // A struct/union member — verified against a real parse, not guessed; unlike Go's/C++'s field
+      // rule this needs no declarator-unwrapping helper, since `field_declaration` binds its name
+      // directly to a `name` field.
+      { nodeType: 'field_declaration', kind: 'field', nameField: 'name' },
+      // A top-level, associated (inside `impl`/`trait`), or function-local `const`/`static` all parse
+      // identically — `scopeRestricted` excludes only the function-local case, the same convention
+      // Go's `const_spec`/`var_spec` already follow. No dedicated seam kind distinguishes a `static`
+      // from a `const`; `static` maps to `variable` (it names a single mutable-or-shared storage
+      // location, unlike a `const`'s compile-time-inlined value).
+      { nodeType: 'const_item', kind: 'constant', nameField: 'name', scopeRestricted: true },
+      { nodeType: 'static_item', kind: 'variable', nameField: 'name', scopeRestricted: true },
+    ],
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    importTypes: ['use_declaration'],
+    // A closure's body can be a block containing a statement (`|x| { let y = x; y }`) — unlike an
+    // ECMAScript arrow function, a bare-expression closure body (`|x| x`) is indistinguishable by node
+    // type alone (both are plain `closure_expression`), so this is not split into two cases; a
+    // function-local binding inside a bare-expression body is impossible syntactically anyway (no
+    // statement can appear there), so flipping scope unconditionally costs nothing. Verified against a
+    // real parse, not guessed.
+    bareFunctionScopeTypes: ['closure_expression'],
+  },
 ]
 
 /**
