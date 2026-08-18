@@ -171,12 +171,21 @@ describe('codegraph-tree-sitter plugin', () => {
     await ctx.codegraph.index(root)
 
     const { writeFile } = await import('node:fs/promises')
-    await writeFile(`${root}/a.ts`, 'export function second() {}\n')
 
     try {
       const deadline = Date.now() + 10_000
+      // macOS's FSEvents stream has a brief kernel-side startup lag after fs.watch() returns; a write
+      // landing in that window is silently dropped, not delayed (see NOTES.local.md's watch section).
+      // Production never notices — real edits arrive well after the watcher's already warm — but this
+      // test writes immediately, so it re-issues the edit every second until the rebuild is observed
+      // instead of trusting the very first write reached a fully-armed watch.
+      let lastWriteAt = 0
       let names: string[] = []
       do {
+        if (Date.now() - lastWriteAt >= 1_000) {
+          await writeFile(`${root}/a.ts`, 'export function second() {}\n')
+          lastWriteAt = Date.now()
+        }
         await new Promise(resolve => setTimeout(resolve, 100))
         try {
           // A fresh connection each poll, not one held open across the rebuild: this test is checking

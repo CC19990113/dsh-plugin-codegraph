@@ -50,5 +50,4 @@ Five packages under `packages/*`, split along a strict seam so that adding a new
 
 ### Known gaps
 
-- `pnpm run test:coverage` enforces `perFile: true` with 100% lines/functions/branches/statements (`vitest.config.ts`), but CI (`.github/workflows/ci.yml`) only runs `pnpm test`, not `pnpm run test:coverage` — the coverage gate is not actually enforced.
 - The default exclude list for the tree-sitter indexer is `node_modules`/`dist`/`build`/`coverage`/`.git` plus whatever the project's own `.gitignore` says; it does not hardcode `lib`, relying on `.gitignore` to catch TypeScript build output there.
