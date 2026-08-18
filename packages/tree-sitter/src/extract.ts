@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { DECLARATOR_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
+import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -158,6 +158,17 @@ function cHasStorageClassKeyword(node: SyntaxNode, keyword: string): boolean {
   return namedChildren(node).some(child => child.text === keyword)
 }
 
+/**
+ * Whether a C# declaration carries `keyword` (`public`, `static`, …) among its own named children. C#
+ * wraps each modifier keyword in its own flat, individually-named `modifier` node directly on the
+ * declaration — unlike Java's single wrapping `modifiers` collection (see {@link javaModifiersNode}) or
+ * C/C++'s `storage_class_specifier`, there is no group to look inside; each keyword is its own sibling.
+ * Verified against a real parse, not guessed.
+ */
+function csharpHasModifier(node: SyntaxNode, keyword: string): boolean {
+  return namedChildren(node).some(child => child.type === 'modifier' && child.text === keyword)
+}
+
 /** C/C++ node types wrapping another `declarator` field one level further down — see {@link declaratorName}. */
 const DECLARATOR_WRAPPER_TYPES: ReadonlySet<string> = new Set([
   'pointer_declarator',
@@ -221,6 +232,17 @@ function declaratorName(node: SyntaxNode): SyntaxNode | undefined {
 }
 
 /**
+ * The matched node's first named child, when it is an `identifier` — see {@link FIRST_CHILD_NAME_FIELD}.
+ * Rejects anything else (e.g. a tuple-deconstructing pattern) rather than name a declaration after a
+ * shape this package does not attempt to resolve, the same "don't guess" precedent every other
+ * unresolved shape in this file already follows.
+ */
+function firstChildName(node: SyntaxNode): SyntaxNode | undefined {
+  const first = namedChildren(node)[0]
+  return first?.type === 'identifier' ? first : undefined
+}
+
+/**
  * The lone named child bound to `field`, or `undefined` when zero or more than one is bound. A field
  * ordinarily binds exactly one child (a declaration's name); Go's `const a, b = 1, 2` is the exception
  * — both identifiers share the `name` field on one `const_spec` node — and this package extracts a
@@ -236,12 +258,14 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
   for (const rule of definitions) {
     if (node.type !== rule.nodeType) continue
     if (rule.parentType !== undefined && node.parent?.type !== rule.parentType) continue
+    if (rule.grandparentType !== undefined && node.parent?.parent?.type !== rule.grandparentType) continue
     if (rule.value !== undefined) {
       const value = node.childForFieldName(rule.value.field)
       if (value === null || !rule.value.types.includes(value.type)) continue
     }
     const nameNode = rule.nameField === SELF_NAME_FIELD ? node
       : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node)
+      : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node)
       : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
@@ -261,9 +285,9 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
  */
 function calleeName(callee: SyntaxNode): string | undefined {
   if (callee.type === 'identifier') return callee.text
-  // `name` covers C++'s `qualified_identifier` (`ns::func`) — no other call-callee shape in this file's
-  // language tables binds a field called `name` for anything else, verified against a real parse, not
-  // guessed.
+  // `name` covers C++'s `qualified_identifier` (`ns::func`) and C#'s `member_access_expression`
+  // (`obj.Method()`) — no other call-callee shape in this file's language tables binds a field called
+  // `name` for anything else, verified against a real parse, not guessed.
   const property = callee.childForFieldName('property')
     ?? callee.childForFieldName('field')
     ?? callee.childForFieldName('attribute')
@@ -514,6 +538,33 @@ function cIncludeImports(node: SyntaxNode): RawImport[] {
   return [{ localName: '', importedName: '*', specifier }]
 }
 
+/**
+ * C# `using_directive` extraction. A plain directive (`using System;`) wraps its dotted path
+ * (`identifier`/`qualified_name`) directly; an aliased one (`using Alias = System.Text;`) wraps a
+ * `name_equals` (the alias) alongside the same dotted-path shape for the target. Neither form binds an
+ * individual symbol the way an ECMAScript named import does — a C# `using` imports a whole namespace —
+ * so the aliased form's `localName` is the alias itself, matching the namespace-import convention
+ * `pythonBinding`/`goImports` already use elsewhere in this file. Verified against a real parse, not
+ * guessed.
+ * @param node - the `using_directive` node.
+ * @returns the single import binding this directive introduces.
+ */
+function csharpUsingImports(node: SyntaxNode): RawImport[] {
+  const children = namedChildren(node)
+  const alias = children.find(child => child.type === 'name_equals')
+  const path = children.find(child => child.type === 'identifier' || child.type === 'qualified_name')
+  // `using_directive` always wraps a dotted path per the grammar (a bare `using;` does not parse); the
+  // undefined case only satisfies `Array.prototype.find`'s general return type.
+  /* v8 ignore next */
+  if (path === undefined) return []
+  const specifier = path.text
+  // The grammar's `name_equals` rule always wraps exactly one `identifier`; the fallback only satisfies
+  // `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  const localName = alias === undefined ? '' : (namedChildren(alias)[0]?.text ?? '')
+  return [{ localName, importedName: '*', specifier }]
+}
+
 /** Whether `node` is a bare name this package resolves heritage references against — a member
  * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
  * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
@@ -632,18 +683,22 @@ function javaInterfaceHeritage(node: SyntaxNode, sourceKey: string): RawHeritage
 }
 
 /**
- * C++ base-list heritage extraction from a `class_specifier`/`struct_specifier`'s `base_class_clause`
- * child, found by node type — neither binds it to a dedicated field name, matching
- * `ecmascriptClassHeritage`'s same fallback for plain JavaScript. C++ draws no syntactic distinction
- * between an extended base class and an implemented interface in this list — the same ambiguity
+ * C++/C# base-list heritage extraction, shared by both: neither C++'s `class_specifier`/`struct_specifier`
+ * nor C#'s `class_declaration`/`struct_declaration`/`record_declaration`/`interface_declaration` bind
+ * their base list to a dedicated field name — both are found by node type instead, matching
+ * `ecmascriptClassHeritage`'s same fallback for plain JavaScript. Neither grammar syntactically
+ * distinguishes an extended base class from an implemented interface in this list — the same ambiguity
  * `pythonClassHeritage` already documents for Python's `argument_list` bases — so every entry reports
- * `extends`. Verified against a real parse, not guessed.
- * @param node - the declaring `class_specifier`/`struct_specifier` node.
+ * `extends`, including when the declaring node is itself an interface extending another interface (C#'s
+ * `interface IBar : IFoo`), matching `javaInterfaceHeritage`/`tsInterfaceHeritage`'s existing convention
+ * for that shape. Verified against a real parse, not guessed.
+ * @param node - the declaring class/struct/interface/record node.
  * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @param clauseType - the base-list node's own type (`base_class_clause` for C++, `base_list` for C#).
  * @returns every heritage reference the definition declares.
  */
-function cppBaseHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
-  const clause = namedChildren(node).find(child => child.type === 'base_class_clause')
+function baseListHeritage(node: SyntaxNode, sourceKey: string, clauseType: string): RawHeritageRef[] {
+  const clause = namedChildren(node).find(child => child.type === clauseType)
   if (clause === undefined) return []
   return namedChildren(clause)
     .filter(isHeritageName)
@@ -661,18 +716,23 @@ function cppBaseHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] 
  * @returns every heritage reference the definition declares.
  */
 function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, language: string): RawHeritageRef[] {
-  // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's or Java's `interface_declaration`
-  // rule — no other language in LANGUAGE_TABLE produces it.
-  if (kind === 'interface') return language === 'java' ? javaInterfaceHeritage(node, sourceKey) : tsInterfaceHeritage(node, sourceKey)
-  // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` rule — a plain
-  // C aggregate has no base-list syntax at all, so `cppBaseHeritage` simply finds nothing to report for
-  // it, and there is no need to further branch on `language` here.
-  if (kind === 'struct') return cppBaseHeritage(node, sourceKey)
+  // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's, Java's, or C#'s
+  // `interface_declaration` rule — no other language in LANGUAGE_TABLE produces it.
+  if (kind === 'interface') {
+    if (language === 'java') return javaInterfaceHeritage(node, sourceKey)
+    if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
+    return tsInterfaceHeritage(node, sourceKey)
+  }
+  // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` or C#'s
+  // `struct_declaration` rule — a plain C struct/union has no base-list syntax at all, so
+  // `baseListHeritage` simply finds nothing to report for it.
+  if (kind === 'struct') return baseListHeritage(node, sourceKey, language === 'csharp' ? 'base_list' : 'base_class_clause')
   if (kind !== 'class') return []
   if (language === 'python') return pythonClassHeritage(node, sourceKey)
   // `kind === 'class'` from Java's `class_declaration`/`record_declaration` rules — see `javaClassHeritage`.
   if (language === 'java') return javaClassHeritage(node, sourceKey)
-  if (language === 'cpp') return cppBaseHeritage(node, sourceKey)
+  if (language === 'cpp') return baseListHeritage(node, sourceKey, 'base_class_clause')
+  if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -704,12 +764,13 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     const captured = rule !== undefined
       && (rule.scopeRestricted !== true || scopeKinds[scopeKinds.length - 1] !== 'other')
     if (captured) {
-      // `matchDefinition` already confirmed `declaratorName` returns non-`undefined` for this same node
-      // when `rule` matched; the assertion below only satisfies the ternary's `SyntaxNode | null` type,
-      // mirroring `node.childForFieldName`'s own return type — not a runtime branch, so nothing here
-      // needs a test of its own.
+      // `matchDefinition` already confirmed `declaratorName`/`firstChildName` return non-`undefined` for
+      // this same node when `rule` matched; the assertions below only satisfy the ternary's
+      // `SyntaxNode | null` type, mirroring `node.childForFieldName`'s own return type — not a runtime
+      // branch, so nothing here needs a test of its own.
       const nameNode = rule.nameField === SELF_NAME_FIELD ? node
         : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node) as SyntaxNode
+        : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node) as SyntaxNode
         : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
@@ -732,16 +793,20 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           isAsync: hasKeywordChild(node, 'async'),
           // Java nests every modifier keyword one level down inside a `modifiers` node rather than as
           // a direct child of the declaration itself — see `javaHasModifier`. C/C++ wrap `static` in a
-          // `storage_class_specifier` — see `cHasStorageClassKeyword`.
+          // `storage_class_specifier` — see `cHasStorageClassKeyword`. C# gives each modifier its own
+          // flat `modifier` node — see `csharpHasModifier`.
           isStatic: spec.language === 'java' ? javaHasModifier(node, 'static')
             : spec.language === 'c' || spec.language === 'cpp' ? cHasStorageClassKeyword(node, 'static')
+            : spec.language === 'csharp' ? csharpHasModifier(node, 'static')
             : hasKeywordChild(node, 'static'),
           decorators: pythonDecorators(node, spec.language),
         })
         heritage.push(...extractHeritage(node, rule.kind, key, spec.language))
         containerNames.push(nameNode.text)
         containerKeys.push(key)
-        scopeKinds.push(rule.kind === 'class' ? 'class' : 'other')
+        // A C/C++/C# `struct` is scoped exactly like a `class` for this purpose — a `scopeRestricted`
+        // field rule must fire directly inside either body, not just a `class` one.
+        scopeKinds.push(rule.kind === 'class' || rule.kind === 'struct' ? 'class' : 'other')
         for (const child of namedChildren(node)) visit(child)
         scopeKinds.pop()
         containerKeys.pop()
@@ -813,6 +878,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
     case 'c':
     case 'cpp':
       return cIncludeImports(node)
+    case 'csharp':
+      return csharpUsingImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -877,9 +944,10 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
  * same real-rule precedent Go's capitalization check follows rather than a guess; C++ inherits that same
  * rule for its own free (non-member) functions and variables, but reports `false` for a class/struct
  * member — a method or field has no comparable linkage concept of its own, and neither does any other
- * kind (`struct`, `enum`, `type_alias`); Python defines no export construct at all, so every Python
- * declaration reports `false` rather than guess one from a naming convention or an `__all__` list the
- * extractor does not read.
+ * kind (`struct`, `enum`, `type_alias`); C# marks a declaration exported by an explicit `public` modifier
+ * (see {@link csharpHasModifier}), mirroring Java; Python defines no export construct at all, so every
+ * Python declaration reports `false` rather than guess one from a naming convention or an `__all__` list
+ * the extractor does not read.
  * @param node - the definition node.
  * @param language - the seam language label the file was parsed as.
  * @param name - the declaration's simple name.
@@ -889,6 +957,7 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
 function isExported(node: SyntaxNode, language: string, name: string, commonJsExports: ReadonlySet<string>): boolean {
   if (language === 'go') return /^\p{Lu}/u.test(name)
   if (language === 'java') return javaHasModifier(node, 'public')
+  if (language === 'csharp') return csharpHasModifier(node, 'public')
   if (language === 'c' || language === 'cpp') {
     // A C++ method is a `function_definition` directly inside a class/struct's `field_declaration_list`
     // — the same node type a free function uses, but with no linkage concept of its own to report.

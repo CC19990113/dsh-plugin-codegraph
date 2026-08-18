@@ -66,7 +66,7 @@ Agent 改代码之前,总要先搞清楚代码之间的关系。但它手上的�
 
 ## 支持哪些语言
 
-自带的索引器能解析 **TypeScript、TSX、JavaScript、JSX、Python、Go、Java、C、C++** 九种。语法是按需加载的,只在第一次遇到对应文件时才载入,所以纯 Go 项目不会白白加载 Python 语法。
+自带的索引器能解析 **TypeScript、TSX、JavaScript、JSX、Python、Go、Java、C、C++、C#** 十种。语法是按需加载的,只在第一次遇到对应文件时才载入,所以纯 Go 项目不会白白加载 Python 语法。
 
 **但存储端不挑语言,只认格式。** 用 `codegraph` CLI 在其他语言上建出来的图,本插件照样查得动。所以如果你现在就需要更广的语言覆盖,用 CLI 建索引、用插件查,是可行的组合。
 

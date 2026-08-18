@@ -59,6 +59,14 @@ export interface DefinitionRule {
    * extracted regardless of depth.
    */
   readonly scopeRestricted?: boolean
+  /**
+   * Present only when a rule must distinguish two node types that share both their own type and their
+   * immediate parent's type — C#'s field vs. local variable both parse as a `variable_declarator`
+   * directly inside a `variable_declaration`, and only the *grandparent* differs
+   * (`field_declaration` vs. `local_declaration_statement`). Absent, any grandparent matches, the same
+   * as an absent {@link parentType}.
+   */
+  readonly grandparentType?: string
 }
 
 /**
@@ -77,6 +85,17 @@ export const SELF_NAME_FIELD = '@self'
  * sentinel dispatches to instead of a flat `childForFieldName` lookup.
  */
 export const DECLARATOR_NAME_FIELD = '@declarator'
+
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is its matched node's first
+ * named child with no field name of its own — C#'s `variable_declarator` binds neither its name nor its
+ * optional initializer to a field at all (`int Field = 5;`'s `variable_declarator` has two purely
+ * positional named children, `identifier` then `equals_value_clause`), unlike every other grammar this
+ * package extracts a name from. Distinct from {@link SELF_NAME_FIELD}: the matched node's own text
+ * would include that initializer (`"Field = 5"`), not just the name. See `firstChildName` in
+ * `extract.ts`.
+ */
+export const FIRST_CHILD_NAME_FIELD = '@first-child'
 
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
@@ -360,6 +379,39 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // A lambda body (`[](){ int x = 1; }`) is never itself named, so it never matches a `DefinitionRule`
     // — but a local variable inside its block body is still function-local.
     bareFunctionScopeTypes: ['lambda_expression'],
+  },
+  {
+    language: 'csharp',
+    extensions: ['.cs'],
+    wasmFile: 'tree-sitter-c_sharp.wasm',
+    definitions: [
+      { nodeType: 'class_declaration', kind: 'class', nameField: 'name' },
+      { nodeType: 'struct_declaration', kind: 'struct', nameField: 'name' },
+      // No dedicated seam kind exists for a record; `class` is the closest existing fit, matching Java's
+      // record→`class` precedent.
+      { nodeType: 'record_declaration', kind: 'class', nameField: 'name' },
+      { nodeType: 'interface_declaration', kind: 'interface', nameField: 'name' },
+      { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+      { nodeType: 'enum_member_declaration', kind: 'enum_member', nameField: 'name' },
+      { nodeType: 'method_declaration', kind: 'method', nameField: 'name' },
+      // No dedicated `constructor` seam kind exists; both are a method in every way this package's graph
+      // cares about, matching Java's constructor_declaration→`method` precedent.
+      { nodeType: 'constructor_declaration', kind: 'method', nameField: 'name' },
+      { nodeType: 'destructor_declaration', kind: 'method', nameField: 'name' },
+      { nodeType: 'property_declaration', kind: 'property', nameField: 'name' },
+      // A field (`variable_declarator` two levels under a `field_declaration`) and a local variable
+      // (`variable_declarator` two levels under a `local_declaration_statement`) parse identically one
+      // level up (`variable_declaration`) — only the grandparent tells them apart. See
+      // `DefinitionRule.grandparentType`. Verified against a real parse, not guessed.
+      { nodeType: 'variable_declarator', kind: 'field', nameField: FIRST_CHILD_NAME_FIELD, grandparentType: 'field_declaration', scopeRestricted: true },
+      { nodeType: 'variable_declarator', kind: 'variable', nameField: FIRST_CHILD_NAME_FIELD, grandparentType: 'local_declaration_statement', scopeRestricted: true },
+    ],
+    callTypes: ['invocation_expression'],
+    callFunctionField: 'function',
+    importTypes: ['using_directive'],
+    // A lambda body (`() => { int x = 1; }`) is never itself named, so it never matches a
+    // `DefinitionRule` — but a local variable inside its block body is still function-local.
+    bareFunctionScopeTypes: ['lambda_expression', 'anonymous_method_expression'],
   },
 ]
 

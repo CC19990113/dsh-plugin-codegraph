@@ -875,3 +875,96 @@ int freeFunc(int a) { return a; }
     expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'C', kind: 'class' })])
   })
 })
+
+describe('C# extraction', () => {
+  const SOURCE = `
+using System;
+using Alias = System.Text;
+
+namespace MyNs {
+
+public class Base {}
+public interface IFoo {}
+
+public class Derived : Base, IFoo {
+  public static int Method() { return Helper(); }
+  public int Field;
+  public int Prop { get; set; }
+
+  public void CallIt() {
+    int local = 1;
+    obj.Method();
+    Plain(1);
+  }
+}
+
+public struct SPoint { public int X; }
+public enum Color { Red, Green = 5 }
+public record Rec(int X);
+public interface IBar : IFoo {}
+
+}
+`
+
+  it('extracts a public class and interface, exported by an explicit public modifier', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Derived', kind: 'class', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'IFoo', kind: 'interface', isExported: true }))
+  })
+
+  it('extracts a static method, a field, and a property, nested under the class', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'Method', kind: 'method', container: ['Derived'], isStatic: true }),
+    )
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Field', kind: 'field', container: ['Derived'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Prop', kind: 'property', container: ['Derived'] }))
+  })
+
+  it('does not extract a local variable declared inside a method body', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    expect(extraction.definitions.find(def => def.name === 'local')).toBeUndefined()
+  })
+
+  it('extracts a struct, an enum with its members, and a record mapped to kind class', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'SPoint', kind: 'struct' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'X', kind: 'field', container: ['SPoint'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Rec', kind: 'class' }))
+  })
+
+  it('extracts a class base list with no extends/implements distinction, and an interface extending another', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    const derived = extraction.definitions.find(def => def.name === 'Derived')
+    const ibar = extraction.definitions.find(def => def.name === 'IBar')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: derived?.key, targetName: 'Base', relation: 'extends' },
+      { sourceKey: derived?.key, targetName: 'IFoo', relation: 'extends' },
+      { sourceKey: ibar?.key, targetName: 'IFoo', relation: 'extends' },
+    ]))
+  })
+
+  it('extracts call sites, distinguishing a bare call from a member-access invocation', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    const callIt = extraction.definitions.find(def => def.name === 'CallIt')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'Method', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'Plain', isMemberCall: false }),
+    )
+  })
+
+  it('extracts a plain using and an aliased using directive', async () => {
+    const { extraction } = await extract('.cs', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'System' })
+    expect(extraction.imports).toContainEqual({ localName: 'Alias', importedName: '*', specifier: 'System.Text' })
+  })
+
+  it('does not name a tuple-deconstructing variable_declarator after its tuple_pattern shape', async () => {
+    const { extraction } = await extract('.cs', 'class C {\n  void M() {\n    var (a, b) = (1, 2);\n  }\n}\n')
+    expect(extraction.definitions.map(def => def.name)).toEqual(['C', 'M'])
+  })
+})
