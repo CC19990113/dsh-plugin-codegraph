@@ -28,6 +28,7 @@ import { resolveWorkspace } from './resolve.ts'
 import { writeGraph } from './schema.ts'
 import { createWatcher } from './watcher.ts'
 import type { Watcher } from './watcher.ts'
+import { decideWatch, readProcVersion } from './watch-policy.ts'
 
 export { LANGUAGE_TABLE, languageFor } from './languages.ts'
 export type { DefinitionRule, ImportRule, LanguageSpec } from './languages.ts'
@@ -42,6 +43,8 @@ export { isExcluded, walkAndExtract } from './walk.ts'
 export type { WalkConfig, WalkResult } from './walk.ts'
 export { createWatcher, nodeWatch } from './watcher.ts'
 export type { DegradeReason, WatchConfig, WatchHandle, WatchPrimitive, Watcher } from './watcher.ts'
+export { decideWatch, readProcVersion } from './watch-policy.ts'
+export type { WatchDecision, WatchPolicyInput } from './watch-policy.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'codegraph-tree-sitter'
@@ -103,6 +106,11 @@ export interface Config {
    * Watch the workspace for file changes and refresh the index automatically after a successful
    * `index()` call establishes a baseline (default false). A caller that never sets this sees no
    * change from before this option existed — indexing stays purely explicit.
+   *
+   * Overridden off by default on a WSL2 kernel watching a path mounted in from the Windows host
+   * (`/mnt/<drive>/...`), since inotify does not reliably deliver events over that 9P mount — see
+   * `watch-policy.ts`. Set `CODEGRAPH_FORCE_WATCH=1` to watch there anyway, or `CODEGRAPH_NO_WATCH=1`
+   * to force watching off everywhere regardless of this option.
    */
   watch?: boolean
   /** Quiet period after the last change before a watch-triggered refresh runs, in ms (default 2000). */
@@ -150,7 +158,15 @@ export function apply(ctx: Context, config: Config): void {
 
   /** Start (or leave running) file watching for `projectRoot`, once it has a baseline to refresh. */
   function ensureWatching(projectRoot: string): void {
-    if (!resolved.watch || watchers.has(projectRoot)) return
+    if (watchers.has(projectRoot)) return
+    const decision = decideWatch({
+      configuredWatch: resolved.watch,
+      root: projectRoot,
+      env: process.env,
+      platform: process.platform,
+      procVersion: readProcVersion,
+    })
+    if (!decision.enabled) return
     const watcher = createWatcher({
       root: projectRoot,
       exclude: resolved.exclude,

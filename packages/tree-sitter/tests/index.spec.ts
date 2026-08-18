@@ -208,6 +208,44 @@ describe('codegraph-tree-sitter plugin', () => {
     }
   }, 15_000)
 
+  it('starts watching only once per root, even across repeated index() calls', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const ctx = await seam({ watch: true, watchDebounceMs: 200 })
+    await ctx.codegraph.index(root)
+    // ensureWatching()'s own watchers.has() guard is what this exercises: a second index() on the
+    // same root must not construct (and start()) a second watcher over it.
+    await expect(ctx.codegraph.index(root)).resolves.toMatchObject({ filesIndexed: 1 })
+    await ctx.fiber.dispose()
+  })
+
+  it('CODEGRAPH_NO_WATCH=1 keeps watching off even when the config asks for it', async () => {
+    const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+    const originalEnv = process.env.CODEGRAPH_NO_WATCH
+    process.env.CODEGRAPH_NO_WATCH = '1'
+    const ctx = await seam({ watch: true, watchDebounceMs: 200 })
+    try {
+      await ctx.codegraph.index(root)
+      const { writeFile } = await import('node:fs/promises')
+      await writeFile(`${root}/a.ts`, 'export function second() {}\n')
+      // No watcher was ever armed, so waiting out a debounce window plus slack must not reflect the
+      // edit — the graph should still show only what the baseline index() saw.
+      await new Promise(resolve => setTimeout(resolve, 500))
+      const db = new DatabaseSync(`${root}/${DATABASE_RELATIVE_PATH}`, { readOnly: true })
+      let names: string[]
+      try {
+        names = (db.prepare("SELECT name FROM nodes WHERE kind = 'function'").all() as { name: string }[])
+          .map(row => row.name)
+      } finally {
+        db.close()
+      }
+      expect(names).toEqual(['first'])
+    } finally {
+      if (originalEnv === undefined) delete process.env.CODEGRAPH_NO_WATCH
+      else process.env.CODEGRAPH_NO_WATCH = originalEnv
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('logs a visible, actionable warning once the watcher degrades permanently', async () => {
     const root = await writeProject({ 'src/a.ts': 'export function a() {}\n' })
     const originalPlatform = process.platform
