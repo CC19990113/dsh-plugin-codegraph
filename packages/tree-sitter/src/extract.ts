@@ -427,6 +427,30 @@ function commonJsRequireImport(node: SyntaxNode): RawImport | undefined {
   return undefined
 }
 
+/**
+ * A Ruby `require '...'`/`require_relative '...'` call recognized as an import binding — Ruby's
+ * grammar has no dedicated import-statement node type at all (see `LANGUAGE_TABLE`'s `ruby` entry),
+ * so this dispatches off an ordinary `call` node the same way `commonJsRequireImport` does for
+ * CommonJS. Binds no local name — like a C `#include` or a Go whole-package import, `require` pulls
+ * in a file for its side effects, not a single symbol this package tracks by name. Verified against a
+ * real parse, not guessed.
+ * @param node - a `call` node.
+ * @returns the import binding, or `undefined` when `node` is not a bare top-level `require`/
+ * `require_relative` call.
+ */
+function rubyRequireImport(node: SyntaxNode): RawImport | undefined {
+  const method = node.childForFieldName('method')
+  if (method === null || method.type !== 'identifier') return undefined
+  if (method.text !== 'require' && method.text !== 'require_relative') return undefined
+  const argsNode = node.childForFieldName('arguments')
+  if (argsNode === null) return undefined
+  const args = namedChildren(argsNode)
+  const specifierNode = args.length === 1 ? args[0] : undefined
+  if (specifierNode?.type !== 'string') return undefined
+  const specifier = namedChildren(specifierNode)[0]?.text ?? specifierNode.text.slice(1, -1)
+  return { localName: '', importedName: '*', specifier }
+}
+
 /** ECMAScript-family import extraction: `import_statement` with a `import_clause` and a `source`. */
 function ecmascriptImports(node: SyntaxNode): RawImport[] {
   // `source` is required by the grammar; the null case only satisfies `childForFieldName`'s general
@@ -820,9 +844,10 @@ function rustImports(node: SyntaxNode): RawImport[] {
 
 /** Whether `node` is a bare name this package resolves heritage references against — a member
  * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
- * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
+ * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. `constant` is
+ * Ruby's own bare-name node type (see `rubyClassHeritage`), verified against a real parse. */
 function isHeritageName(node: SyntaxNode): boolean {
-  return node.type === 'identifier' || node.type === 'type_identifier' || node.type === 'name'
+  return node.type === 'identifier' || node.type === 'type_identifier' || node.type === 'name' || node.type === 'constant'
 }
 
 /**
@@ -992,6 +1017,25 @@ function phpHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
 }
 
 /**
+ * Ruby `class` superclass extraction from its `superclass` field (`class Dog < Animal`) — the field
+ * wraps the extended name directly, one level above the bare `constant`, the same shape C's
+ * `type_definition`'s `declarator` field wraps its target one level down. Ruby draws no
+ * `implements`-shaped distinction of its own (a mixin `include Module` is an ordinary method call,
+ * structurally indistinguishable from any other, so it is not extracted — the "don't guess" precedent
+ * `pythonClassHeritage` already documents for a comparable ambiguity), so every entry reports `extends`.
+ * Verified against a real parse, not guessed.
+ * @param node - the `class` node.
+ * @param sourceKey - the declaring class's own {@link RawDefinition.key}.
+ * @returns every heritage reference the class declares.
+ */
+function rubyClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const superclass = node.childForFieldName('superclass')
+  const target = superclass === null ? undefined : namedChildren(superclass)[0]
+  if (target !== undefined && isHeritageName(target)) return [{ sourceKey, targetName: target.text, relation: 'extends' }]
+  return []
+}
+
+/**
  * Rust `trait_item` supertrait extraction from its `bounds` field (`trait Shape: Debug + Display {}`).
  * Every supertrait requirement is reported as `extends`, matching `tsInterfaceHeritage`'s and
  * `javaInterfaceHeritage`'s convention for a multi-base interface declaration; a `impl Trait for Type`
@@ -1049,6 +1093,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (language === 'cpp') return baseListHeritage(node, sourceKey, 'base_class_clause')
   if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
   if (language === 'php') return phpHeritage(node, sourceKey)
+  if (language === 'ruby') return rubyClassHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -1160,9 +1205,13 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           // LANGUAGE_TABLE binds either field, so both are a no-op for every other language. Without
           // `isBareCallee` also accepting PHP's `'name'` type alongside `'identifier'`, every PHP call —
           // including an ordinary global `function_call_expression` — would be misclassified as
-          // member-like, since PHP's bare-name node type is `name`, never `identifier`. Verified against
-          // a real parse, not guessed.
-          isMemberCall: !isBareCallee || node.childForFieldName('object') !== null || node.childForFieldName('scope') !== null,
+          // member-like, since PHP's bare-name node type is `name`, never `identifier`. The `receiver`
+          // check covers Ruby's `call` node (`obj.method_name(x)`), whose callee is always a bare
+          // `identifier` in its own `method` field regardless of receiver — unlike every other grammar's
+          // member expression, the receiver sits in a distinct sibling field instead of wrapping the
+          // callee; no other call-type node in LANGUAGE_TABLE binds a field named `receiver`. Verified
+          // against a real parse, not guessed.
+          isMemberCall: !isBareCallee || node.childForFieldName('object') !== null || node.childForFieldName('scope') !== null || node.childForFieldName('receiver') !== null,
         })
       }
     }
@@ -1173,6 +1222,11 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
 
     if (node.type === 'call_expression' && ECMASCRIPT_LANGUAGES.has(spec.language)) {
       const requireImport = commonJsRequireImport(node)
+      if (requireImport !== undefined) imports.push(requireImport)
+    }
+
+    if (node.type === 'call' && spec.language === 'ruby') {
+      const requireImport = rubyRequireImport(node)
       if (requireImport !== undefined) imports.push(requireImport)
     }
 
@@ -1302,6 +1356,11 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
     return false
   }
   if (language === 'python') return false
+  // Ruby's `private`/`protected`/`public` are ordinary method calls that toggle visibility for
+  // subsequently defined methods, not a keyword on the declaration itself, and there is no separate
+  // module-level export construct at all — matching Python's precedent, every Ruby declaration reports
+  // `false` rather than guess one from tracking those calls' effect through the file.
+  if (language === 'ruby') return false
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum

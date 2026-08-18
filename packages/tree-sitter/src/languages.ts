@@ -536,6 +536,64 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // real parse, not guessed.
     bareFunctionScopeTypes: ['closure_expression'],
   },
+  {
+    language: 'ruby',
+    extensions: ['.rb'],
+    wasmFile: 'tree-sitter-ruby.wasm',
+    definitions: [
+      // Every `def` — top-level, module-level, or inside a class body — defines a method (a top-level
+      // `def` becomes a private instance method of `Object`), so this package uses kind `method`
+      // uniformly rather than split a `function`/`method` distinction the language itself does not
+      // draw; `singleton_method` (`def self.foo`/`def Klass.foo`) is a class/singleton method, same
+      // kind. Verified against a real parse, not guessed.
+      { nodeType: 'method', kind: 'method', nameField: 'name' },
+      { nodeType: 'singleton_method', kind: 'method', nameField: 'name' },
+      { nodeType: 'class', kind: 'class', nameField: 'name' },
+      // No dedicated `namespace` handling exists elsewhere but Rust's `mod_item`; a Ruby `module` is the
+      // closest existing fit — both are a purely lexical/organizational container with no instance
+      // semantics of their own, matching that same precedent.
+      { nodeType: 'module', kind: 'namespace', nameField: 'name' },
+      // `my_lambda = ->(x) { x + 1 }` — the only anonymous-function *literal* shape this grammar has;
+      // `proc { ... }`/`Proc.new { ... }` parse as an ordinary `call` with a block argument, structurally
+      // indistinguishable from any other block-taking method call, so they are not treated as a
+      // function-valued binding — the same "don't guess" precedent this file already follows elsewhere.
+      // Tried first, before the unrestricted `variable` rule below falls through to everything else —
+      // the same precedent ECMASCRIPT_DEFINITIONS's `variable_declarator` rule follows.
+      { nodeType: 'assignment', kind: 'function', nameField: 'left', nameNodeTypes: ['identifier'], value: { field: 'right', types: ['lambda'] } },
+      // `CONST = 1` — a bare uppercase-leading `constant` node is Ruby's own real distinction (the
+      // grammar itself lexes an uppercase-leading bare word as a distinct `constant` token, not merely an
+      // `identifier`), so no `scopeRestricted` is needed: a dynamic constant assignment inside a method
+      // body is a Ruby `SyntaxError`, the parser never produces this shape nested in one. Verified
+      // against a real parse, not guessed.
+      { nodeType: 'assignment', kind: 'constant', nameField: 'left', nameNodeTypes: ['constant'] },
+      // A bare lowercase local variable assignment — `nameNodeTypes` rejects Ruby's other `assignment`
+      // left-hand shapes (`left_assignment_list` for `a, b = 1, 2`, a `call` for `self.x = 1`, an
+      // `element_reference` for `arr[0] = 1`), none of which name a single declared identifier, verified
+      // against a real parse, not guessed. An instance variable (`@name = ...`) is deliberately not
+      // captured at all — unlike every other language this package extracts a `field` kind from, Ruby has
+      // no declarative field syntax; an instance variable is conventionally *assigned* inside `initialize`
+      // (method-body scope), and this file's scope model has no way to mark that assignment a class-level
+      // symbol without also flooding `resolve.ts`'s name index with every ordinary method-local variable —
+      // the same "don't guess" precedent this file already follows for a shape it cannot cleanly resolve.
+      { nodeType: 'assignment', kind: 'variable', nameField: 'left', nameNodeTypes: ['identifier'], scopeRestricted: true },
+    ],
+    // A bare, receiver-less, paren-less, arg-less method call (`other_call`) parses as a plain
+    // `identifier` — syntactically identical to a local-variable read — so it is not (and cannot safely
+    // be) captured as a call site; only a `call` node (a receiver, an argument list, or a block present)
+    // is. Verified against a real parse, not guessed.
+    callTypes: ['call'],
+    callFunctionField: 'method',
+    // Ruby's grammar has no dedicated import-statement node type at all — `require '...'` and
+    // `require_relative '...'` are ordinary method calls (see `rubyRequireImport` in extract.ts, wired
+    // through a dedicated dispatch branch the same way `commonJsRequireImport` is for CommonJS, rather
+    // than through this table, which has no node type to name here).
+    importTypes: [],
+    // A `{ ... }`/`do ... end` block attached to a call, and a `->() { ... }` lambda's own block body
+    // (itself a `block` node), can all contain a statement — a `var`/`local` inside one is still
+    // block-local, not a workspace symbol, the same reasoning `ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES`
+    // applies to a callback. Verified against a real parse, not guessed.
+    bareFunctionScopeTypes: ['block', 'do_block', 'lambda'],
+  },
 ]
 
 /**

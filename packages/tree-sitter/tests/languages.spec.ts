@@ -11,7 +11,7 @@ describe('languageFor', () => {
   })
 
   it('returns undefined for an extension no grammar owns', () => {
-    expect(languageFor('.rb')).toBeUndefined()
+    expect(languageFor('.hs')).toBeUndefined()
   })
 
   it('routes .tsx to the tsx grammar and .ts to the typescript grammar', () => {

@@ -1360,3 +1360,110 @@ add(1, 2);
     expect(extraction.imports).toContainEqual({ localName: 'Ord2', importedName: 'Ordering', specifier: 'std::cmp::Ordering' })
   })
 })
+
+describe('Ruby extraction', () => {
+  const SOURCE = `
+require 'json'
+require_relative './foo'
+
+VERSION = "1.0"
+
+module Greeter
+  CONST_IN_MOD = 5
+
+  class Person < Base
+    def initialize(name)
+      @name = name
+      local_var = 1
+    end
+
+    def self.class_method
+      42
+    end
+
+    def greet
+      puts(local_call)
+      other.greet_helper
+    end
+  end
+end
+
+def top_level_fn
+  x = 1
+  callback = ->(y) { y + 1 }
+  helper_call()
+end
+
+top_level_fn()
+`
+
+  it('extracts a top-level def as kind method, matching every def being a Ruby method', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'top_level_fn', kind: 'method', isExported: false }))
+  })
+
+  it('does not capture a function-local variable or an instance variable as a definition', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions.find(def => def.name === 'local_var')).toBeUndefined()
+    expect(extraction.definitions.find(def => def.name === 'x')).toBeUndefined()
+    expect(extraction.definitions.find(def => def.name === 'name' && def.kind === 'field')).toBeUndefined()
+  })
+
+  it('extracts a module as kind namespace, with a nested constant under it', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Greeter', kind: 'namespace' }))
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'CONST_IN_MOD', kind: 'constant', container: ['Greeter'] }),
+    )
+  })
+
+  it('extracts a class nested in a module, and a top-level constant', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Person', kind: 'class', container: ['Greeter'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'VERSION', kind: 'constant', container: [] }))
+  })
+
+  it('extracts a superclass reference as heritage extends', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    const person = extraction.definitions.find(def => def.name === 'Person')
+    expect(extraction.heritage).toContainEqual({ sourceKey: person?.key, targetName: 'Base', relation: 'extends' })
+  })
+
+  it('extracts an instance method and a singleton (class) method, both nested under the class', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'initialize', kind: 'method', container: ['Greeter', 'Person'] }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'class_method', kind: 'method', container: ['Greeter', 'Person'] }),
+    )
+  })
+
+  it('extracts a lambda literal assigned to a local as kind function', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'callback', kind: 'function' }))
+  })
+
+  it('extracts a bare call and a member call, distinguishing their trust level', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    const greet = extraction.definitions.find(def => def.name === 'greet')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: greet?.key, calleeName: 'puts', isMemberCall: false }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: greet?.key, calleeName: 'greet_helper', isMemberCall: true }),
+    )
+  })
+
+  it('does not extract a parenless, receiver-less bare identifier as a call', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.calls.find(call => call.calleeName === 'local_call')).toBeUndefined()
+  })
+
+  it('extracts a require and a require_relative as import bindings, and as unresolved calls', async () => {
+    const { extraction } = await extract('.rb', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'json' })
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: './foo' })
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'require', callerKey: null }))
+  })
+})
