@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { SELF_NAME_FIELD } from './languages.ts'
+import { DECLARATOR_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -122,6 +122,102 @@ function hasKeywordChild(node: SyntaxNode, keyword: string): boolean {
 }
 
 /**
+ * Java's `modifiers` node for a declaration, wherever it sits. Unlike every other grammar this
+ * package extracts from, Java never places a modifier keyword (`public`, `static`, `final`, …) as a
+ * direct child of the declaration node itself — it wraps them all in one named `modifiers` child. A
+ * captured `variable_declarator` (the `field`/`variable` rules in `languages.ts`) carries no
+ * `modifiers` of its own at all; its modifiers sit one level up, on the enclosing
+ * `field_declaration`/`local_variable_declaration` this function falls back to. Verified against a
+ * real parse, not guessed.
+ */
+function javaModifiersNode(node: SyntaxNode): SyntaxNode | undefined {
+  const own = namedChildren(node).find(child => child.type === 'modifiers')
+  if (own !== undefined) return own
+  // Every node this is called on is a definition the walk captured below the tree's root, so it
+  // always has a parent; the null case only satisfies `.parent`'s general `SyntaxNode | null` type.
+  /* v8 ignore next */
+  if (node.parent === null) return undefined
+  return namedChildren(node.parent).find(child => child.type === 'modifiers')
+}
+
+/** Whether a Java declaration carries `keyword` among its modifiers — see {@link javaModifiersNode}. */
+function javaHasModifier(node: SyntaxNode, keyword: string): boolean {
+  const modifiers = javaModifiersNode(node)
+  return modifiers !== undefined && hasKeywordChild(modifiers, keyword)
+}
+
+/**
+ * Whether a C declaration carries `keyword` (`static`, …) among its own named children. Unlike every
+ * other grammar this package extracts from, C wraps a storage-class keyword like `static` in its own
+ * named `storage_class_specifier` node rather than leaving it as a bare anonymous token on the
+ * declaration itself — `hasKeywordChild` alone would never see it; checking each named child's own text
+ * (not just `storage_class_specifier`'s) finds it in one pass. Verified against a real parse, not guessed.
+ */
+function cHasStorageClassKeyword(node: SyntaxNode, keyword: string): boolean {
+  return namedChildren(node).some(child => child.text === keyword)
+}
+
+/** C node types wrapping another `declarator` field one level further down — see {@link declaratorName}. */
+const DECLARATOR_WRAPPER_TYPES: ReadonlySet<string> = new Set([
+  'pointer_declarator',
+  'init_declarator',
+  'array_declarator',
+])
+
+/**
+ * `parenthesized_declarator`'s inner declarator — unlike every wrapper in {@link DECLARATOR_WRAPPER_TYPES}
+ * plus `function_declarator`, its sole child is purely positional, bound to no field at all
+ * (`int (*fp)(void);`'s `parenthesized_declarator` wraps a `pointer_declarator` with no `declarator`
+ * field to find it through). Verified against a real parse, not guessed.
+ */
+function parenthesizedDeclaratorInner(node: SyntaxNode): SyntaxNode | null {
+  // The grammar never produces an empty `parenthesized_declarator` (`()` alone does not parse as one);
+  // the fallback only satisfies `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  return namedChildren(node)[0] ?? null
+}
+
+/**
+ * The terminal name behind a C declaration's `declarator` field, however many wrapper layers deep —
+ * `int *make(int a)`'s `function_definition.declarator` is a `pointer_declarator` wrapping a
+ * `function_declarator` wrapping the `identifier` "make"; a plain `int g = 1;` global's `declaration.declarator`
+ * is an `init_declarator` wrapping the `identifier` "g" directly; `int (*fp)(void);`'s is a
+ * `function_declarator` wrapping a `parenthesized_declarator` wrapping a `pointer_declarator` wrapping
+ * the `identifier` "fp". Every wrapper in {@link DECLARATOR_WRAPPER_TYPES}, plus `function_declarator`,
+ * exposes the same `declarator` field down to the next layer; `parenthesized_declarator` alone is
+ * unwrapped through {@link parenthesizedDeclaratorInner} instead — see there. Terminates at an
+ * `identifier`/`field_identifier`. A shape this doesn't recognize returns `undefined` rather than guess a
+ * name from it, the same "don't guess" precedent this file already follows for shapes it does not fully
+ * resolve.
+ * @param node - the declaration node (`function_definition`, `declaration`, `field_declaration`, …).
+ * @returns the terminal name node, or `undefined`.
+ */
+function declaratorName(node: SyntaxNode): SyntaxNode | undefined {
+  // `declaration`/`field_declaration` allow a comma-separated multi-declarator list (`int a, b;`) that
+  // shares the same repeated `declarator` field on one node — the same ambiguity Go's `const a, b = 1, 2`
+  // has on one `const_spec`; `childForFieldName` below would otherwise silently return only the first.
+  // `function_definition`'s `declarator` is never repeated, so this is a no-op there.
+  if (soleNamedField(node, 'declarator') === undefined) return undefined
+  let current = node.childForFieldName('declarator')
+  while (current !== null) {
+    if (current.type === 'identifier' || current.type === 'field_identifier') return current
+    if (current.type === 'parenthesized_declarator') {
+      current = parenthesizedDeclaratorInner(current)
+      continue
+    }
+    // No known plain-C declarator shape reaches this branch — every wrapper this file's C table can
+    // produce is one of `function_declarator`, {@link DECLARATOR_WRAPPER_TYPES}, or
+    // `parenthesized_declarator` (handled above). Kept as a "don't guess" backstop rather than an
+    // exhaustiveness assumption, the same precedent every other unresolved shape in this file follows.
+    /* v8 ignore next */
+    if (current.type !== 'function_declarator' && !DECLARATOR_WRAPPER_TYPES.has(current.type)) return undefined
+    current = current.childForFieldName('declarator')
+  }
+  /* v8 ignore next */
+  return undefined
+}
+
+/**
  * The lone named child bound to `field`, or `undefined` when zero or more than one is bound. A field
  * ordinarily binds exactly one child (a declaration's name); Go's `const a, b = 1, 2` is the exception
  * — both identifiers share the `name` field on one `const_spec` node — and this package extracts a
@@ -141,7 +237,9 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
       const value = node.childForFieldName(rule.value.field)
       if (value === null || !rule.value.types.includes(value.type)) continue
     }
-    const nameNode = rule.nameField === SELF_NAME_FIELD ? node : soleNamedField(node, rule.nameField)
+    const nameNode = rule.nameField === SELF_NAME_FIELD ? node
+      : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node)
+      : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
     return rule
@@ -364,6 +462,51 @@ function goImports(node: SyntaxNode): RawImport[] {
   })
 }
 
+/**
+ * Java import extraction: `import_declaration` wraps a `scoped_identifier` (a dotted path,
+ * `java.util.List`) or, for a single-segment specifier, a bare `identifier`, plus an optional
+ * trailing `asterisk` child for a wildcard import (`import java.util.*;`). The `static` keyword
+ * (`import static java.lang.Math.max;`) is an unnamed token the grammar tacks onto the same shape, so
+ * no separate handling is needed — the specifier and local name below are extracted identically
+ * either way. Verified against a real parse, not guessed.
+ * @param node - the `import_declaration` node.
+ * @returns the single import binding this statement introduces.
+ */
+function javaImports(node: SyntaxNode): RawImport[] {
+  const children = namedChildren(node)
+  const path = children.find(child => child.type === 'scoped_identifier' || child.type === 'identifier')
+  // `import_declaration` always wraps one of these two node types per the grammar; the undefined case
+  // only satisfies `Array.prototype.find`'s general return type.
+  /* v8 ignore next */
+  if (path === undefined) return []
+  const specifier = path.text
+  // A package import binds no individual symbol; resolution never matches on `importedName: '*'`,
+  // matching `goImports`'s same precedent for a whole-package/wildcard binding.
+  if (children.some(child => child.type === 'asterisk')) return [{ localName: '', importedName: '*', specifier }]
+  const localName = path.type === 'scoped_identifier' ? fieldText(path, 'name', specifier) : specifier
+  return [{ localName, importedName: '*', specifier }]
+}
+
+/**
+ * C `#include` extraction. A system include (`#include <stdio.h>`) parses as a `system_lib_string`
+ * token holding the whole `<...>` text; a local include (`#include "local.h"`) wraps a `string_literal`
+ * around a `string_content` child holding the bare path. Neither binds an individual symbol this
+ * package tracks by name — like a Go whole-package import, it is recorded for completeness with no
+ * `localName`, matching that same side-effect-only convention. Verified against a real parse, not guessed.
+ * @param node - the `preproc_include` node.
+ * @returns the single import binding this directive introduces.
+ */
+function cIncludeImports(node: SyntaxNode): RawImport[] {
+  const path = namedChildren(node)[0]
+  // `preproc_include` always wraps exactly one of `system_lib_string`/`string_literal`/an
+  // expanded-macro path per the grammar; the undefined case only satisfies `namedChildren`'s general
+  // array-access return type.
+  /* v8 ignore next */
+  if (path === undefined) return []
+  const specifier = path.type === 'system_lib_string' ? path.text.slice(1, -1) : (namedChildren(path)[0]?.text ?? path.text.slice(1, -1))
+  return [{ localName: '', importedName: '*', specifier }]
+}
+
 /** Whether `node` is a bare name this package resolves heritage references against — a member
  * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
  * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
@@ -434,9 +577,59 @@ function pythonClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRe
 }
 
 /**
+ * Java `class_declaration`/`record_declaration` heritage extraction from their `superclass` (a record
+ * has none — a record can never extend another class, so the field is simply absent) and `interfaces`
+ * fields — both hold the clause node (`superclass`/`super_interfaces`) directly, one level above the
+ * `type_identifier`(s) themselves, verified against a real parse, not guessed.
+ * @param node - the `class_declaration`/`record_declaration` node.
+ * @param sourceKey - the declaring type's own {@link RawDefinition.key}.
+ * @returns every heritage reference the type declares.
+ */
+function javaClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const refs: RawHeritageRef[] = []
+  const superclass = node.childForFieldName('superclass')
+  const target = superclass === null ? undefined : namedChildren(superclass)[0]
+  if (target !== undefined && isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'extends' })
+  const interfaces = node.childForFieldName('interfaces')
+  const typeList = interfaces === null ? undefined : namedChildren(interfaces)[0]
+  if (typeList !== undefined) {
+    for (const impl of namedChildren(typeList)) {
+      if (isHeritageName(impl)) refs.push({ sourceKey, targetName: impl.text, relation: 'implements' })
+    }
+  }
+  return refs
+}
+
+/**
+ * Java `interface_declaration` `extends` extraction — an interface can extend more than one other
+ * interface (`interface C extends A, B {}`), from its `extends_interfaces` child; unlike
+ * `class_declaration`'s `superclass`/`interfaces` fields, `interface_declaration` binds no field name
+ * of its own to this clause, so it is found by node type instead, matching `ecmascriptClassHeritage`'s
+ * same fallback for plain JavaScript. Verified against a real parse, not guessed.
+ * @param node - the `interface_declaration` node.
+ * @param sourceKey - the declaring interface's own {@link RawDefinition.key}.
+ * @returns every heritage reference the interface declares.
+ */
+function javaInterfaceHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const clause = namedChildren(node).find(child => child.type === 'extends_interfaces')
+  if (clause === undefined) return []
+  const typeList = namedChildren(clause)[0]
+  // `extends_interfaces` always wraps exactly one `type_list` per the grammar (an interface can never
+  // write a bare `extends` with nothing after it); the undefined case only satisfies the general
+  // array-access return type.
+  /* v8 ignore next */
+  if (typeList === undefined) return []
+  return namedChildren(typeList)
+    .filter(isHeritageName)
+    .map(target => ({ sourceKey, targetName: target.text, relation: 'extends' as const }))
+}
+
+/**
  * Dispatch heritage extraction to the language family that owns a captured class or interface node's
  * syntax. Go is absent: its interfaces are satisfied structurally, never declared at the implementing
- * type, so there is no static reference here to extract.
+ * type, so there is no static reference here to extract. C's `struct`/`union` kind is likewise absent:
+ * a plain C aggregate has no base-list syntax at all, so it falls through the `kind !== 'class'` check
+ * below to an empty result.
  * @param node - the captured `class`- or `interface`-kind definition node.
  * @param kind - the captured definition's seam kind (`'class'` or `'interface'`).
  * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
@@ -444,13 +637,15 @@ function pythonClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRe
  * @returns every heritage reference the definition declares.
  */
 function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, language: string): RawHeritageRef[] {
-  // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's `interface_declaration` rule —
-  // no other language in LANGUAGE_TABLE produces it.
-  if (kind === 'interface') return tsInterfaceHeritage(node, sourceKey)
+  // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's or Java's `interface_declaration`
+  // rule — no other language in LANGUAGE_TABLE produces it.
+  if (kind === 'interface') return language === 'java' ? javaInterfaceHeritage(node, sourceKey) : tsInterfaceHeritage(node, sourceKey)
   if (kind !== 'class') return []
   if (language === 'python') return pythonClassHeritage(node, sourceKey)
-  // `kind === 'class'` otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule —
-  // Go has no class concept, so this is never reached with `language === 'go'`.
+  // `kind === 'class'` from Java's `class_declaration`/`record_declaration` rules — see `javaClassHeritage`.
+  if (language === 'java') return javaClassHeritage(node, sourceKey)
+  // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
+  // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
 }
 
@@ -480,7 +675,13 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     const captured = rule !== undefined
       && (rule.scopeRestricted !== true || scopeKinds[scopeKinds.length - 1] !== 'other')
     if (captured) {
-      const nameNode = rule.nameField === SELF_NAME_FIELD ? node : node.childForFieldName(rule.nameField)
+      // `matchDefinition` already confirmed `declaratorName` returns non-`undefined` for this same node
+      // when `rule` matched; the assertion below only satisfies the ternary's `SyntaxNode | null` type,
+      // mirroring `node.childForFieldName`'s own return type — not a runtime branch, so nothing here
+      // needs a test of its own.
+      const nameNode = rule.nameField === SELF_NAME_FIELD ? node
+        : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node) as SyntaxNode
+        : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
       // anonymous default export) parses as a different node type this rule never matches.
@@ -500,7 +701,12 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           endColumn: node.endPosition.column,
           isExported: isExported(node, spec.language, nameNode.text, commonJsExports),
           isAsync: hasKeywordChild(node, 'async'),
-          isStatic: hasKeywordChild(node, 'static'),
+          // Java nests every modifier keyword one level down inside a `modifiers` node rather than as
+          // a direct child of the declaration itself — see `javaHasModifier`. C wraps `static` in a
+          // `storage_class_specifier` — see `cHasStorageClassKeyword`.
+          isStatic: spec.language === 'java' ? javaHasModifier(node, 'static')
+            : spec.language === 'c' ? cHasStorageClassKeyword(node, 'static')
+            : hasKeywordChild(node, 'static'),
           decorators: pythonDecorators(node, spec.language),
         })
         heritage.push(...extractHeritage(node, rule.kind, key, spec.language))
@@ -528,9 +734,13 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           line: node.startPosition.row + 1,
           column: node.startPosition.column,
           // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
-          // system's view of the field lookup above, not a real possibility here.
+          // system's view of the field lookup above, not a real possibility here. The `object` check
+          // covers Java's `method_invocation`, whose `name` field is always a bare identifier — the
+          // receiver, if any, sits in a separate sibling field instead of wrapping the callee the way
+          // every other grammar's member expression does; no other call-type node in LANGUAGE_TABLE
+          // binds an `object` field, so this is a no-op for every other language.
           /* v8 ignore next */
-          isMemberCall: callee?.type !== 'identifier',
+          isMemberCall: callee?.type !== 'identifier' || node.childForFieldName('object') !== null,
         })
       }
     }
@@ -569,6 +779,10 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return pythonImports(node)
     case 'go':
       return goImports(node)
+    case 'java':
+      return javaImports(node)
+    case 'c':
+      return cIncludeImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -625,9 +839,15 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
  * defines: ECMAScript wraps an exported statement in `export_statement`, or — for CommonJS code, still
  * common outside pure-ESM projects — is named by a top-level `module.exports`/`exports` assignment (see
  * {@link commonJsExportedNames}); Go's spec defines an exported identifier as one starting with an
- * uppercase letter, with no separate keyword; Python defines no export construct at all, so every
- * Python declaration reports `false` rather than guess one from a naming convention or an `__all__`
- * list the extractor does not read.
+ * uppercase letter, with no separate keyword; Java marks a declaration exported by an explicit
+ * `public` modifier (see {@link javaHasModifier}) — an interface member's implicit `public` with no
+ * keyword at all is not detected, matching this function's existing refusal to infer visibility from
+ * anything but an explicit language construct; C's is external vs. internal *linkage* — a top-level
+ * function or variable without `static` has external linkage (visible to other translation units), the
+ * same real-rule precedent Go's capitalization check follows rather than a guess, reporting `false` for
+ * every other kind (`struct`, `enum`, `type_alias`), which has no comparable linkage concept of its own;
+ * Python defines no export construct at all, so every Python declaration reports `false` rather than
+ * guess one from a naming convention or an `__all__` list the extractor does not read.
  * @param node - the definition node.
  * @param language - the seam language label the file was parsed as.
  * @param name - the declaration's simple name.
@@ -636,6 +856,13 @@ function commonJsExportedNames(root: SyntaxNode): ReadonlySet<string> {
  */
 function isExported(node: SyntaxNode, language: string, name: string, commonJsExports: ReadonlySet<string>): boolean {
   if (language === 'go') return /^\p{Lu}/u.test(name)
+  if (language === 'java') return javaHasModifier(node, 'public')
+  if (language === 'c') {
+    // A top-level `declaration` (kind `variable`) is always module-scope — `scopeRestricted` already
+    // excludes the function-local case, so no further scope check is needed here.
+    if (node.type === 'function_definition' || node.type === 'declaration') return !cHasStorageClassKeyword(node, 'static')
+    return false
+  }
   if (language === 'python') return false
   if (commonJsExports.has(name)) return true
   let current: SyntaxNode | null = node.parent

@@ -515,3 +515,260 @@ func unexported() {}
     expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'A', kind: 'field', container: ['inner', 'Local'] }))
   })
 })
+
+describe('Java extraction', () => {
+  const SOURCE = `
+package com.example;
+
+import java.util.List;
+import java.util.Map;
+import static java.lang.Math.max;
+import java.util.*;
+
+public class Foo extends Base implements Runnable, Serializable {
+    public static final int X = 1;
+    private String name;
+
+    public Foo(String name) {
+        this.name = name;
+        helper();
+    }
+
+    public void run() {
+        this.helper();
+        Bar.staticCall();
+    }
+
+    private void helper() {}
+}
+
+interface Extra extends Runnable, AutoCloseable {
+    void extra();
+}
+
+enum Color { RED, GREEN }
+`
+
+  it('extracts a public class, exported by an explicit public modifier', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Foo', kind: 'class', isExported: true }))
+  })
+
+  it('extracts a constructor and methods as kind method, nested under their class', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Foo', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Foo', kind: 'method', container: ['Foo'] }))
+    expect(byName.get('run')).toMatchObject({ kind: 'method', container: ['Foo'], isExported: true })
+    expect(byName.get('helper')).toMatchObject({ kind: 'method', container: ['Foo'], isExported: false })
+  })
+
+  it('extracts a static final field, marked static, not exported without an explicit public check failing', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'X', kind: 'field', isStatic: true, isExported: true, container: ['Foo'] }),
+    )
+    expect(extraction.definitions).toContainEqual(
+      expect.objectContaining({ name: 'name', kind: 'field', isStatic: false, isExported: false, container: ['Foo'] }),
+    )
+  })
+
+  it('extracts call sites, distinguishing a bare call from this- and class-qualified member calls', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    const constructor = extraction.definitions.find(def => def.name === 'Foo' && def.kind === 'method')
+    const run = extraction.definitions.find(def => def.name === 'run')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: constructor?.key, calleeName: 'helper', isMemberCall: false }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: run?.key, calleeName: 'helper', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: run?.key, calleeName: 'staticCall', isMemberCall: true }),
+    )
+  })
+
+  it('extracts a regular import, a static import, and a wildcard import', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'List', importedName: '*', specifier: 'java.util.List' })
+    expect(extraction.imports).toContainEqual({ localName: 'max', importedName: '*', specifier: 'java.lang.Math.max' })
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'java.util' })
+  })
+
+  it('extracts a single-segment import (a bare identifier, not a scoped_identifier)', async () => {
+    const { extraction } = await extract('.java', 'import Foo;\n')
+    expect(extraction.imports).toEqual([{ localName: 'Foo', importedName: '*', specifier: 'Foo' }])
+  })
+
+  it('extracts no heritage from an interface with no extends clause', async () => {
+    const { extraction } = await extract('.java', 'interface Marker {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('extracts a class extends target alongside multiple implements targets', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    const foo = extraction.definitions.find(def => def.name === 'Foo' && def.kind === 'class')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: foo?.key, targetName: 'Base', relation: 'extends' },
+      { sourceKey: foo?.key, targetName: 'Runnable', relation: 'implements' },
+      { sourceKey: foo?.key, targetName: 'Serializable', relation: 'implements' },
+    ]))
+  })
+
+  it('does not name a generic implements target (a type_arguments-wrapped type)', async () => {
+    const { extraction } = await extract('.java', 'class Foo implements IThing<String> {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('extracts an interface extending multiple other interfaces', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    const extra = extraction.definitions.find(def => def.name === 'Extra')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: extra?.key, targetName: 'Runnable', relation: 'extends' },
+      { sourceKey: extra?.key, targetName: 'AutoCloseable', relation: 'extends' },
+    ]))
+  })
+
+  it('extracts enum constants nested under their enum', async () => {
+    const { extraction } = await extract('.java', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'RED', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'GREEN', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a record with an implements target, mapped to kind class', async () => {
+    const { extraction } = await extract('.java', 'record Point(int x, int y) implements Shape {}\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'Point', kind: 'class' })])
+    expect(extraction.heritage).toEqual([{ sourceKey: '0:0', targetName: 'Shape', relation: 'implements' }])
+  })
+
+  it('does not extract a local variable declared inside a method body', async () => {
+    const { extraction } = await extract('.java', 'class Foo {\n  void run() {\n    int local = 1;\n  }\n}\n')
+    expect(extraction.definitions.map(def => def.name)).toEqual(['Foo', 'run'])
+  })
+
+  it('does not extract a local variable declared inside a lambda body that is never itself a named definition', async () => {
+    const { extraction } = await extract(
+      '.java',
+      'class Foo {\n  Runnable r = () -> {\n    int local = 1;\n  };\n}\n',
+    )
+    expect(extraction.definitions.map(def => def.name)).toEqual(['Foo', 'r'])
+  })
+
+  it('extracts multi-name field declarations as independent field definitions', async () => {
+    const { extraction } = await extract('.java', 'class Foo {\n  int a = 1, b = 2;\n}\n')
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('a')).toMatchObject({ kind: 'field' })
+    expect(byName.get('b')).toMatchObject({ kind: 'field' })
+  })
+})
+
+describe('C extraction', () => {
+  const SOURCE = `
+#include <stdio.h>
+#include "local.h"
+
+struct Point {
+  int x;
+  int y;
+};
+
+enum Color { RED, GREEN = 5 };
+
+typedef struct Point PointT;
+
+int g = 1;
+static int hidden = 2;
+
+int add(int a, int b) {
+  return a + b;
+}
+
+static int helper(void) {
+  return add(1, 2);
+}
+
+int *make(int a) {
+  return &a;
+}
+
+void call_it(void) {
+  obj.method();
+  ptr->method2();
+  add(1, 2);
+}
+`
+
+  it('extracts a function via its nested declarator, exported without static', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('add')).toMatchObject({ kind: 'function', isExported: true, isStatic: false })
+    expect(byName.get('helper')).toMatchObject({ kind: 'function', isExported: false, isStatic: true })
+  })
+
+  it('unwraps a pointer-returning function declarator to its plain name', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'make', kind: 'function' }))
+  })
+
+  it('extracts a top-level variable, exported without static, via its init_declarator', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('g')).toMatchObject({ kind: 'variable', isExported: true })
+    expect(byName.get('hidden')).toMatchObject({ kind: 'variable', isExported: false, isStatic: true })
+  })
+
+  it('does not extract a variable declared inside a function body', async () => {
+    const { extraction } = await extract('.c', 'void f(void) { int x = 1; }\n')
+    expect(extraction.definitions.map(def => def.name)).toEqual(['f'])
+  })
+
+  it('extracts a struct, its fields nested under it, and an enum with its members', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'struct' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'RED', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'GREEN', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a typedef as a type_alias', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'PointT', kind: 'type_alias' }))
+  })
+
+  it('does not extract a multi-declarator declaration rather than pick just the first name', async () => {
+    const { extraction } = await extract('.c', 'int a, b;\n')
+    expect(extraction.definitions).toEqual([])
+  })
+
+  it('unwraps a parenthesized function-pointer declarator to its plain name', async () => {
+    const { extraction } = await extract('.c', 'int (*fp)(void);\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'fp', kind: 'variable' })])
+  })
+
+  it('extracts call sites, distinguishing a bare call from field-access member calls', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    const callIt = extraction.definitions.find(def => def.name === 'call_it')
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'method', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'method2', isMemberCall: true }),
+    )
+    expect(extraction.calls).toContainEqual(
+      expect.objectContaining({ callerKey: callIt?.key, calleeName: 'add', isMemberCall: false }),
+    )
+  })
+
+  it('extracts a system and a local #include, with no local binding', async () => {
+    const { extraction } = await extract('.c', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'stdio.h' })
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'local.h' })
+  })
+
+  it('extracts an empty local #include as an empty specifier', async () => {
+    const { extraction } = await extract('.c', '#include ""\n')
+    expect(extraction.imports).toEqual([{ localName: '', importedName: '*', specifier: '' }])
+  })
+})

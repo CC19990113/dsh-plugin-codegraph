@@ -69,6 +69,15 @@ export interface DefinitionRule {
  */
 export const SELF_NAME_FIELD = '@self'
 
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name sits behind an arbitrarily deep
+ * chain of C/C++ `declarator` wrappers — `int *make(int a)`'s name is three `declarator` fields down
+ * (`pointer_declarator` → `function_declarator` → `identifier`), and a plain `int g` binds its
+ * `identifier` directly with no wrapper at all. See `declaratorName` in `extract.ts`, which this
+ * sentinel dispatches to instead of a flat `childForFieldName` lookup.
+ */
+export const DECLARATOR_NAME_FIELD = '@declarator'
+
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
   /** The tree-sitter node type anchoring one import statement, e.g. `import_statement`. */
@@ -247,6 +256,79 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // A closure literal (`f := func() { ... }`) is never itself named, so it never matches a
     // `DefinitionRule` — but a `var`/`const` inside its body is still function-local.
     bareFunctionScopeTypes: ['func_literal'],
+  },
+  {
+    language: 'java',
+    extensions: ['.java'],
+    wasmFile: 'tree-sitter-java.wasm',
+    definitions: [
+      { nodeType: 'class_declaration', kind: 'class', nameField: 'name' },
+      // A record has no dedicated seam kind — `class` is the closest existing fit for a concrete type
+      // declaration with a body, and (like a class) it can `implements` an interface; see
+      // `javaHeritage` in extract.ts.
+      { nodeType: 'record_declaration', kind: 'class', nameField: 'name' },
+      { nodeType: 'interface_declaration', kind: 'interface', nameField: 'name' },
+      { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+      // Unlike TypeScript's bare `property_identifier` enum member (see TYPESCRIPT_DEFINITIONS),
+      // Java's `enum_constant` already carries its own `name` field — verified against a real parse.
+      { nodeType: 'enum_constant', kind: 'enum_member', nameField: 'name' },
+      { nodeType: 'method_declaration', kind: 'method', nameField: 'name' },
+      // No dedicated `constructor` seam kind exists; a constructor is a method in every way this
+      // package's graph cares about.
+      { nodeType: 'constructor_declaration', kind: 'method', nameField: 'name' },
+      // A field (`field_declaration`) and a local variable (`local_variable_declaration`) both wrap one
+      // or more `variable_declarator` children directly, each carrying its own `name` field — unlike
+      // Go's `const_spec`/`var_spec`, a multi-name Java declaration (`int x = 1, y = 2;`) is not one
+      // ambiguous shared name field but several independent `variable_declarator` nodes, each visited
+      // (and named) on its own, so no `nameNodeTypes`-style rejection is needed here.
+      { nodeType: 'variable_declarator', kind: 'field', nameField: 'name', parentType: 'field_declaration', scopeRestricted: true },
+      { nodeType: 'variable_declarator', kind: 'variable', nameField: 'name', parentType: 'local_variable_declaration', scopeRestricted: true },
+    ],
+    callTypes: ['method_invocation'],
+    // Unlike the ECMAScript/Go/Python call node's `function` field (an expression this package's
+    // `calleeName` unwraps down to a simple name), Java's `method_invocation` already exposes the
+    // callee's simple name directly through its own `name` field — the receiver, if any, is a sibling
+    // `object` field extract.ts checks separately to tell a member call from a bare one. Verified
+    // against a real parse, not guessed.
+    callFunctionField: 'name',
+    importTypes: ['import_declaration'],
+    // A lambda body (`() -> { int x = 1; }`) is never itself named, so it never matches a
+    // `DefinitionRule` — but a local variable inside its block body is still function-local, the same
+    // reasoning `ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES` applies to an arrow function.
+    bareFunctionScopeTypes: ['lambda_expression'],
+  },
+  {
+    language: 'c',
+    extensions: ['.c', '.h'],
+    wasmFile: 'tree-sitter-c.wasm',
+    definitions: [
+      // No dedicated `union` seam kind exists; `struct` is the closest existing fit for a
+      // concrete-layout aggregate type, matching Java's record→`class` precedent.
+      { nodeType: 'struct_specifier', kind: 'struct', nameField: 'name' },
+      { nodeType: 'union_specifier', kind: 'struct', nameField: 'name' },
+      { nodeType: 'enum_specifier', kind: 'enum', nameField: 'name' },
+      // `enumerator` carries its own `name` field directly, unlike TypeScript's bare enum member —
+      // verified against a real parse, not guessed.
+      { nodeType: 'enumerator', kind: 'enum_member', nameField: 'name' },
+      // A typedef's `declarator` names the alias directly (`typedef struct Point PointT;`'s
+      // `declarator` is the plain `type_identifier` "PointT", no wrapper) — unlike a function or
+      // variable declarator, verified against a real parse, not guessed.
+      { nodeType: 'type_definition', kind: 'type_alias', nameField: 'declarator' },
+      // `function_definition`'s name sits behind a `pointer_declarator`/`function_declarator` chain of
+      // arbitrary depth — see `DECLARATOR_NAME_FIELD`.
+      { nodeType: 'function_definition', kind: 'function', nameField: DECLARATOR_NAME_FIELD },
+      // A struct/union member (`field_declaration`) — same declarator-nesting rule as a top-level
+      // variable, minus the multi-declarator ambiguity Go's `field_declaration` has none of either.
+      { nodeType: 'field_declaration', kind: 'field', nameField: DECLARATOR_NAME_FIELD },
+      // A top-level or function-local `int g = 1;`/`int x;` — both parse as `declaration`, distinguished
+      // only by where the walk currently sits, the same convention JS/Python/Go's local-variable rules
+      // already follow.
+      { nodeType: 'declaration', kind: 'variable', nameField: DECLARATOR_NAME_FIELD, scopeRestricted: true },
+    ],
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    importTypes: ['preproc_include'],
+    bareFunctionScopeTypes: [],
   },
 ]
 
