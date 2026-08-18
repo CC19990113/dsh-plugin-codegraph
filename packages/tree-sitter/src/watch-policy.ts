@@ -66,10 +66,15 @@ function isDrvfsMountPath(root: string): boolean {
   return /^\/mnt\/[a-z](\/|$)/i.test(normalized)
 }
 
-/** The real {@link WatchPolicyInput.procVersion}: reads `/proc/version`, `undefined` on any failure. */
-export function readProcVersion(): string | undefined {
+/**
+ * The real {@link WatchPolicyInput.procVersion}: reads `/proc/version`, `undefined` on any failure.
+ * @param path - overridable only so tests can force both the success and failure path deterministically
+ * on any OS — whether the real `/proc/version` exists depends on the platform running the test, which
+ * would otherwise make one of these two branches uncovered depending on where CI happens to run.
+ */
+export function readProcVersion(path = '/proc/version'): string | undefined {
   try {
-    return readFileSync('/proc/version', 'utf8')
+    return readFileSync(path, 'utf8')
   } catch {
     return undefined
   }

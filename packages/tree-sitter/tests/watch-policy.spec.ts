@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { decideWatch, readProcVersion } from '../src/watch-policy.ts'
 import type { WatchPolicyInput } from '../src/watch-policy.ts'
@@ -94,8 +97,18 @@ describe('decideWatch', () => {
 })
 
 describe('readProcVersion', () => {
-  it('never throws, returning a string or undefined depending on whether /proc/version exists', () => {
-    const result = readProcVersion()
-    expect(result === undefined || typeof result === 'string').toBe(true)
+  // Both cases pass an explicit path rather than relying on the real /proc/version: whether that
+  // file exists depends on the OS running the test, which would make one of these two branches
+  // uncovered depending on where CI happens to run (this exact gap broke the coverage gate in CI
+  // once already — the real /proc/version exists on the Linux runner but not on a macOS dev machine).
+  it('returns the file contents when the path is readable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-codegraph-watch-policy-'))
+    const path = join(dir, 'version')
+    await writeFile(path, '5.15.0-generic\n', 'utf8')
+    expect(readProcVersion(path)).toBe('5.15.0-generic\n')
+  })
+
+  it('returns undefined, never throwing, when the path does not exist', () => {
+    expect(readProcVersion('/definitely/does/not/exist/proc-version')).toBeUndefined()
   })
 })
