@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { resolveWorkspace } from '../src/resolve.ts'
 import type { ExtractedFile } from '../src/resolve.ts'
-import type { RawCall, RawDefinition, RawImport } from '../src/extract.ts'
+import type { RawCall, RawDefinition, RawHeritageRef, RawImport } from '../src/extract.ts'
 
 const NOW = 1700000000000
 
@@ -26,6 +26,7 @@ function file(
   definitions: RawDefinition[],
   calls: RawCall[] = [],
   imports: RawImport[] = [],
+  heritage: RawHeritageRef[] = [],
 ): ExtractedFile {
   return {
     path,
@@ -34,7 +35,7 @@ function file(
     modifiedAt: NOW,
     contentHash: 'hash',
     lineCount: 10,
-    extraction: { definitions, calls, imports },
+    extraction: { definitions, calls, imports, heritage },
   }
 }
 
@@ -264,5 +265,69 @@ describe('resolveWorkspace', () => {
     ]
     const graph = resolveWorkspace(files, NOW)
     expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'a.ts:1:0', target: 'b.ts:1:0', kind: 'calls', line: 2, col: 2 }))
+  })
+
+  describe('extends/implements resolution', () => {
+    it('resolves rule 1: an extends target imported from a workspace file', () => {
+      const files = [
+        file(
+          'a.ts',
+          [def({ key: '1:0', name: 'Foo', kind: 'class' })],
+          [],
+          [{ localName: 'Base', importedName: 'Base', specifier: './b' }],
+          [{ sourceKey: '1:0', targetName: 'Base', relation: 'extends' }],
+        ),
+        file('b.ts', [def({ key: '1:0', name: 'Base', kind: 'class' })]),
+      ]
+      const graph = resolveWorkspace(files, NOW)
+      expect(graph.edges).toContainEqual({ source: 'a.ts:1:0', target: 'b.ts:1:0', kind: 'extends', provenance: 'tree-sitter' })
+    })
+
+    it('resolves rule 2: an implements target with no matching import but a workspace-wide-unique name', () => {
+      const files = [
+        file(
+          'a.ts',
+          [def({ key: '1:0', name: 'Foo', kind: 'class' })],
+          [],
+          [],
+          [{ sourceKey: '1:0', targetName: 'IThing', relation: 'implements' }],
+        ),
+        file('b.ts', [def({ key: '1:0', name: 'IThing', kind: 'interface' })]),
+      ]
+      const graph = resolveWorkspace(files, NOW)
+      expect(graph.edges).toContainEqual({ source: 'a.ts:1:0', target: 'b.ts:1:0', kind: 'implements', provenance: 'tree-sitter' })
+    })
+
+    it('rule 3: an ambiguous heritage target is silently dropped, not routed through `unresolved`', () => {
+      const files = [
+        file(
+          'a.ts',
+          [def({ key: '1:0', name: 'Foo', kind: 'class' })],
+          [],
+          [],
+          [{ sourceKey: '1:0', targetName: 'Base', relation: 'extends' }],
+        ),
+        file('b.ts', [def({ key: '1:0', name: 'Base', kind: 'class' })]),
+        file('c.ts', [def({ key: '1:0', name: 'Base', kind: 'class' })]),
+      ]
+      const graph = resolveWorkspace(files, NOW)
+      expect(graph.edges.filter(edge => edge.kind === 'extends')).toEqual([])
+      expect(graph.unresolved).toEqual([])
+    })
+
+    it('does not let a same-named function win a heritage reference (type-only name index)', () => {
+      const files = [
+        file(
+          'a.ts',
+          [def({ key: '1:0', name: 'Foo', kind: 'class' })],
+          [],
+          [],
+          [{ sourceKey: '1:0', targetName: 'Base', relation: 'extends' }],
+        ),
+        file('b.ts', [def({ key: '1:0', name: 'Base', kind: 'function' })]),
+      ]
+      const graph = resolveWorkspace(files, NOW)
+      expect(graph.edges.filter(edge => edge.kind === 'extends')).toEqual([])
+    })
   })
 })

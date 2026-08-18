@@ -221,6 +221,60 @@ describe('CommonJS module.exports/exports export detection', () => {
   })
 })
 
+describe('extends/implements (heritage) extraction', () => {
+  it('extracts no heritage from a class with none', async () => {
+    const { extraction } = await extract('.ts', 'class Foo {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('extracts a TypeScript extends target, keyed to the declaring class', async () => {
+    const { extraction } = await extract('.ts', 'class Foo extends Base {}\n')
+    expect(extraction.heritage).toEqual([{ sourceKey: '0:0', targetName: 'Base', relation: 'extends' }])
+  })
+
+  it('extracts multiple TypeScript implements targets alongside an extends target', async () => {
+    const { extraction } = await extract('.ts', 'class Foo extends Base implements IThing, IOther {}\n')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: '0:0', targetName: 'Base', relation: 'extends' },
+      { sourceKey: '0:0', targetName: 'IThing', relation: 'implements' },
+      { sourceKey: '0:0', targetName: 'IOther', relation: 'implements' },
+    ]))
+  })
+
+  it('does not name a mixin extends target after its call expression (extending a function call result)', async () => {
+    const { extraction } = await extract('.ts', 'class Foo extends mixin(Base) {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('does not name a generic implements target (implements clause has a type_arguments wrapper)', async () => {
+    const { extraction } = await extract('.ts', 'class Foo implements IThing<T> {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('does not name a plain JavaScript extends target that is not a bare identifier', async () => {
+    const { extraction } = await extract('.js', 'class Foo extends (class {}) {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('extracts a plain JavaScript extends target (class_heritage with no extends_clause wrapper)', async () => {
+    const { extraction } = await extract('.js', 'class Foo extends Base {}\n')
+    expect(extraction.heritage).toEqual([{ sourceKey: '0:0', targetName: 'Base', relation: 'extends' }])
+  })
+
+  it('extracts a TypeScript interface extending multiple other interfaces', async () => {
+    const { extraction } = await extract('.ts', 'interface C extends A, B {}\n')
+    expect(extraction.heritage).toEqual(expect.arrayContaining([
+      { sourceKey: '0:0', targetName: 'A', relation: 'extends' },
+      { sourceKey: '0:0', targetName: 'B', relation: 'extends' },
+    ]))
+  })
+
+  it('extracts no heritage from an interface with no extends clause', async () => {
+    const { extraction } = await extract('.ts', 'interface IThing {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+})
+
 describe('TSX extraction', () => {
   it('parses TSX syntax and extracts its function definition', async () => {
     const { extraction } = await extract('.tsx', 'export function App() { return <div>hi</div> }\n')
@@ -329,6 +383,16 @@ import os
   it('extracts an absolute (non-relative) from-import without confusing the module name for an imported symbol', async () => {
     const { extraction } = await extract('.py', 'from os import path\n')
     expect(extraction.imports).toEqual([{ localName: 'path', importedName: 'path', specifier: 'os' }])
+  })
+
+  it('extracts base classes from a Python class_definition, filtering out a keyword argument', async () => {
+    const { extraction } = await extract('.py', 'class Foo(Base, metaclass=Meta):\n    pass\n')
+    expect(extraction.heritage).toEqual([{ sourceKey: '0:0', targetName: 'Base', relation: 'extends' }])
+  })
+
+  it('extracts no heritage from a Python class with no base classes', async () => {
+    const { extraction } = await extract('.py', 'class Foo:\n    pass\n')
+    expect(extraction.heritage).toEqual([])
   })
 })
 

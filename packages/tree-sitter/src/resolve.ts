@@ -170,6 +170,26 @@ function buildNameIndex(nodesByFile: ReadonlyMap<string, GraphNode[]>): Map<stri
   return index
 }
 
+/**
+ * A name index restricted to `class`/`interface` nodes, for `extends`/`implements` resolution.
+ * `extractHeritage` only ever names a base class or interface, never a function or variable — indexing
+ * only those kinds keeps a same-named function or module-level `const` (`packages/tree-sitter/src/
+ * languages.ts` extracts those now too) from ever winning a heritage reference by coincidence, tighter
+ * than `buildNameIndex`'s workspace-wide, any-kind index that call resolution already accepts.
+ */
+function buildTypeNameIndex(nodesByFile: ReadonlyMap<string, GraphNode[]>): Map<string, GraphNode[]> {
+  const index = new Map<string, GraphNode[]>()
+  for (const nodes of nodesByFile.values()) {
+    for (const node of nodes) {
+      if (node.kind !== 'class' && node.kind !== 'interface') continue
+      const existing = index.get(node.name)
+      if (existing === undefined) index.set(node.name, [node])
+      else existing.push(node)
+    }
+  }
+  return index
+}
+
 /** One file's import bindings resolved to a workspace file, keyed by the local name they bind. */
 interface FileImportBindings {
   readonly byLocalName: ReadonlyMap<string, { readonly targetFile: string; readonly importedName: string }>
@@ -265,6 +285,7 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
   }
 
   const nameIndex = buildNameIndex(nodesByFile)
+  const typeNameIndex = buildTypeNameIndex(nodesByFile)
   const unresolved: UnresolvedRef[] = []
 
   for (const file of files) {
@@ -277,7 +298,7 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
     const importedLocalNames = new Set(file.extraction.imports.map(binding => binding.localName))
     for (const call of file.extraction.calls) {
       const callerId = call.callerKey === null ? mustGet(fileNodeId, file.path) : mustGet(keyToId, call.callerKey)
-      const resolved = resolveCall(call.calleeName, bindings, nodesByFile, nameIndex)
+      const resolved = resolveName(call.calleeName, bindings, nodesByFile, nameIndex)
       if (resolved === undefined) {
         const likelyExternal = call.isMemberCall || importedLocalNames.has(call.calleeName)
         unresolved.push({ source: callerId, filePath: file.path, calleeName: call.calleeName, line: call.line, col: call.column, likelyExternal })
@@ -285,13 +306,29 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
       }
       edges.push({ source: callerId, target: resolved, kind: 'calls', line: call.line, col: call.column, provenance: 'tree-sitter' })
     }
+
+    // An unresolved `extends`/`implements` reference is dropped silently, not routed through
+    // `unresolved` — that array (and the `unresolvedCount`/`unresolvedLikelyInternalCount` split built
+    // on it) is a calibrated signal specifically about call-resolution gaps; folding in a different edge
+    // kind would change what that count measures.
+    for (const ref of file.extraction.heritage) {
+      const resolved = resolveName(ref.targetName, bindings, nodesByFile, typeNameIndex)
+      if (resolved === undefined) continue
+      edges.push({ source: mustGet(keyToId, ref.sourceKey), target: resolved, kind: ref.relation, provenance: 'tree-sitter' })
+    }
   }
 
   return { nodes, edges, unresolved }
 }
 
-/** Resolve one call's callee name to exactly one declaration, or `undefined` per rule 3. */
-function resolveCall(
+/**
+ * Resolve a bare name to exactly one declaration, or `undefined` per rule 3 — shared by call
+ * resolution (against the workspace-wide, any-kind `nameIndex`) and `extends`/`implements` resolution
+ * (against the `class`/`interface`-only {@link buildTypeNameIndex}); the two-tier rule itself (an
+ * imported binding wins if unambiguous in its target file, else a workspace-wide-unique name wins) does
+ * not depend on which candidate pool the caller passes in.
+ */
+function resolveName(
   calleeName: string,
   bindings: FileImportBindings,
   nodesByFile: ReadonlyMap<string, GraphNode[]>,

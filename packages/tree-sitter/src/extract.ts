@@ -64,11 +64,22 @@ export interface RawImport {
   readonly specifier: string
 }
 
+/** One `extends`/`implements` reference a captured class or interface declares, before resolution. */
+export interface RawHeritageRef {
+  /** The declaring class or interface's own {@link RawDefinition.key}. */
+  readonly sourceKey: string
+  /** The base/interface's simple name — a member expression or call (a mixin, `class X extends f(Y)`)
+   * is not a name this package attempts to resolve, matching its existing "don't guess" precedent. */
+  readonly targetName: string
+  readonly relation: 'extends' | 'implements'
+}
+
 /** Everything one file's walk produced. */
 export interface FileExtraction {
   readonly definitions: RawDefinition[]
   readonly calls: RawCall[]
   readonly imports: RawImport[]
+  readonly heritage: RawHeritageRef[]
 }
 
 /** A node's named children, with the `null` slots `web-tree-sitter` reserves for missing nodes dropped. */
@@ -297,6 +308,96 @@ function goImports(node: SyntaxNode): RawImport[] {
   })
 }
 
+/** Whether `node` is a bare name this package resolves heritage references against — a member
+ * expression (`ns.Base`) or a call (a mixin, `f(Base)`) is not, matching the "don't guess" precedent
+ * `calleeName`/`ecmascriptImports` already follow for shapes they do not fully resolve. */
+function isHeritageName(node: SyntaxNode): boolean {
+  return node.type === 'identifier' || node.type === 'type_identifier'
+}
+
+/**
+ * ECMAScript-family `extends`/`implements` extraction from a `class_declaration`'s `class_heritage`
+ * child. Plain JavaScript's `class_heritage` wraps the extended expression directly (`extends Base` has
+ * no further wrapper — JavaScript has no `implements`); TypeScript's wraps an `extends_clause` and an
+ * optional `implements_clause` instead, verified against a real parse, not guessed.
+ * @param node - the `class_declaration` node.
+ * @param sourceKey - the declaring class's own {@link RawDefinition.key}.
+ * @returns every heritage reference the class declares.
+ */
+function ecmascriptClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const heritage = namedChildren(node).find(child => child.type === 'class_heritage')
+  if (heritage === undefined) return []
+  const refs: RawHeritageRef[] = []
+  for (const child of namedChildren(heritage)) {
+    if (child.type === 'extends_clause') {
+      const target = namedChildren(child)[0]
+      if (target !== undefined && isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'extends' })
+      continue
+    }
+    if (child.type === 'implements_clause') {
+      for (const impl of namedChildren(child)) {
+        if (isHeritageName(impl)) refs.push({ sourceKey, targetName: impl.text, relation: 'implements' })
+      }
+      continue
+    }
+    // Plain JavaScript: `child` is the extended expression itself.
+    if (isHeritageName(child)) refs.push({ sourceKey, targetName: child.text, relation: 'extends' })
+  }
+  return refs
+}
+
+/**
+ * TypeScript `interface_declaration` `extends` extraction from its `extends_type_clause` child — an
+ * interface can extend more than one other interface (`interface C extends A, B {}`).
+ * @param node - the `interface_declaration` node.
+ * @param sourceKey - the declaring interface's own {@link RawDefinition.key}.
+ * @returns every heritage reference the interface declares.
+ */
+function tsInterfaceHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const clause = namedChildren(node).find(child => child.type === 'extends_type_clause')
+  if (clause === undefined) return []
+  return namedChildren(clause)
+    .filter(isHeritageName)
+    .map(target => ({ sourceKey, targetName: target.text, relation: 'extends' as const }))
+}
+
+/**
+ * Python `class_definition` base-class extraction from its `argument_list` child — shared with call
+ * argument syntax, so a `keyword_argument` (`metaclass=Meta`) is filtered out rather than treated as a
+ * base; Python draws no distinction between a base class and an interface, so every entry is `extends`.
+ * @param node - the `class_definition` node.
+ * @param sourceKey - the declaring class's own {@link RawDefinition.key}.
+ * @returns every heritage reference the class declares.
+ */
+function pythonClassHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const args = namedChildren(node).find(child => child.type === 'argument_list')
+  if (args === undefined) return []
+  return namedChildren(args)
+    .filter(isHeritageName)
+    .map(target => ({ sourceKey, targetName: target.text, relation: 'extends' as const }))
+}
+
+/**
+ * Dispatch heritage extraction to the language family that owns a captured class or interface node's
+ * syntax. Go is absent: its interfaces are satisfied structurally, never declared at the implementing
+ * type, so there is no static reference here to extract.
+ * @param node - the captured `class`- or `interface`-kind definition node.
+ * @param kind - the captured definition's seam kind (`'class'` or `'interface'`).
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @param language - the seam language label the file was parsed as.
+ * @returns every heritage reference the definition declares.
+ */
+function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, language: string): RawHeritageRef[] {
+  // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's `interface_declaration` rule —
+  // no other language in LANGUAGE_TABLE produces it.
+  if (kind === 'interface') return tsInterfaceHeritage(node, sourceKey)
+  if (kind !== 'class') return []
+  if (language === 'python') return pythonClassHeritage(node, sourceKey)
+  // `kind === 'class'` otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule —
+  // Go has no class concept, so this is never reached with `language === 'go'`.
+  return ecmascriptClassHeritage(node, sourceKey)
+}
+
 /**
  * Extract every definition, call, and import from one parsed file.
  * @param tree - the file's parsed syntax tree.
@@ -307,6 +408,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
   const definitions: RawDefinition[] = []
   const calls: RawCall[] = []
   const imports: RawImport[] = []
+  const heritage: RawHeritageRef[] = []
   const containerNames: string[] = []
   const containerKeys: (string | null)[] = [null]
   const commonJsExports = ECMASCRIPT_LANGUAGES.has(spec.language) ? commonJsExportedNames(tree.rootNode) : EMPTY_NAME_SET
@@ -345,6 +447,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
           isAsync: hasKeywordChild(node, 'async'),
           isStatic: hasKeywordChild(node, 'static'),
         })
+        heritage.push(...extractHeritage(node, rule.kind, key, spec.language))
         containerNames.push(nameNode.text)
         containerKeys.push(key)
         scopeKinds.push(rule.kind === 'class' ? 'class' : 'other')
@@ -395,7 +498,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
   }
 
   visit(tree.rootNode)
-  return { definitions, calls, imports }
+  return { definitions, calls, imports, heritage }
 }
 
 /** Dispatch import extraction to the language family that owns `node`'s syntax. */
