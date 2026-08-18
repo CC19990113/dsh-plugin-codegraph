@@ -108,6 +108,19 @@ export const FIRST_CHILD_NAME_FIELD = '@first-child'
  */
 export const PHP_ELEMENT_NAME_FIELD = '@php-element'
 
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is Kotlin-specific: the bundled
+ * `tree-sitter-kotlin` grammar this package loads binds *no* grammar fields at all (verified against a
+ * real parse — `Language.fieldCount`/`fieldNameForId` enumerate zero for it), unlike every other grammar
+ * this package extracts from, so a plain `childForFieldName` lookup can never work here regardless of
+ * which field name is named. A `class_declaration`'s/`function_declaration`'s/`enum_entry`'s declared
+ * name is instead the first direct named child typed `type_identifier` (a class/interface/enum name) or
+ * `simple_identifier` (a function/enum-entry name) — found by type rather than by position, since an
+ * optional leading `modifiers` node (wrapping `private`/`internal`/…) would otherwise sit at index 0
+ * ahead of it. See `kotlinDeclaredName` in `extract.ts`, which this sentinel dispatches to.
+ */
+export const KOTLIN_NAME_FIELD = '@kotlin-name'
+
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
   /** The tree-sitter node type anchoring one import statement, e.g. `import_statement`. */
@@ -652,6 +665,51 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // workspace symbol, so both push `'other'` scope for their body the same way a callback's function
     // value does elsewhere in this file. Verified against a real parse, not guessed.
     bareFunctionScopeTypes: ['test_declaration', 'comptime_declaration'],
+  },
+  {
+    language: 'kotlin',
+    extensions: ['.kt', '.kts'],
+    wasmFile: 'tree-sitter-kotlin.wasm',
+    definitions: [
+      // Kotlin's grammar gives `class`/`interface`/`enum class` the very same `class_declaration` node
+      // type, distinguished only by a bare `interface`/`enum` keyword among its own children (`interface
+      // Shape {}` carries a bare `interface` token, `enum class Color {}` carries both a bare `enum` and
+      // a bare `class` token, a plain `class Foo {}` carries only `class`) — no rule here can vary `kind`
+      // by a keyword the way this needs, so `extractFile` computes it via `kotlinClassKind` instead (see
+      // there), the same "kind computed per node, not fixed per rule" precedent Zig's `variable_declaration`
+      // entry already establishes above. Verified against a real parse, not guessed.
+      { nodeType: 'class_declaration', kind: 'class', nameField: KOTLIN_NAME_FIELD },
+      // A method is a `function_declaration` directly inside a `class_body` — the same node type a
+      // top-level function uses (including one inside a `companion_object`'s own nested `class_body`,
+      // still reported as a method of the enclosing type) — tried first, before the unrestricted
+      // `function` rule below falls through to everything else. Verified against a real parse.
+      { nodeType: 'function_declaration', kind: 'method', nameField: KOTLIN_NAME_FIELD, parentType: 'class_body' },
+      { nodeType: 'function_declaration', kind: 'function', nameField: KOTLIN_NAME_FIELD },
+      // An enum constant — verified against a real parse, not guessed; can only ever appear directly
+      // inside an `enum_class_body`, so — like Go's/Rust's/Zig's own field rules — no
+      // `scopeRestricted`/`parentType` guard is needed: the node type itself is unambiguous.
+      { nodeType: 'enum_entry', kind: 'enum_member', nameField: KOTLIN_NAME_FIELD },
+      // Deliberately no `field`/`property`/`variable`/`constant` kind at all: a `property_declaration`
+      // (`val`/`var`, at class-member, top-level, or local scope) binds its declared name two levels
+      // down, inside its own nested `variable_declaration` child, itself positioned after an optional
+      // leading `modifiers` node the same way a captured declaration is — extracting it cleanly would
+      // need its own multi-level, fully positional (there being no fields at all) navigation on top of
+      // everything `KOTLIN_NAME_FIELD` already handles, and this file's "don't guess/don't overreach"
+      // precedent (already applied to Lua's/Ruby's own locally-bound values) draws the line here instead.
+    ],
+    // `call_expression`'s callee is never bound to a field either — see `kotlinCallee` in extract.ts,
+    // consulted directly by a dedicated dispatch branch in `extractFile` rather than through
+    // `callFunctionField`, which (like every other field name) can never resolve anything for this
+    // grammar. `function` is kept only as a placeholder so this table entry still type-checks as a
+    // normal `LanguageSpec`; it is never actually read for Kotlin.
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    importTypes: ['import_header'],
+    // No anonymous-function-literal shape needs special-casing: a lambda's body is a `{ ... }` block
+    // that can contain a statement, exactly like every captured `function_declaration`'s own body, but
+    // this file already declines to capture any local `val`/`var` at all for Kotlin (see above), so
+    // there is currently no scope-restricted rule this could matter to.
+    bareFunctionScopeTypes: [],
   },
 ]
 

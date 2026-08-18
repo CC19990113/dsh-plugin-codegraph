@@ -1566,3 +1566,95 @@ test "example" {
     expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Slot', kind: 'struct' }))
   })
 })
+
+describe('Kotlin extraction', () => {
+  const SOURCE = `
+package com.example
+
+import kotlin.math.abs
+import java.util.List as JList
+import kotlin.collections.*
+
+class Person(val name: String) : Base(), Shape {
+    fun greet(): String {
+        return "hi"
+    }
+
+    companion object {
+        fun create(name: String): Person {
+            return Person(name)
+        }
+    }
+}
+
+interface Shape {
+    fun area(): Double
+}
+
+enum class Color {
+    RED, GREEN, BLUE
+}
+
+private fun helper() {}
+
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun main() {
+    add(1, 2)
+    val p = Person("Bob")
+    p.greet()
+    kotlin.math.abs(-1)
+}
+`
+
+  it('extracts a top-level function, exported by default, and a private one, not exported', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'helper', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a class with a method nested under it, and a companion object method also nested under it', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Person', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'greet', kind: 'method', container: ['Person'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'create', kind: 'method', container: ['Person'] }))
+  })
+
+  it('extracts an interface as kind interface, distinct from a plain class', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'interface' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts an enum class as kind enum, with its entries as enum_member', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'RED', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'GREEN', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'BLUE', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts a delegation specifier list as heritage extends, for both the base call and the bare interface', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    const person = extraction.definitions.find(def => def.name === 'Person')
+    expect(extraction.heritage).toContainEqual({ sourceKey: person?.key, targetName: 'Base', relation: 'extends' })
+    expect(extraction.heritage).toContainEqual({ sourceKey: person?.key, targetName: 'Shape', relation: 'extends' })
+  })
+
+  it('extracts a bare call and a dot member call, including a chained one, distinguishing their trust level', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    const main = extraction.definitions.find(def => def.name === 'main')
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'add', isMemberCall: false }))
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'greet', isMemberCall: true }))
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'abs', isMemberCall: true }))
+  })
+
+  it('extracts a plain import, an aliased import, and a wildcard import', async () => {
+    const { extraction } = await extract('.kt', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'abs', importedName: 'abs', specifier: 'kotlin.math.abs' })
+    expect(extraction.imports).toContainEqual({ localName: 'JList', importedName: 'List', specifier: 'java.util.List' })
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'kotlin.collections' })
+  })
+})

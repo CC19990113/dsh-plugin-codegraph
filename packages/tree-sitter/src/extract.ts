@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
+import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, KOTLIN_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -373,6 +373,137 @@ function zigImportBinding(node: SyntaxNode, localName: string): RawImport | unde
   return { localName, importedName: '*', specifier }
 }
 
+/**
+ * A Kotlin `class_declaration`/`function_declaration`/`enum_entry`'s declared name — see
+ * {@link KOTLIN_NAME_FIELD}. Found by node type among direct named children rather than by position,
+ * since an optional leading `modifiers` node (`private fun foo()`'s own wrapping `modifiers` node,
+ * itself containing a `visibility_modifier`) would otherwise occupy index 0 ahead of the real name.
+ * Verified against a real parse, not guessed.
+ */
+function kotlinDeclaredName(node: SyntaxNode): SyntaxNode | undefined {
+  return namedChildren(node).find(child => child.type === 'simple_identifier' || child.type === 'type_identifier')
+}
+
+/**
+ * The Kotlin `modifiers` node wrapping a declaration's `private`/`internal`/`protected`/`public`
+ * keyword (and any annotations), if present — unlike a bare keyword token directly on the declaration
+ * itself (see `hasKeywordChild`), Kotlin always wraps its visibility keyword one level down inside a
+ * `visibility_modifier` child of this node. Verified against a real parse, not guessed.
+ */
+function kotlinModifiersNode(node: SyntaxNode): SyntaxNode | undefined {
+  return namedChildren(node).find(child => child.type === 'modifiers')
+}
+
+/** Whether a Kotlin declaration's `modifiers` node (see {@link kotlinModifiersNode}) carries a
+ * `visibility_modifier` with the given keyword text. Verified against a real parse, not guessed. */
+function kotlinHasVisibility(node: SyntaxNode, keyword: string): boolean {
+  const modifiers = kotlinModifiersNode(node)
+  if (modifiers === undefined) return false
+  return namedChildren(modifiers).some(child => child.type === 'visibility_modifier' && hasKeywordChild(child, keyword))
+}
+
+/**
+ * The seam kind a Kotlin `class_declaration` actually reports — `class`, `interface`, and `enum class`
+ * all share this one node type, distinguished only by a bare `interface`/`enum` keyword among the
+ * declaration's own children (never wrapped, unlike a visibility keyword — see
+ * {@link kotlinModifiersNode}); `DefinitionRule.kind` has no way to vary by a keyword the way this
+ * needs, so this is computed here instead of in `LANGUAGE_TABLE`, the same "kind computed per node"
+ * precedent `zigDeclarationKind` already establishes. Verified against a real parse, not guessed.
+ */
+function kotlinClassKind(node: SyntaxNode): string {
+  if (hasKeywordChild(node, 'interface')) return 'interface'
+  if (hasKeywordChild(node, 'enum')) return 'enum'
+  return 'class'
+}
+
+/**
+ * One Kotlin `delegation_specifier`'s target name, from a `class Foo : Base(), Shape` list — a
+ * superclass with an explicit constructor call wraps a `constructor_invocation` around its `user_type`;
+ * a bare interface (or an abstract base with no call) is a `user_type` directly. Either way, the target
+ * name itself sits one level deeper still, inside the `user_type`'s own `type_identifier`. Kotlin's
+ * grammar draws no distinction here between extending a class and implementing an interface — the same
+ * ambiguity `pythonClassHeritage`/`baseListHeritage` already document for a comparable shape — so every
+ * entry reports `extends`. Verified against a real parse, not guessed.
+ * @param delegationSpecifier - the `delegation_specifier` node.
+ * @returns the target's simple name, or `undefined` when its shape is not one of the two above.
+ */
+function kotlinHeritageTargetName(delegationSpecifier: SyntaxNode): string | undefined {
+  const first = namedChildren(delegationSpecifier)[0]
+  const userType = first?.type === 'constructor_invocation' ? namedChildren(first)[0] : first
+  const typeIdentifier = userType?.type === 'user_type' ? namedChildren(userType)[0] : undefined
+  return typeIdentifier?.type === 'type_identifier' ? typeIdentifier.text : undefined
+}
+
+/**
+ * Kotlin `class_declaration`/interface heritage extraction from every `delegation_specifier` child —
+ * verified against a real parse, not guessed.
+ * @param node - the declaring `class_declaration` node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the declaration declares.
+ */
+function kotlinHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  return namedChildren(node)
+    .filter(child => child.type === 'delegation_specifier')
+    .map(child => kotlinHeritageTargetName(child))
+    .filter((name): name is string => name !== undefined)
+    .map(targetName => ({ sourceKey, targetName, relation: 'extends' as const }))
+}
+
+/**
+ * A Kotlin `call_expression`'s callee, resolved down to the trailing simple name — `call_expression`
+ * binds no field of its own for this grammar (see {@link KOTLIN_NAME_FIELD}'s doc comment), so this is
+ * consulted directly by `extractFile` instead of through `LanguageSpec.callFunctionField`, which can
+ * never resolve anything here. A bare call (`add(1, 2)`)'s first child is the callee `simple_identifier`
+ * directly; a member call (`p.greet()`, `kotlin.math.abs(-1)`)'s first child is a `navigation_expression`
+ * instead — its own direct `navigation_suffix` child (never itself nested, even when the receiver chain
+ * is: `a.b.c()`'s outer `navigation_expression` wraps an inner `navigation_expression` as one child and
+ * this same node's own trailing `navigation_suffix` as the other, so reading only the outermost level
+ * always reaches the correct final segment regardless of chain depth) wraps the trailing
+ * `simple_identifier` this resolves to. Verified against a real parse, not guessed.
+ * @param node - the `call_expression` node.
+ * @returns the callee's simple-name node, or `undefined` when its shape is not one of the two above.
+ */
+function kotlinCallee(node: SyntaxNode): SyntaxNode | undefined {
+  const first = namedChildren(node)[0]
+  if (first === undefined) return undefined
+  if (first.type !== 'navigation_expression') return first
+  const suffix = namedChildren(first).find(child => child.type === 'navigation_suffix')
+  return suffix === undefined ? undefined : namedChildren(suffix).find(child => child.type === 'simple_identifier')
+}
+
+/**
+ * Kotlin `import_header` extraction — a plain import (`import kotlin.math.abs`) wraps its dotted path
+ * in a bare `identifier`, whose own last `simple_identifier` segment is the imported symbol; a wildcard
+ * import (`import kotlin.collections.*`) pairs that same `identifier` prefix with a sibling
+ * `wildcard_import` marker instead; an aliased import (`import java.util.List as JList`) adds a sibling
+ * `import_alias` wrapping the alias `type_identifier`. Neither `identifier` nor `import_alias` binds a
+ * field of its own. Verified against a real parse, not guessed.
+ * @param node - the `import_header` node.
+ * @returns the single import binding this statement introduces.
+ */
+function kotlinImports(node: SyntaxNode): RawImport[] {
+  const children = namedChildren(node)
+  const path = children.find(child => child.type === 'identifier')
+  // `import_header` always wraps a dotted path per the grammar (a bare `import;` does not parse); the
+  // empty-array case only satisfies `Array.prototype.find`'s general return type.
+  /* v8 ignore next */
+  if (path === undefined) return []
+  const specifier = path.text
+  if (children.some(child => child.type === 'wildcard_import')) return [{ localName: '', importedName: '*', specifier }]
+  const segments = namedChildren(path).filter(child => child.type === 'simple_identifier')
+  const importedName = segments.at(-1)?.text
+  // The grammar's `identifier` rule always wraps at least one `simple_identifier` segment; the
+  // empty-array case only satisfies `Array.prototype.at`'s general return type.
+  /* v8 ignore next */
+  if (importedName === undefined) return []
+  const alias = children.find(child => child.type === 'import_alias')
+  // The grammar's `import_alias` rule always wraps exactly one `type_identifier`; the fallback only
+  // satisfies `namedChildren`'s general array-access return type.
+  /* v8 ignore next */
+  const localName = alias === undefined ? importedName : (namedChildren(alias)[0]?.text ?? importedName)
+  return [{ localName, importedName, specifier }]
+}
+
 /** The definition rule matching `node`, or `undefined` when it introduces no declaration. */
 function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[]): DefinitionRule | undefined {
   for (const rule of definitions) {
@@ -387,6 +518,7 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
       : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node)
       : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node)
       : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node)
+      : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node)
       : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
@@ -414,6 +546,9 @@ function calleeName(callee: SyntaxNode): string | undefined {
     return inner === null ? undefined : calleeName(inner)
   }
   if (callee.type === 'identifier') return callee.text
+  // Kotlin's bare-name node type — `kotlinCallee` already resolves a call's callee (bare or member) down
+  // to this node type directly before `calleeName` ever sees it. Verified against a real parse.
+  if (callee.type === 'simple_identifier') return callee.text
   // PHP's bare-name node type — the resolved `callFunctionFieldByType` field value for all three of its
   // call shapes (`function_call_expression`'s simple case, `member_call_expression`'s and
   // `scoped_call_expression`'s method name) is this node type directly, never wrapped in a further
@@ -1136,6 +1271,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
     if (language === 'java') return javaInterfaceHeritage(node, sourceKey)
     if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
     if (language === 'php') return phpHeritage(node, sourceKey)
+    if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
     return tsInterfaceHeritage(node, sourceKey)
   }
   // `kind === 'struct'` only ever comes from C/C++'s `struct_specifier`/`union_specifier` or C#'s
@@ -1154,6 +1290,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (language === 'csharp') return baseListHeritage(node, sourceKey, 'base_list')
   if (language === 'php') return phpHeritage(node, sourceKey)
   if (language === 'ruby') return rubyClassHeritage(node, sourceKey)
+  if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -1193,6 +1330,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
         : rule.nameField === DECLARATOR_NAME_FIELD ? declaratorName(node) as SyntaxNode
         : rule.nameField === FIRST_CHILD_NAME_FIELD ? firstChildName(node) as SyntaxNode
         : rule.nameField === PHP_ELEMENT_NAME_FIELD ? phpElementName(node) as SyntaxNode
+        : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node) as SyntaxNode
         : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
@@ -1201,10 +1339,14 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
       if (nameNode !== null) {
         const key = `${node.startPosition.row}:${node.startPosition.column}`
         const parentKey = containerKeys[containerKeys.length - 1] ?? null
-        // Zig's own `variable_declaration` rule reports one fixed placeholder kind in `LANGUAGE_TABLE`
-        // (no rule can vary `kind` by a value's shape) — the real kind is computed here instead, see
-        // `zigDeclarationKind`. Every other language's rule already carries the right kind.
-        const kind = spec.language === 'zig' && node.type === 'variable_declaration' ? zigDeclarationKind(node) : rule.kind
+        // Zig's own `variable_declaration` rule and Kotlin's own `class_declaration` rule each report one
+        // fixed placeholder kind in `LANGUAGE_TABLE` (no rule can vary `kind` by a value's shape or a
+        // keyword the way either needs) — the real kind is computed here instead, see
+        // `zigDeclarationKind`/`kotlinClassKind`. Every other language's rule already carries the right
+        // kind.
+        const kind = spec.language === 'zig' && node.type === 'variable_declaration' ? zigDeclarationKind(node)
+          : spec.language === 'kotlin' && node.type === 'class_declaration' ? kotlinClassKind(node)
+          : rule.kind
         if (spec.language === 'zig' && node.type === 'variable_declaration') {
           const zigImport = zigImportBinding(node, nameNode.text)
           if (zigImport !== undefined) imports.push(zigImport)
@@ -1249,17 +1391,26 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
     }
 
     if (spec.callTypes.includes(node.type)) {
-      // Every call-shaped node type in every language table entry requires its callee field; the null
-      // case only satisfies `childForFieldName`'s general return type.
+      // Kotlin's `call_expression` binds no field of its own at all — see `kotlinCallee`'s doc comment
+      // — so this consults it directly instead of `node.childForFieldName`, which could never resolve
+      // anything for this grammar regardless of which field name `LanguageSpec.callFunctionField` names.
+      // Every call-shaped node type in every OTHER language table entry requires its callee field; the
+      // null case only satisfies `childForFieldName`'s general return type.
       const calleeField = spec.callFunctionFieldByType?.[node.type] ?? spec.callFunctionField
-      const callee = node.childForFieldName(calleeField)
+      const callee = spec.language === 'kotlin' ? kotlinCallee(node) ?? null : node.childForFieldName(calleeField)
       /* v8 ignore next */
       const name = callee === null ? undefined : calleeName(callee)
       if (name !== undefined) {
         // `callee` is non-null whenever `name` is: the optional chaining only satisfies the type
         // system's view of the field lookup above, not a real possibility here.
         /* v8 ignore next */
+        // Kotlin's `kotlinCallee` already unwraps a member call's receiver chain down to the same
+        // `simple_identifier` node type a bare call's callee is, so its own type alone can no longer
+        // distinguish the two — a bare call's `call_expression` has that `simple_identifier` as its own
+        // first child directly, while a member call's has a `navigation_expression` there instead (see
+        // `kotlinCallee`). Verified against a real parse, not guessed.
         const isBareCallee = callee?.type === 'identifier' || callee?.type === 'name'
+          || (spec.language === 'kotlin' && namedChildren(node)[0]?.type === 'simple_identifier')
         calls.push({
           callerKey: containerKeys[containerKeys.length - 1] ?? null,
           calleeName: name,
@@ -1334,6 +1485,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return phpImports(node)
     case 'rust':
       return rustImports(node)
+    case 'kotlin':
+      return kotlinImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -1434,6 +1587,15 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   // has (see `rustIsPublic`), except Zig's grammar gives this token no named-child wrapper of its own
   // to check `hasKeywordChild` still finds it. Verified against a real parse, not guessed.
   if (language === 'zig') return hasKeywordChild(node, 'pub')
+  // Kotlin's default visibility (no keyword at all) is already public — the inverse of every other
+  // language's "not exported unless an explicit keyword says so" convention — so this reports `true`
+  // unless an explicit `private`/`internal`/`protected` keyword (wrapped in the declaration's own
+  // `modifiers` node — see `kotlinHasVisibility`) narrows it. `protected` is treated as not exported:
+  // visible only to subclasses, not to an arbitrary importer, the same bar `internal`'s
+  // module-restricted visibility already fails to clear.
+  if (language === 'kotlin') {
+    return !kotlinHasVisibility(node, 'private') && !kotlinHasVisibility(node, 'internal') && !kotlinHasVisibility(node, 'protected')
+  }
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum
