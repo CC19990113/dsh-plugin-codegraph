@@ -29,7 +29,24 @@ export interface DefinitionRule {
     /** Node types the field must resolve to for this rule to match. */
     readonly types: readonly string[]
   }
+  /**
+   * Present only when this rule must reject a name shape it cannot represent as a single declared
+   * name — a destructuring `variable_declarator` (`const {a, b} = x`) or a Python tuple/attribute
+   * assignment (`a, b = 1, 2`, `self.x = 1`) binds through {@link nameField} too, but to a pattern
+   * node this package does not attempt to name. Absent, any node type in {@link nameField} matches.
+   */
+  readonly nameNodeTypes?: readonly string[]
 }
+
+/**
+ * Kinds this package only extracts directly inside a module's top level or a class body — never
+ * inside a function or method body. Unlike a function or class declaration (captured at any depth,
+ * however deeply nested), a function-local variable is not a workspace "symbol" anyone would search
+ * for by name, and capturing it would flood the cross-file name index `resolve.ts` uses to settle
+ * calls — more names means more collisions, which means more calls silently dropped to `unresolved`.
+ * See `resolve.ts`'s "an ambiguous edge is worse than a missing one" rule.
+ */
+export const SCOPE_RESTRICTED_KINDS: ReadonlySet<string> = new Set(['variable', 'constant', 'field'])
 
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
@@ -53,6 +70,16 @@ export interface LanguageSpec {
   readonly callFunctionField: string
   /** Node types anchoring one import statement. */
   readonly importTypes: readonly string[]
+  /**
+   * Node types that bound a new function scope even when the walk never captures them as a named
+   * definition — a callback (`arr.forEach(function(item) { ... })`) or an IIFE's `function_expression`
+   * never matches a {@link DefinitionRule} (only a *named* declaration, or one assigned through a
+   * captured `variable_declarator`, does), but a `const`/`var` inside its body is exactly the
+   * function-local binding {@link SCOPE_RESTRICTED_KINDS} exists to exclude. Empty for a language with
+   * no anonymous-function shape that can contain a statement (Python's `lambda` body is a single
+   * expression, never a block).
+   */
+  readonly bareFunctionScopeTypes: readonly string[]
 }
 
 /** Definitions common to every ECMAScript-family grammar (JavaScript, JSX, TypeScript, TSX). */
@@ -67,6 +94,12 @@ const ECMASCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
     nameField: 'name',
     value: { field: 'value', types: ['arrow_function', 'function_expression', 'generator_function'] },
   },
+  // Falls through from the function-valued rule above: any other simply-named `const`/`let`/`var`
+  // binding (`lexical_declaration` and `variable_declaration` both wrap this same node type).
+  // `nameNodeTypes` rejects a destructuring pattern (`const {a, b} = x`) rather than name it after its
+  // pattern text — the same "don't guess a name" precedent `pythonBinding`/`ecmascriptImports` already
+  // follow for shapes this package does not resolve.
+  { nodeType: 'variable_declarator', kind: 'variable', nameField: 'name', nameNodeTypes: ['identifier'] },
 ]
 
 /** Definitions TypeScript and TSX add on top of {@link ECMASCRIPT_DEFINITIONS}. */
@@ -75,10 +108,25 @@ const TYPESCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
   { nodeType: 'interface_declaration', kind: 'interface', nameField: 'name' },
   { nodeType: 'type_alias_declaration', kind: 'type_alias', nameField: 'name' },
   { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+  // The TypeScript/TSX grammars name a class field node differently from plain JavaScript's
+  // `field_definition` (see JAVASCRIPT_DEFINITIONS) — verified against a real parse, not guessed.
+  { nodeType: 'public_field_definition', kind: 'field', nameField: 'name' },
+]
+
+/** Definitions JavaScript and JSX add on top of {@link ECMASCRIPT_DEFINITIONS}. */
+const JAVASCRIPT_DEFINITIONS: readonly DefinitionRule[] = [
+  ...ECMASCRIPT_DEFINITIONS,
+  // The plain JavaScript grammar's class field node names its field-name field `property`, not `name`
+  // as TypeScript's `public_field_definition` does (see TYPESCRIPT_DEFINITIONS) — verified against a
+  // real parse, not guessed.
+  { nodeType: 'field_definition', kind: 'field', nameField: 'property' },
 ]
 
 const ECMASCRIPT_CALL_TYPES = ['call_expression'] as const
 const ECMASCRIPT_IMPORT_TYPES = ['import_statement'] as const
+/** The ECMAScript function-value node types, matched against a real parse — see
+ * {@link LanguageSpec.bareFunctionScopeTypes}. */
+const ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES = ['function_expression', 'arrow_function', 'generator_function'] as const
 
 /** Every grammar this package loads, keyed by the seam language label it produces. */
 export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
@@ -90,6 +138,7 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     callTypes: ECMASCRIPT_CALL_TYPES,
     callFunctionField: 'function',
     importTypes: ECMASCRIPT_IMPORT_TYPES,
+    bareFunctionScopeTypes: ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES,
   },
   {
     language: 'tsx',
@@ -99,15 +148,17 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     callTypes: ECMASCRIPT_CALL_TYPES,
     callFunctionField: 'function',
     importTypes: ECMASCRIPT_IMPORT_TYPES,
+    bareFunctionScopeTypes: ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES,
   },
   {
     language: 'javascript',
     extensions: ['.js', '.mjs', '.cjs'],
     wasmFile: 'tree-sitter-javascript.wasm',
-    definitions: ECMASCRIPT_DEFINITIONS,
+    definitions: JAVASCRIPT_DEFINITIONS,
     callTypes: ECMASCRIPT_CALL_TYPES,
     callFunctionField: 'function',
     importTypes: ECMASCRIPT_IMPORT_TYPES,
+    bareFunctionScopeTypes: ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES,
   },
   {
     language: 'jsx',
@@ -115,10 +166,11 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // The plain JavaScript grammar already parses JSX syntax; tree-sitter-wasms ships no separate
     // "jsx" binary, only distinct typescript/tsx binaries.
     wasmFile: 'tree-sitter-javascript.wasm',
-    definitions: ECMASCRIPT_DEFINITIONS,
+    definitions: JAVASCRIPT_DEFINITIONS,
     callTypes: ECMASCRIPT_CALL_TYPES,
     callFunctionField: 'function',
     importTypes: ECMASCRIPT_IMPORT_TYPES,
+    bareFunctionScopeTypes: ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES,
   },
   {
     language: 'python',
@@ -127,10 +179,15 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     definitions: [
       { nodeType: 'function_definition', kind: 'function', nameField: 'name' },
       { nodeType: 'class_definition', kind: 'class', nameField: 'name' },
+      // Module- and class-level `x = ...`; `nameNodeTypes` rejects a tuple assignment (`a, b = 1, 2`,
+      // `left` is a `pattern_list`) and an attribute target (`self.x = 1`, `left` is an `attribute`) —
+      // verified against a real parse, not guessed.
+      { nodeType: 'assignment', kind: 'variable', nameField: 'left', nameNodeTypes: ['identifier'] },
     ],
     callTypes: ['call'],
     callFunctionField: 'function',
     importTypes: ['import_statement', 'import_from_statement'],
+    bareFunctionScopeTypes: [],
   },
   {
     language: 'go',
@@ -140,10 +197,19 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
       { nodeType: 'function_declaration', kind: 'function', nameField: 'name' },
       { nodeType: 'method_declaration', kind: 'method', nameField: 'name' },
       { nodeType: 'type_spec', kind: 'type_alias', nameField: 'name' },
+      // Go allows `const a, b = 1, 2` — multiple names sharing one `const_spec`/`var_spec` node, each
+      // tagged with the same `name` field. `matchDefinition`'s single-name-field requirement rejects
+      // the multi-name form entirely rather than capture only the first — a partial, silently
+      // misleading result would be worse than none, per this file's existing "don't guess" precedent.
+      { nodeType: 'const_spec', kind: 'constant', nameField: 'name' },
+      { nodeType: 'var_spec', kind: 'variable', nameField: 'name' },
     ],
     callTypes: ['call_expression'],
     callFunctionField: 'function',
     importTypes: ['import_declaration'],
+    // A closure literal (`f := func() { ... }`) is never itself named, so it never matches a
+    // `DefinitionRule` — but a `var`/`const` inside its body is still function-local.
+    bareFunctionScopeTypes: ['func_literal'],
   },
 ]
 

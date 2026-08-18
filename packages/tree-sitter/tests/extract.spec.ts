@@ -89,19 +89,87 @@ type Alias = number
     expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'parse' }))
   })
 
-  it('does not extract a plain (non-function) variable as a definition', async () => {
+  it('extracts a plain module-level (non-function) variable as a variable definition', async () => {
     const { extraction } = await extract('.ts', 'const value = 5\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'value', kind: 'variable' })])
+  })
+
+  it('extracts a module-level variable declared without an initializer', async () => {
+    const { extraction } = await extract('.ts', 'let value: number\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'value', kind: 'variable' })])
+  })
+
+  it('does not name a destructuring variable_declarator after its pattern text', async () => {
+    const { extraction } = await extract('.ts', 'const {a, b} = obj\n')
     expect(extraction.definitions).toEqual([])
   })
 
-  it('does not extract a variable declared without an initializer', async () => {
-    const { extraction } = await extract('.ts', 'let value: number\n')
+  it('does not extract a variable declared inside a function body', async () => {
+    const { extraction } = await extract('.ts', 'function outer() {\n  const local = 1\n  return local\n}\n')
+    expect(extraction.definitions.map(def => def.name)).toEqual(['outer'])
+  })
+
+  it('does not extract a variable declared inside a callback that is never itself a named definition', async () => {
+    const { extraction } = await extract('.ts', 'arr.forEach(function (item) {\n  const total = compute(item)\n  return total\n})\n')
     expect(extraction.definitions).toEqual([])
+  })
+
+  it('does not extract a variable declared inside an IIFE at module top level', async () => {
+    const { extraction } = await extract('.ts', 'const y = (() => {\n  const arrowLocal = 2\n  return arrowLocal\n})()\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'y', kind: 'variable' })])
+  })
+
+  it('extracts TypeScript class fields (public_field_definition), including a private one', async () => {
+    const { extraction } = await extract('.ts', 'class Foo {\n  x = 1\n  static y = 2\n  #priv = 3\n}\n')
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('x')).toMatchObject({ kind: 'field', container: ['Foo'] })
+    expect(byName.get('y')).toMatchObject({ kind: 'field', isStatic: true })
+    expect(byName.get('#priv')).toMatchObject({ kind: 'field' })
   })
 
   it('does not extract a computed callee as a call site', async () => {
     const { extraction } = await extract('.ts', 'obj[key](x)\n')
     expect(extraction.calls).toEqual([])
+  })
+})
+
+describe('CommonJS require() import detection', () => {
+  it('binds a require() assigned to a plain identifier', async () => {
+    const { extraction } = await extract('.js', "const foo = require('./foo')\n")
+    expect(extraction.imports).toContainEqual({ localName: 'foo', importedName: '*', specifier: './foo' })
+  })
+
+  it('resolves an empty string specifier without a string_fragment child', async () => {
+    const { extraction } = await extract('.js', "const foo = require('')\n")
+    expect(extraction.imports).toContainEqual({ localName: 'foo', importedName: '*', specifier: '' })
+  })
+
+  it('records a bare, side-effect-only require() statement', async () => {
+    const { extraction } = await extract('.js', "require('./sideeffect')\n")
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: './sideeffect' })
+  })
+
+  it('does not bind a destructured require() (no single declared name to bind)', async () => {
+    const { extraction } = await extract('.js', "const { a } = require('./bar')\n")
+    expect(extraction.imports).toEqual([])
+  })
+
+  it('does not treat require() used as a sub-expression as an import binding', async () => {
+    const { extraction } = await extract('.js', "console.log(require('./bar'))\n")
+    expect(extraction.imports).toEqual([])
+  })
+
+  it('does not treat a require()-shaped call with the wrong argument count as an import', async () => {
+    const { extraction: zeroArgs } = await extract('.js', "const a = require()\n")
+    expect(zeroArgs.imports).toEqual([])
+    const { extraction: twoArgs } = await extract('.js', "const b = require('./a', './b')\n")
+    expect(twoArgs.imports).toEqual([])
+  })
+
+  it('does not treat require() with a non-string argument as an import', async () => {
+    const { extraction } = await extract('.js', "const a = require(modulePath)\n")
+    expect(extraction.imports).toEqual([])
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'require' }))
   })
 })
 
@@ -122,6 +190,16 @@ describe('JavaScript and JSX extraction', () => {
   it('parses JSX syntax with the JavaScript grammar', async () => {
     const { extraction } = await extract('.jsx', 'function App() { return <div>hi</div> }\n')
     expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'App' }))
+  })
+
+  it("extracts a plain JavaScript class field (field_definition, distinct from TypeScript's public_field_definition)", async () => {
+    const { extraction } = await extract('.js', 'class Foo {\n  x = 1\n}\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Foo'] }))
+  })
+
+  it('extracts a module-level var declaration', async () => {
+    const { extraction } = await extract('.js', 'var topVar = 1\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'topVar', kind: 'variable' })])
   })
 })
 
@@ -165,9 +243,34 @@ import os
     expect(extraction.imports).toEqual([{ localName: 'np', importedName: '*', specifier: 'numpy' }])
   })
 
-  it('extracts nothing from a wildcard from-import', async () => {
+  it('records a wildcard from-import as a namespace binding, not a dropped statement', async () => {
     const { extraction } = await extract('.py', 'from x import *\n')
-    expect(extraction.imports).toEqual([])
+    expect(extraction.imports).toEqual([{ localName: '', importedName: '*', specifier: 'x' }])
+  })
+
+  it('extracts a module-level assignment as a variable definition', async () => {
+    const { extraction } = await extract('.py', 'x = 1\n')
+    expect(extraction.definitions).toEqual([expect.objectContaining({ name: 'x', kind: 'variable' })])
+  })
+
+  it('extracts a class-body assignment as a variable definition nested under its class', async () => {
+    const { extraction } = await extract('.py', 'class Foo:\n    y = 2\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'variable', container: ['Foo'] }))
+  })
+
+  it('does not extract an assignment inside a function or method body', async () => {
+    const { extraction } = await extract('.py', 'class Foo:\n    def method(self):\n        z = 3\n        return z\n')
+    expect(extraction.definitions.map(def => def.name)).toEqual(['Foo', 'method'])
+  })
+
+  it('does not name a tuple assignment after its pattern text', async () => {
+    const { extraction } = await extract('.py', 'a, b = 1, 2\n')
+    expect(extraction.definitions).toEqual([])
+  })
+
+  it('does not name an attribute assignment as a plain variable', async () => {
+    const { extraction } = await extract('.py', 'obj.x = 1\n')
+    expect(extraction.definitions).toEqual([])
   })
 
   it('resolves a relative from-import with no module name (only dots)', async () => {
@@ -224,5 +327,33 @@ func unexported() {}
     const { extraction } = await extract('.go', SOURCE)
     expect(extraction.imports).toContainEqual({ localName: 'fmt', importedName: '*', specifier: 'fmt' })
     expect(extraction.imports).toContainEqual({ localName: 'myfmt', importedName: '*', specifier: 'fmt' })
+  })
+
+  it('extracts single-name const_spec and var_spec declarations, split into constant/variable kinds', async () => {
+    const { extraction } = await extract('.go', 'package main\nconst Single = 3\nvar x int = 5\n')
+    const byName = new Map(extraction.definitions.map(def => [def.name, def]))
+    expect(byName.get('Single')).toMatchObject({ kind: 'constant' })
+    expect(byName.get('x')).toMatchObject({ kind: 'variable' })
+  })
+
+  it('does not extract a multi-name const_spec/var_spec rather than pick just the first name', async () => {
+    const { extraction } = await extract('.go', 'package main\nconst a, b = 1, 2\n')
+    expect(extraction.definitions).toEqual([])
+  })
+
+  it('does not extract a var/const declared inside a function body', async () => {
+    const { extraction } = await extract(
+      '.go',
+      'package main\nfunc main() {\n  var local = 1\n  const localConst = 2\n  _ = local\n  _ = localConst\n}\n',
+    )
+    expect(extraction.definitions.map(def => def.name)).toEqual(['main'])
+  })
+
+  it('does not extract a var declared inside a func_literal that a rejected multi-name spec never captures as a container', async () => {
+    const { extraction } = await extract(
+      '.go',
+      'package main\nvar f, g = func() {\n  var x = 1\n  _ = x\n}, func() {}\n',
+    )
+    expect(extraction.definitions).toEqual([])
   })
 })
