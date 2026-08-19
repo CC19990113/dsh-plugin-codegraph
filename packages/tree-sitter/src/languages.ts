@@ -860,6 +860,62 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     importTypes: ['import_specification'],
     bareFunctionScopeTypes: [],
   },
+  {
+    language: 'scala',
+    extensions: ['.scala', '.sc'],
+    wasmFile: 'tree-sitter-scala.wasm',
+    definitions: [
+      { nodeType: 'class_definition', kind: 'class', nameField: 'name' },
+      // A singleton `object` has no dedicated seam kind of its own; `class` is the closest existing fit —
+      // it shares `class_definition`'s exact shape (a `template_body`, an optional `extend` clause) and
+      // behaves like an ordinary class with a single implicit instance, matching Java's/C#'s own
+      // record→`class` precedent for a related-but-distinct construct.
+      { nodeType: 'object_definition', kind: 'class', nameField: 'name' },
+      { nodeType: 'trait_definition', kind: 'trait', nameField: 'name' },
+      // A method is a `function_definition`/`function_declaration` directly inside a `template_body` —
+      // the same node type a top-level function uses — tried first, before the unrestricted `function`
+      // rule below falls through to everything else. A trait's own method *signature* (`def area():
+      // Double`, no body) is `function_declaration`, always directly inside a `template_body` too (a
+      // trait's own), so no `parentType` guard is needed for that one — unambiguous by node type alone.
+      // Verified against a real parse, not guessed.
+      { nodeType: 'function_definition', kind: 'method', nameField: 'name', parentType: 'template_body' },
+      { nodeType: 'function_definition', kind: 'function', nameField: 'name' },
+      { nodeType: 'function_declaration', kind: 'method', nameField: 'name' },
+      // A class/trait/object member (`val x = 1` directly inside a `template_body`) — tried first, since
+      // this same node type is also how Scala spells a top-level or function-local immutable binding
+      // (the fallback rule below). `nameNodeTypes` rejects a destructuring pattern (`val (a, b) = ...`,
+      // `pattern` binds a `tuple_pattern`, not a bare `identifier`) rather than name it after a shape this
+      // package does not attempt to resolve, the same "don't guess" precedent `pythonBinding`/
+      // `ecmascriptImports` already follow. `var_definition` (a mutable binding) follows the identical
+      // split, reporting `variable` instead of `constant` for its own module/local-scope fallback.
+      // Verified against a real parse, not guessed.
+      { nodeType: 'val_definition', kind: 'field', nameField: 'pattern', nameNodeTypes: ['identifier'], parentType: 'template_body' },
+      { nodeType: 'val_definition', kind: 'constant', nameField: 'pattern', nameNodeTypes: ['identifier'], scopeRestricted: true },
+      { nodeType: 'var_definition', kind: 'field', nameField: 'pattern', nameNodeTypes: ['identifier'], parentType: 'template_body' },
+      { nodeType: 'var_definition', kind: 'variable', nameField: 'pattern', nameNodeTypes: ['identifier'], scopeRestricted: true },
+      // A primary constructor parameter (`class Point(val x: Int, val y: Int)`) — a very common Scala
+      // idiom for declaring fields directly in the class header instead of the body. Can only ever
+      // appear inside a `class_parameters` list, so — like every other language's own unambiguous member
+      // node type — no `scopeRestricted`/`parentType` guard is needed. Verified against a real parse,
+      // not guessed.
+      { nodeType: 'class_parameter', kind: 'field', nameField: 'name' },
+    ],
+    // `call_expression`'s callee sits in its own `function` field directly — a bare call
+    // (`add(1, 2)`)'s field value is a plain `identifier`; a member call (`p.length()`)'s is a
+    // `field_expression` instead, whose own `field` field names the callee and whose `value` field holds
+    // the receiver — both already handled by this file's existing generic `calleeName`/`isBareCallee`
+    // logic (the same `field` fallback Rust's `field_expression` already uses), so this language needs no
+    // call-specific dispatch of its own, unlike Kotlin/Swift/Lua/Ruby. Verified against a real parse, not
+    // guessed.
+    callTypes: ['call_expression'],
+    callFunctionField: 'function',
+    importTypes: ['import_declaration'],
+    // No anonymous-function-literal shape is special-cased here — this file's own attempt to write one
+    // parsed ambiguously as an `infix_expression` rather than a dedicated node type, an inconclusive
+    // result this package declines to guess a rule from; the practical impact is limited to a `val`/`var`
+    // inside a closure literal passed as a module-level argument, a rare pattern in idiomatic Scala.
+    bareFunctionScopeTypes: [],
+  },
 ]
 
 /**

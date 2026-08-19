@@ -403,6 +403,16 @@ function kotlinHasVisibility(node: SyntaxNode, keyword: string): boolean {
 }
 
 /**
+ * Whether a Scala declaration's `modifiers` node carries `keyword` (`private`/`protected`) as a bare
+ * anonymous child directly — unlike Kotlin's/Swift's own `modifiers` node, Scala's wraps the keyword
+ * with no further `visibility_modifier` layer in between. Verified against a real parse, not guessed.
+ */
+function scalaHasModifier(node: SyntaxNode, keyword: string): boolean {
+  const modifiers = namedChildren(node).find(child => child.type === 'modifiers')
+  return modifiers !== undefined && hasKeywordChild(modifiers, keyword)
+}
+
+/**
  * The seam kind a Kotlin `class_declaration` actually reports — `class`, `interface`, and `enum class`
  * all share this one node type, distinguished only by a bare `interface`/`enum` keyword among the
  * declaration's own children (never wrapped, unlike a visibility keyword — see
@@ -689,6 +699,35 @@ function dartImports(node: SyntaxNode): RawImport[] {
   const specifier = stringLiteral.text.slice(1, -1)
   const alias = namedChildren(node).find(child => child.type === 'identifier')
   return [{ localName: alias?.text ?? '', importedName: '*', specifier }]
+}
+
+/**
+ * Scala `import_declaration` extraction, covering both its shapes: a plain dotted path (`import
+ * scala.math.abs`, whose `path` field's own trailing `identifier` descendant is the imported symbol),
+ * and a selector list (`import scala.collection.{List, Map}`, whose sibling `import_selectors` node
+ * binds each imported name directly). An `import_selectors` entry renamed with `=>` or a wildcard `_`
+ * import is not named here — the same "don't guess" precedent this file already follows for a shape it
+ * does not fully resolve; every `import_selectors` child this does not recognize is simply filtered out
+ * rather than mis-read. Verified against a real parse, not guessed.
+ * @param node - the `import_declaration` node.
+ * @returns every import binding this statement introduces.
+ */
+function scalaImports(node: SyntaxNode): RawImport[] {
+  const path = node.childForFieldName('path')
+  if (path === null) return []
+  const prefix = path.text
+  const selectors = namedChildren(node).find(child => child.type === 'import_selectors')
+  if (selectors === undefined) {
+    const last = descendantsOfType(path, ['identifier']).at(-1)
+    // The grammar's `stable_identifier`/`identifier` path always wraps at least one `identifier`
+    // segment; the empty-array case only satisfies `Array.prototype.at`'s general return type.
+    /* v8 ignore next */
+    if (last === undefined) return []
+    return [{ localName: last.text, importedName: last.text, specifier: prefix }]
+  }
+  return namedChildren(selectors)
+    .filter(child => child.type === 'identifier')
+    .map(name => ({ localName: name.text, importedName: name.text, specifier: `${prefix}.${name.text}` }))
 }
 
 /** The definition rule matching `node`, or `undefined` when it introduces no declaration. */
@@ -1442,6 +1481,35 @@ function rustTraitHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[
 }
 
 /**
+ * Scala `class_definition`/`object_definition`/`trait_definition` heritage extraction from an
+ * `extends_clause`'s `type` field — a single base (`extends Base`) is a bare `type_identifier`; one or
+ * more `with` mixins added to it (`extends Base with Shape with Other`) wrap all of them together in one
+ * `compound_type`, whose own `base` field names the first (the real superclass, reported `extends`) with
+ * every other named child being an additional mixin (reported `implements`, matching this package's
+ * class/interface-conflating-list precedent already documented for `pythonClassHeritage`/
+ * `baseListHeritage`). Verified against a real parse, not guessed.
+ * @param node - the declaring `class_definition`/`object_definition`/`trait_definition` node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the declaration declares.
+ */
+function scalaHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const extendsClause = node.childForFieldName('extend')
+  const type = extendsClause === null ? null : extendsClause.childForFieldName('type')
+  if (type === null) return []
+  if (type.type !== 'compound_type') {
+    return isHeritageName(type) ? [{ sourceKey, targetName: type.text, relation: 'extends' }] : []
+  }
+  const base = type.childForFieldName('base')
+  const refs: RawHeritageRef[] = []
+  if (base !== null && isHeritageName(base)) refs.push({ sourceKey, targetName: base.text, relation: 'extends' })
+  for (const mixin of namedChildren(type)) {
+    if (base !== null && mixin.equals(base)) continue
+    if (isHeritageName(mixin)) refs.push({ sourceKey, targetName: mixin.text, relation: 'implements' })
+  }
+  return refs
+}
+
+/**
  * Dispatch heritage extraction to the language family that owns a captured class, struct, or interface
  * node's syntax. Go is absent: its interfaces are satisfied structurally, never declared at the
  * implementing type, so there is no static reference here to extract.
@@ -1452,9 +1520,9 @@ function rustTraitHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[
  * @returns every heritage reference the definition declares.
  */
 function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, language: string): RawHeritageRef[] {
-  // `kind === 'trait'` only ever comes from Rust's `trait_item` rule — no other language in
-  // LANGUAGE_TABLE produces it.
-  if (kind === 'trait') return rustTraitHeritage(node, sourceKey)
+  // `kind === 'trait'` only ever comes from Rust's `trait_item` rule or Scala's `trait_definition` rule
+  // — no other language in LANGUAGE_TABLE produces it.
+  if (kind === 'trait') return language === 'scala' ? scalaHeritage(node, sourceKey) : rustTraitHeritage(node, sourceKey)
   // `kind === 'interface'` only ever comes from TYPESCRIPT_DEFINITIONS's, Java's, or C#'s
   // `interface_declaration` rule — no other language in LANGUAGE_TABLE produces it.
   if (kind === 'interface') {
@@ -1488,6 +1556,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
   if (language === 'swift') return swiftHeritage(node, sourceKey)
   if (language === 'dart') return dartHeritage(node, sourceKey)
+  if (language === 'scala') return scalaHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -1697,6 +1766,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return swiftImports(node)
     case 'dart':
       return dartImports(node)
+    case 'scala':
+      return scalaImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -1816,6 +1887,9 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   // marking a name library-private, matching Go's capitalization-based convention but spelled with a
   // naming convention instead of a keyword.
   if (language === 'dart') return !name.startsWith('_')
+  // Scala's default visibility (no keyword at all) is already public, matching Kotlin's convention —
+  // this reports `true` unless an explicit `private`/`protected` keyword narrows it.
+  if (language === 'scala') return !scalaHasModifier(node, 'private') && !scalaHasModifier(node, 'protected')
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum

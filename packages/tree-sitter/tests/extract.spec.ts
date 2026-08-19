@@ -1840,3 +1840,93 @@ void main() {
     expect(extraction.imports).toContainEqual({ localName: 'bar', importedName: '*', specifier: 'package:foo/bar.dart' })
   })
 })
+
+describe('Scala extraction', () => {
+  const SOURCE = `
+package com.example
+
+import scala.math.abs
+import scala.collection.{List, Map}
+
+class Point(val x: Int, val y: Int) {
+  def length(): Int = {
+    x + y
+  }
+}
+
+class Animal extends Base with Shape {
+  def speak(): Unit = {}
+}
+
+trait Shape {
+  def area(): Double
+}
+
+object Color {
+  val Red = 1
+  val Green = 2
+}
+
+private def helper(): Unit = {}
+
+def add(a: Int, b: Int): Int = {
+  a + b
+}
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    add(1, 2)
+    val p = new Point(1, 2)
+    p.length()
+  }
+}
+`
+
+  it('extracts a top-level function, exported by default, and a private one, not exported', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'helper', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a class with its primary-constructor fields and a method nested under it', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'length', kind: 'method', container: ['Point'] }))
+  })
+
+  it('extracts a trait as kind trait, with its method signature nested under it', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'trait' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts a singleton object as kind class, with its val members as field', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Red', kind: 'field', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Green', kind: 'field', container: ['Color'] }))
+  })
+
+  it('extracts an extends target and a with mixin as distinct heritage relations', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    const animal = extraction.definitions.find(def => def.name === 'Animal')
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Base', relation: 'extends' })
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Shape', relation: 'implements' })
+  })
+
+  it('extracts a bare call and a dot member call, distinguishing their trust level, with no language-specific glue', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    const main = extraction.definitions.find(def => def.name === 'main')
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'add', isMemberCall: false }))
+    expect(extraction.calls).toContainEqual(expect.objectContaining({ callerKey: main?.key, calleeName: 'length', isMemberCall: true }))
+  })
+
+  it('extracts a plain import and a multi-selector import, one binding per selector', async () => {
+    const { extraction } = await extract('.scala', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: 'abs', importedName: 'abs', specifier: 'scala.math.abs' })
+    expect(extraction.imports).toContainEqual({ localName: 'List', importedName: 'List', specifier: 'scala.collection.List' })
+    expect(extraction.imports).toContainEqual({ localName: 'Map', importedName: 'Map', specifier: 'scala.collection.Map' })
+  })
+})
