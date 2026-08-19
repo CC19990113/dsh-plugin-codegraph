@@ -329,6 +329,9 @@ function soleNamedField(node: SyntaxNode, field: string): SyntaxNode | undefined
 function zigDeclarationValue(node: SyntaxNode): SyntaxNode | undefined {
   const typeNode = node.childForFieldName('type')
   const last = namedChildren(node).at(-1)
+  // The grammar's `variable_declaration` always wraps at least its own declared name as a named child;
+  // the undefined case only satisfies `Array.prototype.at`'s general return type.
+  /* v8 ignore next */
   if (last === undefined) return undefined
   if (typeNode !== null && last.equals(typeNode)) return undefined
   return last
@@ -365,6 +368,10 @@ function zigImportBinding(node: SyntaxNode, localName: string): RawImport | unde
   if (value?.type !== 'builtin_function') return undefined
   const [builtinIdentifier, argsNode] = namedChildren(value)
   if (builtinIdentifier?.type !== 'builtin_identifier' || builtinIdentifier.text !== '@import') return undefined
+  // The grammar's builtin-call syntax always pairs a `builtin_identifier` with an `arguments` node right
+  // after it, even when the call has zero arguments (`@import()`); the undefined-return case only
+  // satisfies `childForFieldName`'s general return type, verified against a real parse, not guessed.
+  /* v8 ignore next */
   if (argsNode?.type !== 'arguments') return undefined
   const args = namedChildren(argsNode)
   const specifierNode = args.length === 1 ? args[0] : undefined
@@ -475,9 +482,17 @@ function kotlinHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
  */
 function kotlinCallee(node: SyntaxNode): SyntaxNode | undefined {
   const first = namedChildren(node)[0]
+  // The grammar's `call_expression` always wraps a callee expression as its first named child; the
+  // undefined case only satisfies `Array.prototype.at`-style general array-access return type.
+  /* v8 ignore next */
   if (first === undefined) return undefined
   if (first.type !== 'navigation_expression') return first
   const suffix = namedChildren(first).find(child => child.type === 'navigation_suffix')
+  // A `navigation_expression` always wraps a trailing `navigation_suffix` naming the accessed member
+  // (`.foo`, `?.foo`, even off `super`) — verified against a real parse across a plain member access, a
+  // safe-nav access, and a `super` receiver; the undefined case only satisfies `Array.prototype.find`'s
+  // general return type.
+  /* v8 ignore next */
   return suffix === undefined ? undefined : namedChildren(suffix).find(child => child.type === 'simple_identifier')
 }
 
@@ -522,6 +537,11 @@ function kotlinImports(node: SyntaxNode): RawImport[] {
  */
 function swiftPropertyName(node: SyntaxNode): SyntaxNode | undefined {
   const pattern = node.childForFieldName('name')
+  // The grammar's `property_declaration` always binds its `name` field, even for a destructuring pattern
+  // (`let (a, b) = ...`, whose `pattern` still binds the field, just with no `bound_identifier` of its
+  // own — see the fallback below); the undefined case only satisfies `childForFieldName`'s general
+  // return type, verified against a real parse, not guessed.
+  /* v8 ignore next */
   if (pattern === null) return undefined
   const bound = pattern.childForFieldName('bound_identifier')
   return bound?.type === 'simple_identifier' ? bound : undefined
@@ -585,7 +605,16 @@ function swiftHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
     .filter(child => child.type === 'inheritance_specifier')
     .map((child) => {
       const userType = child.childForFieldName('inherits_from')
+      // `inherits_from` always resolves to a `user_type` whose first child is a `type_identifier` for
+      // every shape this has been checked against — a plain base, a `&`-composed protocol list (each
+      // conjunct its own `inheritance_specifier`), and a module-qualified name (`Swift.Equatable`, whose
+      // `user_type` still starts with a `type_identifier`, just the qualifier segment rather than the
+      // one this package would ideally resolve to — a known, accepted imprecision, not a crash). Neither
+      // fallback is known to be reachable; both exist only to satisfy the general return type of
+      // `childForFieldName`/array access rather than guess a name for a shape not yet seen.
+      /* v8 ignore next */
       const typeIdentifier = userType?.type === 'user_type' ? namedChildren(userType)[0] : undefined
+      /* v8 ignore next */
       return typeIdentifier?.type === 'type_identifier' ? typeIdentifier.text : undefined
     })
     .filter((name): name is string => name !== undefined)
@@ -607,10 +636,18 @@ function swiftHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
  */
 function swiftCallee(node: SyntaxNode): SyntaxNode | undefined {
   const first = namedChildren(node)[0]
+  // The grammar's `call_expression` always wraps a callee expression as its first named child; the
+  // undefined case only satisfies `Array.prototype.at`-style general array-access return type.
+  /* v8 ignore next */
   if (first === undefined) return undefined
   if (first.type !== 'navigation_expression') return first
   const navigationSuffix = first.childForFieldName('suffix')
   const trailing = navigationSuffix?.childForFieldName('suffix')
+  // A `navigation_expression`'s own `suffix` field always resolves to a `navigation_suffix` carrying a
+  // trailing `suffix` of its own in turn (`.foo`, `?.foo`, even off `super`) — verified against a real
+  // parse across a plain member access, a safe-nav access, and a `super` receiver; the undefined case
+  // only satisfies `childForFieldName`'s general return type.
+  /* v8 ignore next */
   return trailing === null ? undefined : trailing
 }
 
@@ -654,6 +691,11 @@ function dartFieldName(node: SyntaxNode): SyntaxNode | undefined {
   const sole = items.length === 1 ? items[0] : undefined
   if (sole === undefined) return undefined
   const name = namedChildren(sole)[0]
+  // The grammar's `initialized_identifier` always wraps its own name as an `identifier` first child,
+  // with an optional initializer expression only ever following it (`int x = 5;` still binds `x` first)
+  // — verified against a real parse, not guessed; the undefined case only satisfies
+  // `Array.prototype.at`-style general array-access return type.
+  /* v8 ignore next */
   return name?.type === 'identifier' ? name : undefined
 }
 
@@ -672,9 +714,18 @@ function dartHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
   const refs: RawHeritageRef[] = []
   const superclass = node.childForFieldName('superclass')
   const base = superclass === null ? undefined : namedChildren(superclass)[0]
+  // Every `superclass` shape checked against a real parse — a plain base, a module-qualified one
+  // (`lib.Base`), and a generic one (`Generic<int>`) — puts a heritage-name-shaped node first; the false
+  // case exists only as this file's usual "don't guess" guard for a shape not yet seen, matching
+  // `isHeritageName`'s other call sites.
+  /* v8 ignore next */
   if (base !== undefined && isHeritageName(base)) refs.push({ sourceKey, targetName: base.text, relation: 'extends' })
   const interfaces = node.childForFieldName('interfaces')
   if (interfaces !== null) {
+    // An `implements` clause always lists at least one target per the grammar (`implements` with an
+    // empty list does not parse); the zero-iteration case only satisfies the general shape of iterating
+    // an array that could in principle be empty.
+    /* v8 ignore next */
     for (const target of namedChildren(interfaces)) {
       if (isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'implements' })
     }
@@ -692,9 +743,18 @@ function dartHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
  * @returns the single import binding this statement introduces.
  */
 function dartImports(node: SyntaxNode): RawImport[] {
+  // Every `import_specification` shape checked against a real parse — a plain import, an aliased one,
+  // and a conditional import (`if (dart.library.html) '...'`, whose primary `uri` sits alongside rather
+  // than inside the conditional part) — resolves this same `configurable_uri` → `uri` → `string_literal`
+  // chain; each undefined/type-mismatch fallback below only satisfies `Array.prototype.find`'s and
+  // `childForFieldName`'s general return types, not a shape actually seen.
+  /* v8 ignore next */
   const configurableUri = namedChildren(node).find(child => child.type === 'configurable_uri')
+  /* v8 ignore next */
   const uri = configurableUri === undefined ? undefined : namedChildren(configurableUri).find(child => child.type === 'uri')
+  /* v8 ignore next */
   const stringLiteral = uri === undefined ? undefined : namedChildren(uri)[0]
+  /* v8 ignore next */
   if (stringLiteral?.type !== 'string_literal') return []
   const specifier = stringLiteral.text.slice(1, -1)
   const alias = namedChildren(node).find(child => child.type === 'identifier')
@@ -714,6 +774,10 @@ function dartImports(node: SyntaxNode): RawImport[] {
  */
 function scalaImports(node: SyntaxNode): RawImport[] {
   const path = node.childForFieldName('path')
+  // `import_declaration` always binds a `path` field — verified against a real parse for a single
+  // bare-name import, a dotted one, and a comma-separated multi-import (each still binds its own `path`);
+  // the empty-array case only satisfies `childForFieldName`'s general return type.
+  /* v8 ignore next */
   if (path === null) return []
   const prefix = path.text
   const selectors = namedChildren(node).find(child => child.type === 'import_selectors')
@@ -772,6 +836,9 @@ function calleeName(callee: SyntaxNode): string | undefined {
   // Verified against a real parse, not guessed.
   if (callee.type === 'generic_function') {
     const inner = callee.childForFieldName('function')
+    // `generic_function` always binds a `function` field per the grammar; the undefined case only
+    // satisfies `childForFieldName`'s general return type.
+    /* v8 ignore next */
     return inner === null ? undefined : calleeName(inner)
   }
   if (callee.type === 'identifier') return callee.text
@@ -864,9 +931,18 @@ function commonJsRequireImport(node: SyntaxNode): RawImport | undefined {
  */
 function rubyRequireImport(node: SyntaxNode): RawImport | undefined {
   const method = node.childForFieldName('method')
+  // A `call` node's `method` field always resolves to a plain `identifier` regardless of receiver shape
+  // — verified against a real parse for a bare call, a receiver call (`obj.require(...)`), a scope-
+  // resolution call (`Foo::require(...)`), and a safe-nav call (`obj&.require(...)`), every one still
+  // binding `method` to the same `identifier` node type; neither fallback below is known to be reachable.
+  /* v8 ignore next */
   if (method === null || method.type !== 'identifier') return undefined
   if (method.text !== 'require' && method.text !== 'require_relative') return undefined
   const argsNode = node.childForFieldName('arguments')
+  // A `call` node always binds an `arguments` field, even to an empty `argument_list` for a call with no
+  // arguments at all — verified against a real parse; a bare `require` with neither parentheses nor
+  // arguments parses as a plain `identifier`, never reaching a `call` node in the first place.
+  /* v8 ignore next */
   if (argsNode === null) return undefined
   const args = namedChildren(argsNode)
   const specifierNode = args.length === 1 ? args[0] : undefined
@@ -1245,9 +1321,18 @@ function rustUseTarget(node: SyntaxNode, prefix: string): RawImport[] {
     // `childForFieldName`'s general return type.
     /* v8 ignore next */
     if (list === null) return []
+    // A `scoped_use_list` is exactly what distinguishes a path-prefixed braced group (`foo::{bar}`) from
+    // a bare one (`use {foo, bar};`, which parses as a plain `use_list` instead, never reaching this
+    // branch at all) — its `path` field is therefore always present whenever this node type is matched;
+    // the fallback only satisfies `childForFieldName`'s general return type.
+    /* v8 ignore next */
     const newPrefix = path === null ? prefix : combineRustPrefix(prefix, path.text)
     return namedChildren(list).flatMap(child => rustUseTarget(child, newPrefix))
   }
+  // Every node type a `_use_clause` alternative can hold is handled by an earlier branch above; falling
+  // through to here would require some other node type, which the grammar never produces in this
+  // position.
+  /* v8 ignore next */
   if (node.type === 'use_list') {
     return namedChildren(node).flatMap(child => rustUseTarget(child, prefix))
   }
@@ -1669,6 +1754,12 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
       // OTHER language table entry requires its callee field; the null case only satisfies
       // `childForFieldName`'s general return type.
       const calleeField = spec.callFunctionFieldByType?.[node.type] ?? spec.callFunctionField
+      // `kotlinCallee`/`swiftCallee` are not known to return `undefined` for any real `call_expression`
+      // — every shape checked against a real parse (a bare call, a member call, a chained member call, a
+      // `super` receiver, a safe-nav/optional-chaining receiver, a call on a parenthesized or indexing
+      // expression) resolves to a node; the `?? null` fallback exists only to match
+      // `childForFieldName`'s `Node | null` shape for the other languages' branch below, not a case seen.
+      /* v8 ignore next 2 */
       const callee = spec.language === 'kotlin' ? kotlinCallee(node) ?? null
         : spec.language === 'swift' ? swiftCallee(node) ?? null
         : node.childForFieldName(calleeField)

@@ -1359,6 +1359,17 @@ add(1, 2);
     expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'std::io' })
     expect(extraction.imports).toContainEqual({ localName: 'Ord2', importedName: 'Ordering', specifier: 'std::cmp::Ordering' })
   })
+
+  it('extracts a bare braced use list with no path prefix, one binding per entry', async () => {
+    const { extraction } = await extract('.rs', 'use {foo, bar};\n')
+    expect(extraction.imports).toContainEqual({ localName: 'foo', importedName: 'foo', specifier: 'foo' })
+    expect(extraction.imports).toContainEqual({ localName: 'bar', importedName: 'bar', specifier: 'bar' })
+  })
+
+  it('resolves a self import with no nested path to the enclosing single-segment prefix', async () => {
+    const { extraction } = await extract('.rs', 'use foo::{self};\n')
+    expect(extraction.imports).toContainEqual({ localName: 'foo', importedName: 'foo', specifier: 'foo' })
+  })
 })
 
 describe('Ruby extraction', () => {
@@ -1466,6 +1477,28 @@ top_level_fn()
     expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: './foo' })
     expect(extraction.calls).toContainEqual(expect.objectContaining({ calleeName: 'require', callerKey: null }))
   })
+
+  it('does not recognize a require call with a non-string argument as an import binding', async () => {
+    const { extraction } = await extract('.rb', 'require(FOO)\n')
+    expect(extraction.imports).toEqual([])
+  })
+
+  it('does not recognize a require call with zero or multiple arguments as an import binding', async () => {
+    const zero = await extract('.rb', 'require()\n')
+    expect(zero.extraction.imports).toEqual([])
+    const two = await extract('.rb', "require('a', 'b')\n")
+    expect(two.extraction.imports).toEqual([])
+  })
+
+  it('extracts a require with an empty string specifier', async () => {
+    const { extraction } = await extract('.rb', "require('')\n")
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: '' })
+  })
+
+  it('extracts a class with no superclass with no heritage entries', async () => {
+    const { extraction } = await extract('.rb', 'class Dog\nend\n')
+    expect(extraction.heritage).toEqual([])
+  })
 })
 
 describe('Zig extraction', () => {
@@ -1565,6 +1598,28 @@ test "example" {
     const { extraction } = await extract('.zig', 'const Slot = union { a: i32, b: f32 };\n')
     expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Slot', kind: 'struct' }))
   })
+
+  it('reports a type-only extern declaration (no value at all) as kind variable', async () => {
+    const { extraction } = await extract('.zig', 'extern var x: i32;\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'variable' }))
+  })
+
+  it('does not mistake another builtin call for @import, nor a non-string @import argument for one', async () => {
+    const { extraction } = await extract('.zig', 'const x = @sizeOf(i32);\nconst y = @import(z);\n')
+    expect(extraction.imports).toEqual([])
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'constant' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'constant' }))
+  })
+
+  it('does not recognize an @import call with zero arguments as an import binding', async () => {
+    const { extraction } = await extract('.zig', 'const x = @import();\n')
+    expect(extraction.imports).toEqual([])
+  })
+
+  it('extracts an @import with an empty string specifier', async () => {
+    const { extraction } = await extract('.zig', 'const x = @import("");\n')
+    expect(extraction.imports).toContainEqual({ localName: 'x', importedName: '*', specifier: '' })
+  })
 })
 
 describe('Kotlin extraction', () => {
@@ -1656,6 +1711,11 @@ fun main() {
     expect(extraction.imports).toContainEqual({ localName: 'abs', importedName: 'abs', specifier: 'kotlin.math.abs' })
     expect(extraction.imports).toContainEqual({ localName: 'JList', importedName: 'List', specifier: 'java.util.List' })
     expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'kotlin.collections' })
+  })
+
+  it('does not resolve a by-delegation clause to a heritage target, an unresolved shape', async () => {
+    const { extraction } = await extract('.kt', 'class Foo : Bar by baz {}\n')
+    expect(extraction.heritage).toEqual([])
   })
 })
 
@@ -1752,6 +1812,27 @@ func main() {
     const { extraction } = await extract('.swift', SOURCE)
     expect(extraction.imports).toContainEqual({ localName: 'Foundation', importedName: '*', specifier: 'Foundation' })
   })
+
+  it('reports a top-level var as kind variable and a top-level let as kind constant', async () => {
+    const { extraction } = await extract('.swift', 'var counter = 0\nlet PI = 3.14\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'counter', kind: 'variable' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'PI', kind: 'constant' }))
+  })
+
+  it('reports an actor declaration as kind class, matching this file\'s no-dedicated-kind precedent', async () => {
+    const { extraction } = await extract('.swift', 'actor Foo {}\n')
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Foo', kind: 'class' }))
+  })
+
+  it('does not capture an operator function, an unnamed shape this package does not resolve', async () => {
+    const { extraction } = await extract('.swift', 'func + (lhs: Int, rhs: Int) -> Int {\n  return lhs\n}\n')
+    expect(extraction.definitions).toEqual([])
+  })
+
+  it('does not capture a tuple-destructured let binding, an unnamed shape this package does not resolve', async () => {
+    const { extraction } = await extract('.swift', 'let (a, b) = (1, 2)\n')
+    expect(extraction.definitions).toEqual([])
+  })
 })
 
 describe('Dart extraction', () => {
@@ -1838,6 +1919,11 @@ void main() {
     const { extraction } = await extract('.dart', SOURCE)
     expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'dart:math' })
     expect(extraction.imports).toContainEqual({ localName: 'bar', importedName: '*', specifier: 'package:foo/bar.dart' })
+  })
+
+  it('does not capture a multi-declare field, an unnamed shape this package does not resolve', async () => {
+    const { extraction } = await extract('.dart', 'class A {\n  int m, n;\n}\n')
+    expect(extraction.definitions.filter(def => def.container?.includes('A'))).toEqual([])
   })
 })
 
@@ -1928,5 +2014,21 @@ object Main {
     expect(extraction.imports).toContainEqual({ localName: 'abs', importedName: 'abs', specifier: 'scala.math.abs' })
     expect(extraction.imports).toContainEqual({ localName: 'List', importedName: 'List', specifier: 'scala.collection.List' })
     expect(extraction.imports).toContainEqual({ localName: 'Map', importedName: 'Map', specifier: 'scala.collection.Map' })
+  })
+
+  it('extracts a plain extends with no with clause as a single heritage extends', async () => {
+    const { extraction } = await extract('.scala', 'class Foo extends Base {}\n')
+    const foo = extraction.definitions.find(def => def.name === 'Foo')
+    expect(extraction.heritage).toEqual([{ sourceKey: foo?.key, targetName: 'Base', relation: 'extends' }])
+  })
+
+  it('does not resolve a generic extends target, an unresolved shape', async () => {
+    const { extraction } = await extract('.scala', 'class Foo extends Base[Int] {}\n')
+    expect(extraction.heritage).toEqual([])
+  })
+
+  it('does not resolve a generic base combined with a generic mixin, an unresolved shape for both', async () => {
+    const { extraction } = await extract('.scala', 'class Foo extends Base[Int] with Shape[Int] {}\n')
+    expect(extraction.heritage).toEqual([])
   })
 })
