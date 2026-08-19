@@ -9,7 +9,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'
-import { DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, KOTLIN_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD, SWIFT_FUNCTION_NAME_FIELD, SWIFT_PROPERTY_NAME_FIELD } from './languages.ts'
+import { DART_FIELD_NAME_FIELD, DECLARATOR_NAME_FIELD, FIRST_CHILD_NAME_FIELD, KOTLIN_NAME_FIELD, PHP_ELEMENT_NAME_FIELD, SELF_NAME_FIELD, SWIFT_FUNCTION_NAME_FIELD, SWIFT_PROPERTY_NAME_FIELD } from './languages.ts'
 import type { DefinitionRule, LanguageSpec } from './languages.ts'
 
 /** The scope a definition sits in, tracked so a `scopeRestricted` rule (see `DefinitionRule`) can be
@@ -630,6 +630,67 @@ function swiftImports(node: SyntaxNode): RawImport[] {
   return [{ localName, importedName: '*', specifier }]
 }
 
+/**
+ * A Dart `declaration`'s field name — see {@link DART_FIELD_NAME_FIELD}. Only the single-identifier
+ * `initialized_identifier_list` shape is named; a constructor-wrapping `declaration` (no
+ * `initialized_identifier_list` child at all) and a multi-declare `int x, y;` (more than one
+ * `initialized_identifier`) both return `undefined` rather than guess a name for a shape this package
+ * does not attempt to resolve. Verified against a real parse, not guessed.
+ */
+function dartFieldName(node: SyntaxNode): SyntaxNode | undefined {
+  const list = namedChildren(node).find(child => child.type === 'initialized_identifier_list')
+  if (list === undefined) return undefined
+  const items = namedChildren(list).filter(child => child.type === 'initialized_identifier')
+  const sole = items.length === 1 ? items[0] : undefined
+  if (sole === undefined) return undefined
+  const name = namedChildren(sole)[0]
+  return name?.type === 'identifier' ? name : undefined
+}
+
+/**
+ * Dart `class_definition` heritage extraction from its `superclass` field (`extends Base`, wrapping the
+ * base type directly) and `interfaces` field (`implements Shape, Other` — a single wrapper node holding
+ * one `type_identifier` per implemented interface as its own direct children, verified against a real
+ * parse). Dart draws no distinction here that this package resolves beyond `extends`/`implements`
+ * themselves, so a `superclass` entry reports `extends` and each `interfaces` entry reports
+ * `implements`.
+ * @param node - the declaring `class_definition` node.
+ * @param sourceKey - the declaring definition's own {@link RawDefinition.key}.
+ * @returns every heritage reference the class declares.
+ */
+function dartHeritage(node: SyntaxNode, sourceKey: string): RawHeritageRef[] {
+  const refs: RawHeritageRef[] = []
+  const superclass = node.childForFieldName('superclass')
+  const base = superclass === null ? undefined : namedChildren(superclass)[0]
+  if (base !== undefined && isHeritageName(base)) refs.push({ sourceKey, targetName: base.text, relation: 'extends' })
+  const interfaces = node.childForFieldName('interfaces')
+  if (interfaces !== null) {
+    for (const target of namedChildren(interfaces)) {
+      if (isHeritageName(target)) refs.push({ sourceKey, targetName: target.text, relation: 'implements' })
+    }
+  }
+  return refs
+}
+
+/**
+ * Dart `import_specification` extraction — the URI sits three levels down, in a `configurable_uri` →
+ * `uri` → `string_literal` chain, none of them bound to a field of their own; an `as` alias adds a
+ * sibling `identifier`. This grammar's `string_literal` carries no separate content child (unlike
+ * ECMAScript's `string_fragment`/PHP's escaped content) — its text is read directly off the quoted node
+ * itself, stripping the surrounding quote characters. Verified against a real parse, not guessed.
+ * @param node - the `import_specification` node.
+ * @returns the single import binding this statement introduces.
+ */
+function dartImports(node: SyntaxNode): RawImport[] {
+  const configurableUri = namedChildren(node).find(child => child.type === 'configurable_uri')
+  const uri = configurableUri === undefined ? undefined : namedChildren(configurableUri).find(child => child.type === 'uri')
+  const stringLiteral = uri === undefined ? undefined : namedChildren(uri)[0]
+  if (stringLiteral?.type !== 'string_literal') return []
+  const specifier = stringLiteral.text.slice(1, -1)
+  const alias = namedChildren(node).find(child => child.type === 'identifier')
+  return [{ localName: alias?.text ?? '', importedName: '*', specifier }]
+}
+
 /** The definition rule matching `node`, or `undefined` when it introduces no declaration. */
 function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[]): DefinitionRule | undefined {
   for (const rule of definitions) {
@@ -647,6 +708,7 @@ function matchDefinition(node: SyntaxNode, definitions: readonly DefinitionRule[
       : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node)
       : rule.nameField === SWIFT_PROPERTY_NAME_FIELD ? swiftPropertyName(node)
       : rule.nameField === SWIFT_FUNCTION_NAME_FIELD ? swiftFunctionName(node)
+      : rule.nameField === DART_FIELD_NAME_FIELD ? dartFieldName(node)
       : soleNamedField(node, rule.nameField)
     if (nameNode === undefined) continue
     if (rule.nameNodeTypes !== undefined && !rule.nameNodeTypes.includes(nameNode.type)) continue
@@ -1425,6 +1487,7 @@ function extractHeritage(node: SyntaxNode, kind: string, sourceKey: string, lang
   if (language === 'ruby') return rubyClassHeritage(node, sourceKey)
   if (language === 'kotlin') return kotlinHeritage(node, sourceKey)
   if (language === 'swift') return swiftHeritage(node, sourceKey)
+  if (language === 'dart') return dartHeritage(node, sourceKey)
   // Otherwise only comes from ECMASCRIPT_DEFINITIONS's `class_declaration` rule — Go has no class
   // concept, so this is never reached with `language === 'go'`.
   return ecmascriptClassHeritage(node, sourceKey)
@@ -1467,6 +1530,7 @@ export function extractFile(tree: Tree, spec: LanguageSpec): FileExtraction {
         : rule.nameField === KOTLIN_NAME_FIELD ? kotlinDeclaredName(node) as SyntaxNode
         : rule.nameField === SWIFT_PROPERTY_NAME_FIELD ? swiftPropertyName(node) as SyntaxNode
         : rule.nameField === SWIFT_FUNCTION_NAME_FIELD ? swiftFunctionName(node) as SyntaxNode
+        : rule.nameField === DART_FIELD_NAME_FIELD ? dartFieldName(node) as SyntaxNode
         : node.childForFieldName(rule.nameField)
       // A matched rule's node type is always the NAMED-declaration form the grammar mandates a name
       // for; the anonymous form (`function_expression`, `class` as an expression, both produced by an
@@ -1631,6 +1695,8 @@ function extractImports(node: SyntaxNode, language: string): RawImport[] {
       return kotlinImports(node)
     case 'swift':
       return swiftImports(node)
+    case 'dart':
+      return dartImports(node)
     /* v8 ignore next 2 -- exhaustive over LANGUAGE_TABLE's current language labels; unreachable. */
     default:
       return []
@@ -1746,6 +1812,10 @@ function isExported(node: SyntaxNode, language: string, name: string, commonJsEx
   // `modifiers` → `visibility_modifier` shape Kotlin's grammar does (verified against a real parse), so
   // `kotlinHasVisibility` is reused directly rather than duplicated under a new name.
   if (language === 'swift') return kotlinHasVisibility(node, 'public') || kotlinHasVisibility(node, 'open')
+  // Dart has no visibility keyword at all — the language's own convention is a leading underscore
+  // marking a name library-private, matching Go's capitalization-based convention but spelled with a
+  // naming convention instead of a keyword.
+  if (language === 'dart') return !name.startsWith('_')
   // A PHP top-level function/class/interface/trait/enum carries no visibility keyword of its own — the
   // language has no export construct for them, matching Python's precedent, and this reports `false`
   // for all of them since `phpHasVisibility` finds no `visibility_modifier` to check. A class/enum

@@ -1753,3 +1753,90 @@ func main() {
     expect(extraction.imports).toContainEqual({ localName: 'Foundation', importedName: '*', specifier: 'Foundation' })
   })
 })
+
+describe('Dart extraction', () => {
+  const SOURCE = `
+import "dart:math";
+import "package:foo/bar.dart" as bar;
+
+class Point {
+  int x;
+  int y;
+
+  Point(this.x, this.y);
+
+  int length() {
+    return x + y;
+  }
+}
+
+class Animal extends Base implements Shape {
+  void speak() {}
+}
+
+abstract class Shape {
+  double area();
+}
+
+enum Color { red, green, blue }
+
+int add(int a, int b) {
+  return a + b;
+}
+
+void _privateFn() {}
+
+void main() {
+  add(1, 2);
+  var p = Point(1, 2);
+  p.length();
+}
+`
+
+  it('extracts a top-level function, and a leading-underscore one as not exported', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'add', kind: 'function', isExported: true }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: '_privateFn', kind: 'function', isExported: false }))
+  })
+
+  it('extracts a class with its fields, its constructor as kind method, and a return-typed method', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'x', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'y', kind: 'field', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Point', kind: 'method', container: ['Point'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'length', kind: 'method', container: ['Point'] }))
+  })
+
+  it('extracts an abstract class method signature (no body) as kind method, same as a concrete one', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Shape', kind: 'class' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'area', kind: 'method', container: ['Shape'] }))
+  })
+
+  it('extracts an enum with its cases as enum_member, nested under it', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'Color', kind: 'enum' }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'red', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'green', kind: 'enum_member', container: ['Color'] }))
+    expect(extraction.definitions).toContainEqual(expect.objectContaining({ name: 'blue', kind: 'enum_member', container: ['Color'] }))
+  })
+
+  it('extracts an extends target and an implements target as distinct heritage relations', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    const animal = extraction.definitions.find(def => def.name === 'Animal')
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Base', relation: 'extends' })
+    expect(extraction.heritage).toContainEqual({ sourceKey: animal?.key, targetName: 'Shape', relation: 'implements' })
+  })
+
+  it('extracts no call sites at all, a documented limitation of this grammar', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.calls).toEqual([])
+  })
+
+  it('extracts a plain import and an aliased package import', async () => {
+    const { extraction } = await extract('.dart', SOURCE)
+    expect(extraction.imports).toContainEqual({ localName: '', importedName: '*', specifier: 'dart:math' })
+    expect(extraction.imports).toContainEqual({ localName: 'bar', importedName: '*', specifier: 'package:foo/bar.dart' })
+  })
+})

@@ -145,6 +145,20 @@ export const SWIFT_PROPERTY_NAME_FIELD = '@swift-property'
  */
 export const SWIFT_FUNCTION_NAME_FIELD = '@swift-function'
 
+/**
+ * Sentinel {@link DefinitionRule.nameField} value for a rule whose name is Dart-specific: a `declaration`
+ * node is how Dart spells both a class/struct field (`int x;`, wrapping an `initialized_identifier_list`
+ * of one or more `initialized_identifier` children, itself the same multi-name ambiguity Go's
+ * `const_spec`/`var_spec` already reject outright) and a constructor (wrapping a `constructor_signature`
+ * instead, handled by its own separate rule matching that inner node type directly, not this one) — with
+ * no field of its own binding either shape, so `dartFieldName` in `extract.ts` returns `undefined` for
+ * anything but the single-identifier field-list shape, the same "don't guess" precedent this file already
+ * follows elsewhere; a `declaration` wrapping a constructor simply fails to match this rule and is left
+ * for the dedicated `constructor_signature` rule to capture during the walk's ordinary recursion into it.
+ * Verified against a real parse, not guessed.
+ */
+export const DART_FIELD_NAME_FIELD = '@dart-field'
+
 /** One tree-sitter node type recording a relative-import binding, per language family. */
 export interface ImportRule {
   /** The tree-sitter node type anchoring one import statement, e.g. `import_statement`. */
@@ -793,6 +807,58 @@ export const LANGUAGE_TABLE: readonly LanguageSpec[] = [
     // workspace symbol, the same reasoning `ECMASCRIPT_BARE_FUNCTION_SCOPE_TYPES` applies to a callback.
     // Verified against a real parse, not guessed.
     bareFunctionScopeTypes: ['lambda_literal'],
+  },
+  {
+    language: 'dart',
+    extensions: ['.dart'],
+    wasmFile: 'tree-sitter-dart.wasm',
+    definitions: [
+      { nodeType: 'class_definition', kind: 'class', nameField: 'name' },
+      // A method's `function_signature` sits directly inside a `method_signature` wrapper; an abstract
+      // method (interface-only) signature (`double area();`, no body) instead sits inside a plain
+      // `declaration` whose own parent is the `class_body` — both tried before the unrestricted
+      // `function` rule below falls through to a top-level function. Verified against a real parse, not
+      // guessed.
+      { nodeType: 'function_signature', kind: 'method', nameField: 'name', parentType: 'method_signature' },
+      { nodeType: 'function_signature', kind: 'method', nameField: 'name', parentType: 'declaration', grandparentType: 'class_body' },
+      { nodeType: 'function_signature', kind: 'function', nameField: 'name' },
+      // A constructor (`Point(this.x, this.y);`) is its own node type, `constructor_signature`, wrapped
+      // by the very same `declaration` node type a field uses — matched directly here regardless of that
+      // wrapper (see `DART_FIELD_NAME_FIELD`'s doc comment). No dedicated `constructor` seam kind exists;
+      // a constructor is a method in every way this package's graph cares about, matching Java's/C#'s own
+      // constructor→`method` precedent.
+      { nodeType: 'constructor_signature', kind: 'method', nameField: 'name' },
+      { nodeType: 'enum_declaration', kind: 'enum', nameField: 'name' },
+      // An enum case — verified against a real parse, not guessed; can only ever appear directly inside
+      // an `enum_body`, so — like every other language's own unambiguous member node type — no
+      // `scopeRestricted`/`parentType` guard is needed.
+      { nodeType: 'enum_constant', kind: 'enum_member', nameField: 'name' },
+      // A class/struct field — see `DART_FIELD_NAME_FIELD`. Restricted to a direct `class_body` child
+      // since Dart uses an entirely different, already-unambiguous node type for a local variable
+      // (`local_variable_declaration`), so no `scopeRestricted` gate is needed either — this rule simply
+      // never matches one. A top-level `declaration` (Dart also allows a bare top-level `var`/`final`)
+      // is deliberately not captured at all — same "don't overreach" precedent this file already applies
+      // to a comparably rare shape elsewhere.
+      { nodeType: 'declaration', kind: 'field', nameField: DART_FIELD_NAME_FIELD, parentType: 'class_body' },
+    ],
+    // Dart's grammar has no call-expression node type at all — a call is a flat `identifier` followed by
+    // zero or more `selector` children, where a call is whichever `selector` happens to be an
+    // `argument_part` rather than a `.property` access; resolving its callee means walking backward
+    // through preceding siblings, not reading a field off a single call node the way every other
+    // language's `RawCall` extraction in this file works. Capturing this would need a structurally new,
+    // sibling-walking resolution strategy this package's call model does not support today, so this
+    // package captures no call sites for Dart at all — a real, verified limitation, not a guess. `name`
+    // is kept only as a placeholder so this table entry still type-checks as a normal `LanguageSpec`; it
+    // is never read, since `callTypes` is empty.
+    callTypes: [],
+    callFunctionField: 'name',
+    // Targets `import_specification` directly (nested inside `import_or_export` → `library_import`)
+    // rather than either wrapper — the walk reaches it regardless during ordinary recursion. A Dart
+    // `export` statement (`import_or_export` → `library_export`) is deliberately not captured: unlike an
+    // import, it re-exports the current file's own symbols to *its* importers, a different relationship
+    // than the "this file's own binding" every other `RawImport` in this package represents.
+    importTypes: ['import_specification'],
+    bareFunctionScopeTypes: [],
   },
 ]
 
