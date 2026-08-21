@@ -141,6 +141,10 @@ The on-disk graph format — schema version 4 at `.codegraph/codegraph.db` — o
 
 Built on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and [Cordis](https://github.com/cordiverse/cordis).
 
+## Feedback
+
+Questions or need support? Open an [issue](https://github.com/CC19990113/dsh-plugin-codegraph/issues).
+
 ## License
 
 [MIT](LICENSE)
