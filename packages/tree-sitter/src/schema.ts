@@ -1,5 +1,5 @@
 /**
- * Schema-v4 database writer: create the on-disk tables `dsh-plugin-codegraph-sqlite` reads —
+ * Schema-v4 database writer: create the on-disk tables `@huanlin/dsh-plugin-codegraph-sqlite` reads —
  * verbatim in structure, so the store and the external `codegraph` CLI stay able to open what this
  * package writes — and insert one indexing run's resolved graph.
  *
@@ -8,11 +8,12 @@
  * reader opening `databasePath` at any point either sees the complete previous graph or the complete
  * new one — never a window where the file exists with a fresh, empty schema and no rows yet, which a
  * naive "delete then recreate" leaves open between `CREATE TABLE` and the first `COMMIT`.
- * @module dsh-plugin-codegraph-tree-sitter/schema
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/schema
  */
 
 import { mkdir, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 import type { ExtractedFile, GraphEdge, GraphNode, UnresolvedRef } from './resolve.ts'
@@ -67,12 +68,49 @@ async function removeGraphFiles(path: string): Promise<void> {
 }
 
 /**
+ * How long each retry of the final replace waits. The seam releases this process's own readers
+ * before an indexing run (see `CodegraphService.release`), so a refusal here names a reader that
+ * raced the run, or a holder outside this process — the former clears within a backoff step or
+ * two; the latter surfaces as a failed run instead of a silently lost rebuild.
+ */
+const REPLACE_BACKOFF_MS = [50, 200] as const
+
+/** Whether an error is the transient refusal Windows reports for a file another handle holds open. */
+function isTransientReplaceRefusal(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+}
+
+/**
+ * Rename the rebuilt file over the live path, retrying the transient refusals Windows reports
+ * while some handle still holds the target open. POSIX allows the rename regardless, so the retry
+ * is pure insurance there; on Windows it rides out a query that raced this rebuild instead of
+ * turning one busy reader into a failed index run.
+ * @param tempPath - absolute path of the freshly built file to move into place.
+ * @param databasePath - absolute path of the live graph file it replaces.
+ */
+async function replaceGraph(tempPath: string, databasePath: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(tempPath, databasePath)
+      return
+    } catch (error) {
+      if (attempt >= REPLACE_BACKOFF_MS.length || !isTransientReplaceRefusal(error)) throw error
+      await delay(REPLACE_BACKOFF_MS[attempt]!)
+    }
+  }
+}
+
+/**
  * Replace the graph at `databasePath` with one indexing run's output.
  *
  * The full build happens on a temporary file beside `databasePath`; only a successful build is
- * `rename`d over the real path, atomically on the same filesystem. A reader with a connection already
- * open on the old file keeps reading it (POSIX unlink semantics) until it reopens — that half of
- * freshness is the sqlite store's responsibility, not this writer's.
+ * renamed over the real path, atomically on the same filesystem. The seam releases this process's
+ * own readers first (see `CodegraphService.release`) because Windows refuses that rename while any
+ * handle here still holds the old file open; a reader outside this process — the external
+ * `codegraph` CLI's daemon — is what the replace's bounded retry is for. A reader that keeps
+ * serving the old bytes until it reopens is the sqlite store's half of freshness, not this
+ * writer's.
  * @param databasePath - absolute path of the `.codegraph/codegraph.db` file to (re)create.
  * @param input - the run's resolved graph and per-file metadata.
  */
@@ -135,16 +173,19 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
     } finally {
       db.close()
     }
+
+    // The old file's sidecars, if any, describe the graph being replaced, not the new one; clear them
+    // before the rename so the new file never inherits a stale WAL/SHM pair.
+    await rm(`${databasePath}-wal`, { force: true })
+    await rm(`${databasePath}-shm`, { force: true })
+    await replaceGraph(tempPath, databasePath)
   } catch (cause) {
+    // Guarded with the build, not after it: a rename Windows refused must still clean up this
+    // run's temp file, rather than leaving one orphan behind per failed attempt.
     await removeGraphFiles(tempPath)
     throw cause
   }
 
-  // The old file's sidecars, if any, describe the graph being replaced, not the new one; clear them
-  // before the rename so the new file never inherits a stale WAL/SHM pair.
-  await rm(`${databasePath}-wal`, { force: true })
-  await rm(`${databasePath}-shm`, { force: true })
-  await rename(tempPath, databasePath)
   // rename() only moves the main file; the temp name's own sidecars (should the driver have left any)
   // never travel with it and would otherwise linger under the temp name forever.
   await removeGraphFiles(tempPath)

@@ -10,16 +10,27 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent, Inbox } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import Codegraph from 'dsh-plugin-codegraph-service'
+import Codegraph from '@huanlin/dsh-plugin-codegraph-service'
 import * as FsLocal from '@deepseek-ai/dsh-fs-local'
-import * as CodegraphSqlite from 'dsh-plugin-codegraph-sqlite'
-import * as ToolCodegraph from 'dsh-plugin-codegraph-tool'
+import * as CodegraphSqlite from '@huanlin/dsh-plugin-codegraph-sqlite'
+import * as ToolCodegraph from '@huanlin/dsh-plugin-codegraph-tool'
+
+const stubInbox = (): Inbox => ({
+  nextTurn: [],
+  nextStep: [],
+  clear: () => {},
+  append: () => {},
+  prepend: () => {},
+  replace: () => false,
+  remove: () => false,
+  splice: () => [],
+})
 
 // Opt-in: point DSH_CODEGRAPH_LIVE_ROOT at a workspace the external codegraph CLI has indexed.
 const WORKSPACE = process.env['DSH_CODEGRAPH_LIVE_ROOT'] ?? ''
@@ -46,9 +57,9 @@ describe.skipIf(!present)('tool-codegraph against a live external index', () => 
       "- name: '@deepseek-ai/dsh-fs-local'",
       '  config:',
       `    cwd: ${JSON.stringify(WORKSPACE)}`,
-      "- name: 'dsh-plugin-codegraph-service'",
-      "- name: 'dsh-plugin-codegraph-sqlite'",
-      "- name: 'dsh-plugin-codegraph-tool'",
+      "- name: '@huanlin/dsh-plugin-codegraph-service'",
+      "- name: '@huanlin/dsh-plugin-codegraph-sqlite'",
+      "- name: '@huanlin/dsh-plugin-codegraph-tool'",
       '',
     ].join('\n'))
 
@@ -62,9 +73,9 @@ describe.skipIf(!present)('tool-codegraph against a live external index', () => 
       ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
       ['@deepseek-ai/dsh-tools', ToolRuntime],
       ['@deepseek-ai/dsh-fs-local', FsLocal],
-      ['dsh-plugin-codegraph-service', Codegraph],
-      ['dsh-plugin-codegraph-sqlite', CodegraphSqlite],
-      ['dsh-plugin-codegraph-tool', ToolCodegraph],
+      ['@huanlin/dsh-plugin-codegraph-service', Codegraph],
+      ['@huanlin/dsh-plugin-codegraph-sqlite', CodegraphSqlite],
+      ['@huanlin/dsh-plugin-codegraph-tool', ToolCodegraph],
     ])
     ctx.loader.internal = {
       version: 'v2',
@@ -78,12 +89,12 @@ describe.skipIf(!present)('tool-codegraph against a live external index', () => 
 
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-live')
-    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd: WORKSPACE })
+    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd: WORKSPACE, isSeeded: false })
     const owner: Agent = {
       id,
       options: {},
       session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      inbox: stubInbox(),
       status: 'idle',
       ctx: scope.ctx,
       followup: () => {},
@@ -112,7 +123,7 @@ describe.skipIf(!present)('tool-codegraph against a live external index', () => 
     for (const [index, args] of calls.entries()) {
       const result = await ctx.tools.execute({
         signal: new AbortController().signal,
-        callId: CallId(`live-${index}`),
+        callId: ToolCallId(`live-${index}`),
         name: 'codegraph',
         arguments: args,
         agent: owner,

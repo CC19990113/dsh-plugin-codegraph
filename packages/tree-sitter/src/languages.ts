@@ -6,14 +6,14 @@
  * depend on — not every declaration shape a language can produce — because the alternative is porting
  * the reference indexer's language-specific resolution, which the proposal this package implements
  * defers until the core proves itself against real workspaces.
- * @module dsh-plugin-codegraph-tree-sitter/languages
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/languages
  */
 
 /** One tree-sitter node type that introduces a declaration, mapped to the seam's `NODE_KINDS`. */
 export interface DefinitionRule {
   /** The tree-sitter node type this rule matches, e.g. `function_declaration`. */
   readonly nodeType: string
-  /** The seam node kind to record, e.g. `function`. See `NODE_KINDS` in `dsh-plugin-codegraph-service`. */
+  /** The seam node kind to record, e.g. `function`. See `NODE_KINDS` in `@huanlin/dsh-plugin-codegraph-service`. */
   readonly kind: string
   /** The field holding the declared name; `childForFieldName(nameField)` must be an identifier. */
   readonly nameField: string
@@ -167,7 +167,7 @@ export interface ImportRule {
 
 /** One language grammar this package can load and extract from. */
 export interface LanguageSpec {
-  /** The seam's language label. See `LANGUAGES` in `dsh-plugin-codegraph-service`. */
+  /** The seam's language label. See `LANGUAGES` in `@huanlin/dsh-plugin-codegraph-service`. */
   readonly language: string
   /** File extensions routed to this grammar, each including the leading dot. */
   readonly extensions: readonly string[]

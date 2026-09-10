@@ -14,7 +14,7 @@
  * imports (a known external origin the specifier just didn't resolve) — both real code that was never a
  * candidate for a workspace edge, as against a bare, undeclared name, which is the actual gap this
  * resolver's conservative rule leaves behind.
- * @module dsh-plugin-codegraph-tree-sitter/resolve
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/resolve
  */
 
 import { posix } from 'node:path'

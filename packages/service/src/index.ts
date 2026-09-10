@@ -16,7 +16,7 @@
  * never called from {@link CodegraphService.query}: indexing is a caller-initiated, potentially
  * multi-minute operation, and `query` stays read-only so a store never hides a build behind a call the
  * model expects to return quickly.
- * @module dsh-plugin-codegraph-service
+ * @module @huanlin/dsh-plugin-codegraph-service
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -221,8 +221,24 @@ export class Codegraph extends Service implements CodegraphService {
   }
 
   async index(projectRoot: string, signal?: AbortSignal): Promise<CodegraphIndexReport> {
+    // The run replaces the graph file by renaming the rebuilt one over it, and Windows refuses
+    // that rename while any reader in this process still holds the old file open — so every
+    // store's connections for this root are closed before the indexer starts. On POSIX the close
+    // is unobservable; on Windows it is the difference between a rebuild that lands and one that
+    // fails EPERM on every attempt for as long as the process lives.
+    this.release(projectRoot)
     const indexer = await this.selectIndexer(projectRoot, signal)
     return indexer.index(projectRoot, signal)
+  }
+
+  /**
+   * Close every open connection the registered stores keep for `projectRoot`. A store that keeps
+   * none — or none for this root — contributes nothing; the seam never fails a caller because one
+   * store had nothing to release.
+   * @param projectRoot - absolute path of the project root whose readers to release.
+   */
+  release(projectRoot: string): void {
+    for (const store of this.stores.values()) store.release?.(projectRoot)
   }
 
   async query<R extends CodegraphRequest>(request: R, signal?: AbortSignal): Promise<CodegraphResultFor<R>> {

@@ -1,6 +1,6 @@
 {
-  "name": "dsh-plugin-codegraph-sqlite",
-  "version": "0.1.6",
+  "name": "@huanlin/dsh-plugin-codegraph-sqlite",
+  "version": "0.1.10",
   "description": "Read-only SQLite store for the DeepSeek Harness code-graph seam — serves structural queries from the schema-v4 graph at .codegraph/codegraph.db, the same on-disk format the codegraph CLI writes",
   "keywords": [
     "dsh",
@@ -18,11 +18,11 @@
   "author": "CC ZHAO",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git",
+    "url": "git+https://github.com/HuanLinOTO/dsh-plugin-codegraph.git",
     "directory": "packages/sqlite"
   },
-  "homepage": "https://github.com/CC19990113/dsh-plugin-codegraph#readme",
-  "bugs": "https://github.com/CC19990113/dsh-plugin-codegraph/issues",
+  "homepage": "https://github.com/HuanLinOTO/dsh-plugin-codegraph#readme",
+  "bugs": "https://github.com/HuanLinOTO/dsh-plugin-codegraph/issues",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -31,10 +31,6 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./invariant": {
-      "types": "./lib/invariant.d.ts",
-      "default": "./lib/invariant.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -42,21 +38,20 @@
     "lib/**/*.d.ts"
   ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "dsh-plugin-codegraph-service": "workspace:^"
+    "@huanlin/dsh-plugin-codegraph-service": "workspace:^"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",
-    "@deepseek-ai/dsh-invariants": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6"
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-util-values": ">=0.1.5-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-invariants": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.6"
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-util-values": "0.1.5-rc.1"
   }
 }

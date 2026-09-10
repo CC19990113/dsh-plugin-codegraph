@@ -3,11 +3,11 @@
  * from a file an independently versioned indexer wrote, so each field is checked before it becomes a
  * typed record; a row that violates the format fails loud as `CODEGRAPH_MALFORMED_INDEX` rather than
  * reaching a consumer as a plausible-looking wrong value.
- * @module dsh-plugin-codegraph-sqlite/rows
+ * @module @huanlin/dsh-plugin-codegraph-sqlite/rows
  */
 
-import { CodegraphError, CodegraphNodeId } from 'dsh-plugin-codegraph-service'
-import type { CodegraphEdge, CodegraphFile, CodegraphNode } from 'dsh-plugin-codegraph-service'
+import { CodegraphError, CodegraphNodeId } from '@huanlin/dsh-plugin-codegraph-service'
+import type { CodegraphEdge, CodegraphFile, CodegraphNode } from '@huanlin/dsh-plugin-codegraph-service'
 
 /** One `nodes` row as `node:sqlite` returns it, before validation. */
 export type NodeRow = Record<string, unknown>

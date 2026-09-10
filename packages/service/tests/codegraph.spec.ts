@@ -152,6 +152,56 @@ function stubIndexer(id: string, roots: readonly string[]): CodegraphIndexer {
   }
 }
 
+describe('codegraph release', () => {
+  it('closes the stores\' open connections for a root before an index run replaces the file', async () => {
+    const ctx = await seam()
+    // Sequenced by hand rather than invocationCallOrder: one shared list proves release ran
+    // first without reaching into vitest's per-mock ordering bookkeeping.
+    const order: string[] = []
+    const release = vi.fn((_projectRoot: string) => {
+      order.push('release')
+    })
+    ctx.codegraph.registerStore({
+      id: CodegraphStoreId('pooled'),
+      indexes: (projectRoot: string) => Promise.resolve(projectRoot === '/repo'),
+      query: ((request: CodegraphRequest) =>
+        Promise.resolve({ ...STATUS, projectRoot: request.projectRoot })) as CodegraphStoreProvider['query'],
+      release,
+    })
+    ctx.codegraph.registerIndexer({
+      id: CodegraphIndexerId('spy'),
+      canIndex: () => Promise.resolve(true),
+      index: (projectRoot: string) => {
+        order.push('index')
+        return Promise.resolve({
+          projectRoot,
+          filesIndexed: 0,
+          filesSkipped: 0,
+          nodeCount: 0,
+          edgeCount: 0,
+          unresolvedCount: 0,
+          unresolvedLikelyInternalCount: 0,
+          languages: [],
+        } satisfies CodegraphIndexReport)
+      },
+    })
+
+    await expect(ctx.codegraph.index('/repo')).resolves.toBeDefined()
+    expect(release).toHaveBeenCalledWith('/repo')
+    // Released BEFORE the run, not after: the replace needs the readers gone first. On Windows the
+    // replace refuses with EPERM for as long as an open connection holds the old file.
+    expect(order).toEqual(['release', 'index'])
+  })
+
+  it('treats release as optional: a store without it still serves queries and takes an index run', async () => {
+    const ctx = await seam()
+    ctx.codegraph.registerStore(stubStore('plain', ['/repo']))
+    ctx.codegraph.registerIndexer(stubIndexer('a', ['/repo']))
+    await expect(ctx.codegraph.index('/repo')).resolves.toBeDefined()
+    await expect(ctx.codegraph.query(STATUS_REQUEST)).resolves.toBeDefined()
+  })
+})
+
 describe('codegraph indexer registry', () => {
   it('runs the one indexer claiming the root', async () => {
     const ctx = await seam()

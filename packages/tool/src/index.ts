@@ -13,18 +13,18 @@
  * `systemPrompt`, and import no store.
  *
  * Namespace plugin (named exports, no default export).
- * @module dsh-plugin-codegraph-tool
+ * @module @huanlin/dsh-plugin-codegraph-tool
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { CodegraphError } from 'dsh-plugin-codegraph-service'
-import type { CodegraphNode, CodegraphRelation } from 'dsh-plugin-codegraph-service'
+import { CodegraphError } from '@huanlin/dsh-plugin-codegraph-service'
+import type { CodegraphNode, CodegraphRelation } from '@huanlin/dsh-plugin-codegraph-service'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
-import { assertNever } from '@deepseek-ai/dsh-llm'
+import { assertNever } from '@deepseek-ai/dsh-util-values'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms } from './compose.ts'
 import type { FileGroup } from './compose.ts'

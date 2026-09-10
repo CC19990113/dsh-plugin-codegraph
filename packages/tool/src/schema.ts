@@ -6,7 +6,7 @@
  * optional, so a Code Mode program that switches on `operation` gets exactly the fields that
  * operation produces and nothing it must test for. Members are built from shared field groups
  * because ten hand-written copies of a symbol projection would drift apart.
- * @module dsh-plugin-codegraph-tool/schema
+ * @module @huanlin/dsh-plugin-codegraph-tool/schema
  */
 
 import type { InferArgs, InferValue } from '@deepseek-ai/dsh-tools'

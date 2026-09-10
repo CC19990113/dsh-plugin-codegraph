@@ -1,7 +1,7 @@
 /**
  * Self-built code-graph indexer for `ctx.codegraph`. Parses a workspace with `web-tree-sitter` and
  * `tree-sitter-wasms` and writes schema version 4 to `<projectRoot>/.codegraph/codegraph.db` — the
- * same path and format `dsh-plugin-codegraph-sqlite` reads and the external `codegraph` CLI
+ * same path and format `@huanlin/dsh-plugin-codegraph-sqlite` reads and the external `codegraph` CLI
  * writes, so a workspace this package indexes becomes queryable through the existing store with no
  * second graph format to disagree with the first.
  *
@@ -13,15 +13,15 @@
  * Namespace plugin (named exports, no default export). Grammars load lazily, one per language, on
  * first sight of a matching file, and stay cached for the process — never eagerly for every grammar
  * this package ships with.
- * @module dsh-plugin-codegraph-tree-sitter
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter
  */
 
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CodegraphIndexerId } from 'dsh-plugin-codegraph-service'
-import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
+import { CodegraphIndexerId } from '@huanlin/dsh-plugin-codegraph-service'
+import type { CodegraphIndexer, CodegraphIndexReport } from '@huanlin/dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
 import { resolveWorkspace } from './resolve.ts'
@@ -181,7 +181,15 @@ export function apply(ctx: Context, config: Config): void {
       respectGitignore: resolved.respectGitignore,
       debounceMs: resolved.watchDebounceMs,
       maxWatchedDirectories: resolved.maxWatchedDirectories,
-      sync: () => runSync(projectRoot, resolved),
+      sync: () => {
+        // The rebuild replaces the graph file by renaming the rebuilt one over it, and Windows
+        // refuses that rename while any reader in this process holds the old file open. A
+        // watcher-driven sync bypasses ctx.codegraph.index(), so it performs the same release the
+        // seam performs for a caller-initiated run — without it, one query plus the watcher's own
+        // rebuild retry limit is enough to degrade watching permanently.
+        ctx.codegraph.release(projectRoot)
+        return runSync(projectRoot, resolved)
+      },
       // No diagnostics service is wired into this package's dependencies; this is the floor for
       // "degradation must be visible" until one is, per NOTES.local.md.
       onDegraded: (reason) => {

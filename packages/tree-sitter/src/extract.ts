@@ -5,7 +5,7 @@
  * The caller of a call node is the nearest enclosing definition, or the file itself when the call sits
  * at module top level — the on-disk format records it that way, and a third of the call edges in a
  * real workspace are of exactly this shape.
- * @module dsh-plugin-codegraph-tree-sitter/extract
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/extract
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter'

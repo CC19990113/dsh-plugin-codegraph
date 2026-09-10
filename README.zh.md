@@ -2,15 +2,20 @@
 
 [English](README.md) | 中文
 
-[![dshfind](https://dshfind.com/api/badge/CC19990113/dsh-plugin-codegraph?lang=zh)](https://dshfind.com/zh/plugins/CC19990113/dsh-plugin-codegraph?ref=badge)
+<p align="center">
+  <a href="https://dshfind.com/zh/plugins/huanlinoto/dsh-plugin-codegraph"><img src="https://dshfind.com/api/card/huanlinoto/dsh-plugin-codegraph?lang=zh" alt="dsh-plugin-codegraph card"></a>
+</p>
 
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)加上结构化代码检索能力。
 
 装上之后,agent 多出两个工具:`codegraph` 和 `codegraph_index`。它能直接问"这个函数在哪定义的""谁调用了它""改了它会影响哪些地方""从 A 怎么走到 B",答案来自预先建好的符号索引,检索方法上比grep更快 消耗更小。
 
 ```sh
-dsh plugin --profile <name> add dsh-plugin-codegraph
+dsh plugin --profile <name> add @huanlin/dsh-plugin-codegraph
 ```
+
+
+> **Fork 说明**：本仓库是 [CC19990113/dsh-plugin-codegraph](https://github.com/CC19990113/dsh-plugin-codegraph) 的活跃维护 fork（上游自 2026-08 的 v0.1.6 后停更），跟进 DSH `0.1.2-rc.1`，npm 包发布在 `@huanlin` scope 下。
 
 ## 解决什么问题
 
@@ -81,7 +86,7 @@ codegraph查一次就能全部答上来。本插件把两半都带齐了:一半�
 ## 安装
 
 ```sh
-dsh plugin --profile <name> add dsh-plugin-codegraph
+dsh plugin --profile <name> add @huanlin/dsh-plugin-codegraph
 ```
 
 就这一条命令,装完就完事:它会拉包,还会自动 reconcile profile 的 manifest,把 `dsh-plugin-codegraph` 追加进 `dsh.profile.bundles`。不用手动改任何 JSON。跑完之后,`$DSH_HOME/profiles/<name>/package.json`(`$DSH_HOME` 默认是 `~/.dsh`)长这样——这里给出来是让你核对,不是让你去写:
@@ -145,7 +150,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
 
 ## 反馈
 
-有问题或者需要支持,欢迎在 [Issues](https://github.com/CC19990113/dsh-plugin-codegraph/issues) 提出。
+有问题或者需要支持,欢迎在 [Issues](https://github.com/HuanLinOTO/dsh-plugin-codegraph/issues) 提出。
 
 ## 许可
 

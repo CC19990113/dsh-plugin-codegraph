@@ -1,16 +1,16 @@
-# dsh-plugin-codegraph-tree-sitter
+# @huanlin/dsh-plugin-codegraph-tree-sitter
 
 Self-built code-graph indexer. Parses TypeScript, TSX, JavaScript, JSX, Python, Go, Java, C, C++, C#, PHP, Rust, Ruby, Zig, Kotlin, Swift, Dart, and Scala with `web-tree-sitter` and writes schema version 4 to `.codegraph/codegraph.db`, so a workspace needs no external indexer. Registers only an indexer, never a store.
 
-Part of **[dsh-plugin-codegraph](https://github.com/CC19990113/dsh-plugin-codegraph)** — structural code intelligence for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Part of **[dsh-plugin-codegraph](https://github.com/HuanLinOTO/dsh-plugin-codegraph)** — structural code intelligence for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 Most users should install the bundle instead, which mounts this package and its siblings in one layer:
 
 ```sh
-dsh plugin --profile <name> add dsh-plugin-codegraph
+dsh plugin --profile <name> add @huanlin/dsh-plugin-codegraph
 ```
 
-See the [project README](https://github.com/CC19990113/dsh-plugin-codegraph#readme) for setup, configuration, and the full tool reference.
+See the [project README](https://github.com/HuanLinOTO/dsh-plugin-codegraph#readme) for setup, configuration, and the full tool reference.
 
 ## License
 

@@ -7,7 +7,7 @@
  * A read that fails is not an error here. The graph names a file the index recorded, which may since
  * have been renamed or deleted; the honest answer is the symbols with `code: null`, not a failed
  * query.
- * @module dsh-plugin-codegraph-tool/source
+ * @module @huanlin/dsh-plugin-codegraph-tool/source
  */
 
 import type { Context } from '@deepseek-ai/cordis'

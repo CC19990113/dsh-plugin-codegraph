@@ -3,7 +3,7 @@
   "compilerOptions": {
     // The base's cross-package `paths` map (source-to-source, for vitest's
     // module-singleton resolution) is intentionally cleared here: `tsc -b`
-    // must resolve `dsh-plugin-codegraph-service` through the normal
+    // must resolve `@huanlin/dsh-plugin-codegraph-service` through the normal
     // node_modules/project-reference route (its built `lib/*.d.ts`), or this
     // composite project would pull the other package's `src/*.ts` into its
     // own program and violate `rootDir`.

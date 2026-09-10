@@ -1,4 +1,4 @@
-# dsh-plugin-codegraph-tool
+# @huanlin/dsh-plugin-codegraph-tool
 
 The model-facing tools: a read-only `codegraph` tool with ten structural query operations, plus a `codegraph_index` tool that builds or refreshes the index on its own, much larger timeout budget.
 

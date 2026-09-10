@@ -6,7 +6,7 @@
  * (not wildcard globs — the default set needs none), and every bound (`maxFileBytes`, `maxFiles`) is
  * a config field the deployment can retune rather than a constant, per the same-name entries this
  * package's `Config` exposes.
- * @module dsh-plugin-codegraph-tree-sitter/walk
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/walk
  */
 
 import { createHash } from 'node:crypto'

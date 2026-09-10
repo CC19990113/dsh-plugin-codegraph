@@ -21,7 +21,7 @@
  *  - character classes (`[abc]`), `?`, and backslash escapes
  *  - git's rule that a negation cannot resurrect a path inside an already-excluded directory: here,
  *    a negation re-includes whatever it matches regardless of ancestor exclusions.
- * @module dsh-plugin-codegraph-tree-sitter/gitignore
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/gitignore
  */
 
 import { readFile } from 'node:fs/promises'

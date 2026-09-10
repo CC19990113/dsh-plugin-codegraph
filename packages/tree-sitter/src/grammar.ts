@@ -7,7 +7,7 @@
  * targets loads its full grammar set eagerly and must run its bundled Node with `--liftoff-only` to
  * survive V8 running out of WASM code space. This harness cannot pass that flag to the Node process
  * that runs it, so it must never load a grammar the workspace does not use.
- * @module dsh-plugin-codegraph-tree-sitter/grammar
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/grammar
  */
 
 import { createRequire } from 'node:module'

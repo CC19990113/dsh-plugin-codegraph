@@ -4,7 +4,7 @@
  * reserves on `ctx.codegraph`; and {@link CodegraphIndexerId}, the identity an indexer provider
  * reserves. The `Branded<B>` primitive lives in `@deepseek-ai/dsh-brand`; keeping each type with its
  * factory here lets `index.ts` re-export all three under one name.
- * @module dsh-plugin-codegraph-service/brand
+ * @module @huanlin/dsh-plugin-codegraph-service/brand
  */
 
 import type { Branded } from '@deepseek-ai/dsh-brand'

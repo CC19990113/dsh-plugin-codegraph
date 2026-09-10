@@ -10,7 +10,7 @@
  * an independently versioned indexer: a record whose kind this build does not know must still reach
  * the model as data, not fail the query. `NODE_KINDS`, `EDGE_KINDS`, and `LANGUAGES` document the
  * values that format defines today.
- * @module dsh-plugin-codegraph-service/types
+ * @module @huanlin/dsh-plugin-codegraph-service/types
  */
 
 import type { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from './brand.ts'
@@ -407,6 +407,17 @@ export interface CodegraphStoreProvider {
    * @returns the result member matching `request.operation`.
    */
   query<R extends CodegraphRequest>(request: R, signal?: AbortSignal): Promise<CodegraphResultFor<R>>
+  /**
+   * Close every open connection this store keeps for `projectRoot`. An indexing run replaces the
+   * graph file by renaming the rebuilt one over it, and Windows refuses that rename while any
+   * handle in this process still holds the old file open — an open read-only connection is exactly
+   * such a handle — so {@link CodegraphService.index} asks every store to release the root's
+   * readers before the indexer runs. On POSIX the rename succeeds regardless, and releasing early
+   * merely makes the next query reopen promptly. Optional: a store that keeps no connections has
+   * nothing to release.
+   * @param projectRoot - absolute path of the project root whose connections to close.
+   */
+  release?(projectRoot: string): void
 }
 
 /** What one indexing run produced, returned to the caller that requested it. */
@@ -493,6 +504,14 @@ export interface CodegraphService {
    * @returns the report the indexer produced.
    */
   index(projectRoot: string, signal?: AbortSignal): Promise<CodegraphIndexReport>
+  /**
+   * Close every open connection the registered stores keep for `projectRoot`. This is the step an
+   * indexing run needs before replacing the graph file — Windows refuses the replace while any
+   * reader in this process holds the old file open — and it is the seam's job, not an indexer's,
+   * because which stores hold readers is a registry fact an indexer must not need to know.
+   * @param projectRoot - absolute path of the project root whose readers to release.
+   */
+  release(projectRoot: string): void
   /**
    * Route one query to the store that indexes `request.projectRoot`.
    * @param request - the normalized query.

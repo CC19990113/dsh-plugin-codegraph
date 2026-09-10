@@ -6,13 +6,13 @@
  * Databases open READ-ONLY. The external indexer may be writing through its own daemon while the
  * harness reads, so this store never takes a write lock, never recovers a journal, and never repairs
  * an index it does not own.
- * @module dsh-plugin-codegraph-sqlite/database
+ * @module @huanlin/dsh-plugin-codegraph-sqlite/database
  */
 
 import { DatabaseSync } from 'node:sqlite'
 import { statSync } from 'node:fs'
 import { join } from 'node:path'
-import { CodegraphError } from 'dsh-plugin-codegraph-service'
+import { CodegraphError } from '@huanlin/dsh-plugin-codegraph-service'
 
 /**
  * Where the external indexer keeps a project's graph, relative to the project root. Fixed by that
@@ -22,11 +22,17 @@ import { CodegraphError } from 'dsh-plugin-codegraph-service'
 export const DATABASE_RELATIVE_PATH = '.codegraph/codegraph.db'
 
 /**
- * The single on-disk format version this store reads. The format is an external specification, so
- * support is a fixed fact rather than a deployment choice; a database at any other version fails
- * loud instead of being read through assumptions that no longer hold.
+ * The on-disk format versions this store reads. The format is an external specification, so support
+ * is a fixed fact rather than a deployment choice; a database at any other version fails loud
+ * instead of being read through assumptions that no longer hold.
+ *
+ * Two writers share this file, one per version: `@huanlin/dsh-plugin-codegraph-tree-sitter` builds schema v4,
+ * and the `@colbymchenry/codegraph` CLI (≥1.5, whose daemon may own the same index) stamps schema
+ * v8 — its `nodes`/`edges`/`files`/`nodes_fts` tables keep every column the store reads and only add
+ * ones the store never touches (`unresolved_refs` is reshaped, `project_metadata` and
+ * `name_segment_vocab` are new, and no store query reads any of the three).
  */
-export const SUPPORTED_FORMAT_VERSION = 4
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [4, 8]
 
 /**
  * The absolute path of a project root's graph database.
@@ -108,10 +114,10 @@ export function openGraph(projectRoot: string): DatabaseSync {
     db.close()
     throw error
   }
-  if (version !== SUPPORTED_FORMAT_VERSION) {
+  if (!SUPPORTED_FORMAT_VERSIONS.includes(version)) {
     db.close()
     throw new CodegraphError(
-      `the code graph at "${path}" is format version ${version}; this store reads version ${SUPPORTED_FORMAT_VERSION}`,
+      `the code graph at "${path}" is format version ${version}; this store reads version ${SUPPORTED_FORMAT_VERSIONS.join(' or ')}`,
       'CODEGRAPH_UNSUPPORTED_FORMAT',
     )
   }
@@ -126,9 +132,9 @@ interface PooledConnection {
 
 /**
  * A bounded set of open graph connections keyed by project root, evicting the least recently used
- * one when full. Every connection the pool hands out stays valid until {@link close}: eviction and
- * disposal both close connections, so a caller holds a connection only for the duration of one
- * synchronous query.
+ * one when full. Every connection the pool hands out stays valid until it is closed: eviction,
+ * {@link release}, and disposal all close connections, so a caller holds a connection only for the
+ * duration of one synchronous query.
  *
  * A connection is opened against one specific on-disk file. An indexing run replaces that file
  * wholesale (rename over the old path), and POSIX unlink semantics mean an already-open read-only
@@ -180,6 +186,22 @@ export class GraphPool {
     this.open.set(projectRoot, { db, identity: identity ?? { dev: -1, ino: -1 } })
     this.evictOverflow()
     return db
+  }
+
+  /**
+   * Close and forget the connection cached for `projectRoot`, when one is held. The store calls
+   * this before an indexing run replaces the graph file: Windows refuses that replace while the
+   * pooled read-only connection keeps the old file open — SQLite opens its files without
+   * `FILE_SHARE_DELETE` — and without this step every later rebuild would fail EPERM on a rename
+   * the pool's own connection alone caused. The next {@link acquire} simply opens fresh, which is
+   * also how it picks up the rebuilt graph.
+   * @param projectRoot - absolute path of the project root whose connection to close.
+   */
+  release(projectRoot: string): void {
+    const cached = this.open.get(projectRoot)
+    if (cached === undefined) return
+    cached.db.close()
+    this.open.delete(projectRoot)
   }
 
   /** Close every open connection; further {@link acquire} calls fail as `CODEGRAPH_DISPOSED`. */

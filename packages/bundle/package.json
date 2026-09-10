@@ -1,6 +1,6 @@
 {
-  "name": "dsh-plugin-codegraph",
-  "version": "0.1.6",
+  "name": "@huanlin/dsh-plugin-codegraph",
+  "version": "0.1.10",
   "description": "Structural code intelligence for DeepSeek Harness — gives the agent codegraph and codegraph_index tools to find where a symbol is declared, what calls it, what a change reaches, and how one symbol reaches another, from a tree-sitter index it builds itself",
   "keywords": [
     "dsh",
@@ -23,18 +23,17 @@
   "author": "CC ZHAO",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git",
+    "url": "git+https://github.com/HuanLinOTO/dsh-plugin-codegraph.git",
     "directory": "packages/bundle"
   },
-  "homepage": "https://github.com/CC19990113/dsh-plugin-codegraph#readme",
-  "bugs": "https://github.com/CC19990113/dsh-plugin-codegraph/issues",
+  "homepage": "https://github.com/HuanLinOTO/dsh-plugin-codegraph#readme",
+  "bugs": "https://github.com/HuanLinOTO/dsh-plugin-codegraph/issues",
   "type": "module",
   "files": [
     "cordis.patch.yml"
   ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "dsh": {
     "bundle": {
@@ -42,9 +41,9 @@
     }
   },
   "dependencies": {
-    "dsh-plugin-codegraph-service": "workspace:^",
-    "dsh-plugin-codegraph-sqlite": "workspace:^",
-    "dsh-plugin-codegraph-tool": "workspace:^",
-    "dsh-plugin-codegraph-tree-sitter": "workspace:^"
+    "@huanlin/dsh-plugin-codegraph-service": "workspace:^",
+    "@huanlin/dsh-plugin-codegraph-sqlite": "workspace:^",
+    "@huanlin/dsh-plugin-codegraph-tool": "workspace:^",
+    "@huanlin/dsh-plugin-codegraph-tree-sitter": "workspace:^"
   }
 }

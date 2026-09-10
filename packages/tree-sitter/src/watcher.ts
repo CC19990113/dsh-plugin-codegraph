@@ -21,7 +21,7 @@
  * directory delete or a `mkdir` immediately followed by writes inside it never needs special-casing:
  * the parent directory's own create event is enough to schedule a rebuild that discovers (or removes)
  * everything under the path from scratch, watched or not.
- * @module dsh-plugin-codegraph-tree-sitter/watcher
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/watcher
  */
 
 import { readdir, stat } from 'node:fs/promises'

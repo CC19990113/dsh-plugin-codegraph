@@ -9,7 +9,7 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite'
-import type { CodegraphNodeId } from 'dsh-plugin-codegraph-service'
+import type { CodegraphNodeId } from '@huanlin/dsh-plugin-codegraph-service'
 
 /**
  * The relationships that carry dependency for `impact`. `contains` is deliberately absent: a

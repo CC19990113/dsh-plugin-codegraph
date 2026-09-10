@@ -2,15 +2,20 @@
 
 English | [中文](README.zh.md)
 
-[![dshfind](https://dshfind.com/api/badge/CC19990113/dsh-plugin-codegraph?lang=zh)](https://dshfind.com/zh/plugins/CC19990113/dsh-plugin-codegraph?ref=badge)
+<p align="center">
+  <a href="https://dshfind.com/zh/plugins/huanlinoto/dsh-plugin-codegraph"><img src="https://dshfind.com/api/card/huanlinoto/dsh-plugin-codegraph?lang=zh" alt="dsh-plugin-codegraph card"></a>
+</p>
 
 Structural code intelligence for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
 
 Gives the agent two tools — `codegraph` and `codegraph_index` — so it can ask **where is this declared**, **who calls it**, **what breaks if I change it**, and **how does one symbol reach another**, answered from a pre-built index instead of from text search.
 
 ```sh
-dsh plugin --profile <name> add dsh-plugin-codegraph
+dsh plugin --profile <name> add @huanlin/dsh-plugin-codegraph
 ```
+
+
+> **Fork notice:** This is the actively maintained fork of [CC19990113/dsh-plugin-codegraph](https://github.com/CC19990113/dsh-plugin-codegraph) (upstream inactive since v0.1.6, 2026-08). This fork tracks the DSH `0.1.2-rc.1` line and publishes under the `@huanlin` npm scope.
 
 ## Why
 
@@ -81,7 +86,7 @@ That last rule is deliberate. The model acts on `callers` output, so a confident
 ## Install
 
 ```sh
-dsh plugin --profile <name> add dsh-plugin-codegraph
+dsh plugin --profile <name> add @huanlin/dsh-plugin-codegraph
 ```
 
 That one command is the whole install: it fetches the package and reconciles the profile's manifest for you, appending `dsh-plugin-codegraph` to `dsh.profile.bundles`. There is no JSON to edit by hand. Afterwards, `$DSH_HOME/profiles/<name>/package.json` — `$DSH_HOME` defaults to `~/.dsh` — reads like this, shown here so you can check it rather than write it:
@@ -145,7 +150,7 @@ Built on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and
 
 ## Feedback
 
-Questions or need support? Open an [issue](https://github.com/CC19990113/dsh-plugin-codegraph/issues).
+Questions or need support? Open an [issue](https://github.com/HuanLinOTO/dsh-plugin-codegraph/issues).
 
 ## License
 

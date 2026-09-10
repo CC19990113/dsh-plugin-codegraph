@@ -8,20 +8,31 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent, Inbox } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import Codegraph from 'dsh-plugin-codegraph-service'
+import Codegraph from '@huanlin/dsh-plugin-codegraph-service'
 import * as FsLocal from '@deepseek-ai/dsh-fs-local'
-import * as CodegraphSqlite from 'dsh-plugin-codegraph-sqlite'
-import * as CodegraphTreeSitter from 'dsh-plugin-codegraph-tree-sitter'
-import * as ToolCodegraph from 'dsh-plugin-codegraph-tool'
+import * as CodegraphSqlite from '@huanlin/dsh-plugin-codegraph-sqlite'
+import * as CodegraphTreeSitter from '@huanlin/dsh-plugin-codegraph-tree-sitter'
+import * as ToolCodegraph from '@huanlin/dsh-plugin-codegraph-tool'
 import { seedProject } from '../../sqlite/tests/fixture.ts'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+
+const stubInbox = (): Inbox => ({
+  nextTurn: [],
+  nextStep: [],
+  clear: () => {},
+  append: () => {},
+  prepend: () => {},
+  replace: () => false,
+  remove: () => false,
+  splice: () => [],
+})
 
 let root: string | undefined
 let context: Context | undefined
@@ -63,12 +74,12 @@ const SEED = {
 function agent(ctx: Context, cwd: string): Agent {
   const scope = ctx.plugin(() => {})
   const id = SessionId('codegraph-loader-agent')
-  const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
+  const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd, isSeeded: false })
   const value: Agent = {
     id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+    inbox: stubInbox(),
     status: 'idle',
     ctx: scope.ctx,
     followup: () => {},
@@ -102,9 +113,9 @@ async function boot(projectRoot: string, toolConfigLines: readonly string[] = []
     "- name: '@deepseek-ai/dsh-fs-local'",
     '  config:',
     `    cwd: ${JSON.stringify(projectRoot)}`,
-    "- name: 'dsh-plugin-codegraph-service'",
-    "- name: 'dsh-plugin-codegraph-sqlite'",
-    "- name: 'dsh-plugin-codegraph-tool'",
+    "- name: '@huanlin/dsh-plugin-codegraph-service'",
+    "- name: '@huanlin/dsh-plugin-codegraph-sqlite'",
+    "- name: '@huanlin/dsh-plugin-codegraph-tool'",
     ...toolConfigLines.length > 0 ? ['  config:', ...toolConfigLines] : [],
     '',
   ].join('\n'))
@@ -119,9 +130,9 @@ async function boot(projectRoot: string, toolConfigLines: readonly string[] = []
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRuntime],
     ['@deepseek-ai/dsh-fs-local', FsLocal],
-    ['dsh-plugin-codegraph-service', Codegraph],
-    ['dsh-plugin-codegraph-sqlite', CodegraphSqlite],
-    ['dsh-plugin-codegraph-tool', ToolCodegraph],
+    ['@huanlin/dsh-plugin-codegraph-service', Codegraph],
+    ['@huanlin/dsh-plugin-codegraph-sqlite', CodegraphSqlite],
+    ['@huanlin/dsh-plugin-codegraph-tool', ToolCodegraph],
   ])
   ctx.loader.internal = {
     version: 'v2',
@@ -138,7 +149,7 @@ async function boot(projectRoot: string, toolConfigLines: readonly string[] = []
 async function call(ctx: Context, owner: Agent, args: Record<string, unknown>, id = 'call') {
   return ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: CallId(id),
+    callId: ToolCallId(id),
     name: 'codegraph',
     arguments: args,
     agent: owner,
@@ -252,12 +263,12 @@ async function bootWithIndexer(projectRoot: string): Promise<Context> {
     "- name: '@deepseek-ai/dsh-fs-local'",
     '  config:',
     `    cwd: ${JSON.stringify(projectRoot)}`,
-    "- name: 'dsh-plugin-codegraph-service'",
-    "- name: 'dsh-plugin-codegraph-sqlite'",
-    "- name: 'dsh-plugin-codegraph-tree-sitter'",
+    "- name: '@huanlin/dsh-plugin-codegraph-service'",
+    "- name: '@huanlin/dsh-plugin-codegraph-sqlite'",
+    "- name: '@huanlin/dsh-plugin-codegraph-tree-sitter'",
     '  config:',
     '    watch: false', // this test exercises Loader composition, not live watching
-    "- name: 'dsh-plugin-codegraph-tool'",
+    "- name: '@huanlin/dsh-plugin-codegraph-tool'",
     '',
   ].join('\n'))
 
@@ -271,10 +282,10 @@ async function bootWithIndexer(projectRoot: string): Promise<Context> {
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRuntime],
     ['@deepseek-ai/dsh-fs-local', FsLocal],
-    ['dsh-plugin-codegraph-service', Codegraph],
-    ['dsh-plugin-codegraph-sqlite', CodegraphSqlite],
-    ['dsh-plugin-codegraph-tree-sitter', CodegraphTreeSitter],
-    ['dsh-plugin-codegraph-tool', ToolCodegraph],
+    ['@huanlin/dsh-plugin-codegraph-service', Codegraph],
+    ['@huanlin/dsh-plugin-codegraph-sqlite', CodegraphSqlite],
+    ['@huanlin/dsh-plugin-codegraph-tree-sitter', CodegraphTreeSitter],
+    ['@huanlin/dsh-plugin-codegraph-tool', ToolCodegraph],
   ])
   ctx.loader.internal = {
     version: 'v2',
@@ -309,7 +320,7 @@ describe('codegraph_index real Loader composition through cordis.yml', () => {
 
     const indexResult = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('index'),
+      callId: ToolCallId('index'),
       name: 'codegraph_index',
       arguments: {},
       agent: owner,

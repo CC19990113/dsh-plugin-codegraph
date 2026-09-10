@@ -3,7 +3,7 @@
  * describes a graph while the model's describes code: `filePath`/`startLine` become `path`/`line`,
  * an edge's kind becomes `via`, and the fields a model cannot act on — opaque node ids, index
  * timestamps, provenance — are dropped rather than spent as tokens.
- * @module dsh-plugin-codegraph-tool/projection
+ * @module @huanlin/dsh-plugin-codegraph-tool/projection
  */
 
 import type {
@@ -11,7 +11,7 @@ import type {
   CodegraphNode,
   CodegraphRelation,
   CodegraphTraceHop,
-} from 'dsh-plugin-codegraph-service'
+} from '@huanlin/dsh-plugin-codegraph-service'
 
 /** Caps applied while projecting, so one enormous doc comment cannot dominate a result. */
 export interface ProjectionLimits {

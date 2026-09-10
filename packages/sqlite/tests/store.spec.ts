@@ -3,8 +3,8 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import Codegraph, { CodegraphNodeId } from 'dsh-plugin-codegraph-service'
-import type { CodegraphError } from 'dsh-plugin-codegraph-service'
+import Codegraph, { CodegraphNodeId } from '@huanlin/dsh-plugin-codegraph-service'
+import type { CodegraphError } from '@huanlin/dsh-plugin-codegraph-service'
 import * as CodegraphSqlite from '../src/index.ts'
 import { DATABASE_RELATIVE_PATH, GraphPool, databasePath, openGraph } from '../src/database.ts'
 import { toEdge, toFile, toNode } from '../src/rows.ts'
@@ -73,6 +73,20 @@ describe('graph database', () => {
     )
   })
 
+  it('serves a schema-v8 database the codegraph CLI wrote', async () => {
+    // The CLI (≥1.5) stamps v8: same nodes/edges/files/fts shape the store reads, plus columns and
+    // tables (unresolved_refs reshaped, project_metadata, name_segment_vocab) no store query touches.
+    // The fixture's stand-in keeps the shared tables and stamps v8, which is exactly the surface the
+    // store's SQL reaches.
+    const root = await project({ ...SEED, formatVersion: 8 })
+    const db = openGraph(root)
+    const summary = status(db, root, 100)
+    expect(summary.formatVersion).toBe(8)
+    expect(search(db, { operation: 'search', ...AT(root), query: 'helper', limit: 5 }).nodes.length)
+      .toBeGreaterThan(0)
+    db.close()
+  })
+
   it('refuses a graph that records no version at all', async () => {
     const root = await project({})
     const db = new DatabaseSync(databasePath(root))
@@ -134,6 +148,39 @@ describe('connection identity', () => {
 
     expect(pool.acquire(root) === original).toBe(true)
     expect(() => original.prepare('SELECT 1')).not.toThrow()
+    pool.close()
+  })
+})
+
+describe('connection release', () => {
+  it('closes the pooled connection for a root, so a rebuild can replace the graph file underneath it', async () => {
+    const root = await project(SEED)
+    const pool = new GraphPool(4)
+    const held = pool.acquire(root)
+
+    pool.release(root)
+    // Released means CLOSED, not merely forgotten: the open handle is exactly what makes an
+    // indexing run's rename refuse with EPERM on Windows.
+    expect(() => held.prepare('SELECT 1')).toThrow(/not open/)
+
+    // And with no connection held, the replace a rebuild performs lands.
+    await writeGraphAt(root, { nodes: [{ id: 'fn:only', kind: 'function', name: 'only', filePath: 'src/only.ts' }] })
+    const reopened = pool.acquire(root)
+    // Compared as booleans, not `expect(reopened).not.toBe(held)`: vitest's failure-message
+    // formatter can reach into a DatabaseSync it's printing, and one side of this comparison is
+    // already closed by the time the assertion runs.
+    expect(reopened === held).toBe(false)
+    expect(node(reopened, { operation: 'node', ...AT(root), symbol: 'only', limit: 5 }).node).not.toBeNull()
+    pool.close()
+  })
+
+  it('leaves the connection alone for a root the pool holds nothing for', async () => {
+    const root = await project(SEED)
+    const pool = new GraphPool(4)
+    const held = pool.acquire(root)
+    pool.release(join(root, 'elsewhere'))
+    // Same boolean-comparison care as above: neither side of this is closed.
+    expect(pool.acquire(root) === held).toBe(true)
     pool.close()
   })
 })
@@ -451,6 +498,21 @@ describe('the store plugin', () => {
     ['maxStalenessChecks', { maxStalenessChecks: 0 }],
   ])('fails loading when %s is not a positive integer', async (field, config) => {
     await expect(mount(config)).rejects.toThrow(new RegExp(`${field} must be a positive integer`))
+  })
+
+  it('releases its pooled connection when the seam releases the root, so a rebuild can replace the graph', async () => {
+    const root = await project(SEED)
+    const ctx = await mount()
+    // Opens (and caches) a connection against the graph: on Windows, exactly the handle that
+    // makes an indexing run's rename refuse with EPERM for as long as it stays open.
+    await ctx.codegraph.query({ operation: 'status', projectRoot: root })
+    ctx.codegraph.release(root)
+    // The replace a rebuild performs now lands, and the next query serves the rebuilt graph —
+    // a fresh connection, since the released one was closed rather than kept warm.
+    await expect(writeGraphAt(root, { nodes: [{ id: 'fn:only', kind: 'function', name: 'only', filePath: 'src/only.ts' }] }))
+      .resolves.toBeUndefined()
+    await expect(ctx.codegraph.query({ operation: 'node', projectRoot: root, symbol: 'only', limit: 5 }))
+      .resolves.toMatchObject({ kind: 'node', node: { name: 'only' } })
   })
 
   it('closes its connections when the plugin unloads', async () => {

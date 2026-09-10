@@ -3,15 +3,15 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent, Inbox } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import Codegraph, { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from 'dsh-plugin-codegraph-service'
-import type { CodegraphIndexReport, CodegraphNode, CodegraphRequest, CodegraphStoreProvider } from 'dsh-plugin-codegraph-service'
+import Codegraph, { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from '@huanlin/dsh-plugin-codegraph-service'
+import type { CodegraphIndexReport, CodegraphNode, CodegraphRequest, CodegraphStoreProvider } from '@huanlin/dsh-plugin-codegraph-service'
 import * as ToolCodegraph from '../src/index.ts'
 import { callTitle, projectRoot } from '../src/index.ts'
 import { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms } from '../src/compose.ts'
@@ -60,6 +60,17 @@ function graphNode(overrides: Partial<CodegraphNode> = {}): CodegraphNode {
 }
 
 const LIMITS = { maxDocstringChars: 8, maxSignatureChars: 8 }
+
+const stubInbox = (): Inbox => ({
+  nextTurn: [],
+  nextStep: [],
+  clear: () => {},
+  append: () => {},
+  prepend: () => {},
+  replace: () => false,
+  remove: () => false,
+  splice: () => [],
+})
 
 describe('model-facing projection', () => {
   it('drops graph-only fields and renames positions for the model', () => {
@@ -459,10 +470,10 @@ describe('the tool plugin', () => {
   function agent(ctx: Context, cwd: string): Agent {
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-unit')
-    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
+    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd, isSeeded: false })
     const value: Agent = {
       id, options: {}, session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      inbox: stubInbox(),
       status: 'idle', ctx: scope.ctx,
       followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() {},
       runMaintenance: task => task(new AbortController().signal),
@@ -475,7 +486,7 @@ describe('the tool plugin', () => {
   async function call(ctx: Context, owner: Agent, args: Record<string, unknown>, id = 'unit') {
     return ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId(id),
+      callId: ToolCallId(id),
       name: 'codegraph',
       arguments: args,
       agent: owner,
@@ -485,7 +496,7 @@ describe('the tool plugin', () => {
   async function callIndex(ctx: Context, owner: Agent | undefined, args: Record<string, unknown>, id = 'index') {
     return ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId(id),
+      callId: ToolCallId(id),
       name: 'codegraph_index',
       arguments: args,
       ...owner === undefined ? {} : { agent: owner },
@@ -622,7 +633,7 @@ describe('the tool plugin', () => {
     const ctx = await mount(root)
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('no-agent'),
+      callId: ToolCallId('no-agent'),
       name: 'codegraph',
       arguments: { operation: 'status' },
     })
@@ -655,10 +666,10 @@ describe('status against a root no store claims', () => {
   function owner(ctx: Context, cwd: string): Agent {
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-unindexed')
-    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
+    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd, isSeeded: false })
     const value: Agent = {
       id, options: {}, session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      inbox: stubInbox(),
       status: 'idle', ctx: scope.ctx,
       followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() {},
       runMaintenance: task => task(new AbortController().signal),
@@ -673,7 +684,7 @@ describe('status against a root no store claims', () => {
     const ctx = await mountWithoutStore(root)
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('unindexed-status'),
+      callId: ToolCallId('unindexed-status'),
       name: 'codegraph',
       arguments: { operation: 'status' },
       agent: owner(ctx, root),
@@ -736,10 +747,10 @@ describe('answers a store returns when nothing resolves', () => {
   function owner(ctx: Context, cwd: string): Agent {
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-empty')
-    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd })
+    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd, isSeeded: false })
     const value: Agent = {
       id, options: {}, session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      inbox: stubInbox(),
       status: 'idle', ctx: scope.ctx,
       followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() {},
       runMaintenance: task => task(new AbortController().signal),
@@ -760,7 +771,7 @@ describe('answers a store returns when nothing resolves', () => {
     const ctx = await mountEmpty(root)
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId(`empty-${label}`),
+      callId: ToolCallId(`empty-${label}`),
       name: 'codegraph',
       arguments: args,
       agent: owner(ctx, root),
@@ -775,7 +786,7 @@ describe('answers a store returns when nothing resolves', () => {
     for (const args of [{ operation: 'search', query: 'gone' }, { operation: 'files' }]) {
       const result = await ctx.tools.execute({
         signal: new AbortController().signal,
-        callId: CallId(`bare-${args.operation}`),
+        callId: ToolCallId(`bare-${args.operation}`),
         name: 'codegraph',
         arguments: args,
         agent: agentValue,
@@ -789,7 +800,7 @@ describe('answers a store returns when nothing resolves', () => {
     const ctx = await mountEmpty(root)
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('explore-missing'),
+      callId: ToolCallId('explore-missing'),
       name: 'codegraph',
       arguments: { operation: 'explore', query: 'gone' },
       agent: owner(ctx, root),
@@ -828,10 +839,10 @@ describe('the last shapes a trace answer can take', () => {
     await ctx.plugin(ToolCodegraph)
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-no-origin')
-    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd: root })
+    const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 0, cwd: root, isSeeded: false })
     const value: Agent = {
       id, options: {}, session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      inbox: stubInbox(),
       status: 'idle', ctx: scope.ctx,
       followup: () => {}, steer: () => {}, inject: () => {}, send: () => {}, cancel() {},
       runMaintenance: task => task(new AbortController().signal),
@@ -840,7 +851,7 @@ describe('the last shapes a trace answer can take', () => {
     ctx.agents.register(value)
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: CallId('trace-no-origin'),
+      callId: ToolCallId('trace-no-origin'),
       name: 'codegraph',
       arguments: { operation: 'trace', from: 'gone', to: 'main' },
       agent: value,

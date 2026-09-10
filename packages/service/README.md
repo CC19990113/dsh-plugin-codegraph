@@ -1,4 +1,4 @@
-# dsh-plugin-codegraph-service
+# @huanlin/dsh-plugin-codegraph-service
 
 Service Definition for the code-graph capability seam: publishes `ctx.codegraph`, the store and indexer provider registries, and the eight normalized structural queries. Carries no store, no indexer, and no filesystem access of its own.
 

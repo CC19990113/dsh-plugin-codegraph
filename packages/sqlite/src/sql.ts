@@ -6,7 +6,7 @@
  * Ranking is expressed in SQL rather than in TypeScript so ordering and truncation happen in the
  * same statement: a `LIMIT` must keep the most relevant matches, which it can only do if the
  * database already knows the order.
- * @module dsh-plugin-codegraph-sqlite/sql
+ * @module @huanlin/dsh-plugin-codegraph-sqlite/sql
  */
 
 /** Every `nodes` column {@link toNode} reads, aliased `n`. */

@@ -6,7 +6,7 @@
  * than not watching at all (the caller believes the index stays fresh and never falls back to a
  * manual `codegraph_index`). This module decides, from injected environment/platform/proc-version
  * probes only, whether to override the user's own `watch: true` for that one case.
- * @module dsh-plugin-codegraph-tree-sitter/watch-policy
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/watch-policy
  */
 
 import { readFileSync } from 'node:fs'

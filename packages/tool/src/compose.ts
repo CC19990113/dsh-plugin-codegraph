@@ -2,10 +2,10 @@
  * The two operations that are not seam queries. `explore` and `context` compose the graph primitives
  * with `ctx.fs` reads, which is why they live in the consumer: a graph store returns positions and
  * cannot reach a remote workspace's bytes, so aggregation belongs to the role that holds both.
- * @module dsh-plugin-codegraph-tool/compose
+ * @module @huanlin/dsh-plugin-codegraph-tool/compose
  */
 
-import type { CodegraphNode, CodegraphRelation } from 'dsh-plugin-codegraph-service'
+import type { CodegraphNode, CodegraphRelation } from '@huanlin/dsh-plugin-codegraph-service'
 
 /** Words a task description contributes no search signal through. */
 const STOPWORDS = new Set([

@@ -12,7 +12,7 @@
  * Resolving *which* `hooksDir` to use — including the "worktrees share one hooks directory" case — is
  * the caller's job, composed from {@link detectWorktree} in `worktree.ts`; this module only ever
  * touches the one directory path it is given.
- * @module dsh-plugin-codegraph-tree-sitter/git-hooks
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/git-hooks
  */
 
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'

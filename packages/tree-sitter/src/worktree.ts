@@ -9,7 +9,7 @@
  * never looks outside the `projectRoot` it was given. If a caller ever *does* end up pointed at the
  * wrong root, the bug is almost certainly in how the host resolves a session's working directory, not
  * in this package — this module exists to make that distinction diagnosable, not to route around it.
- * @module dsh-plugin-codegraph-tree-sitter/worktree
+ * @module @huanlin/dsh-plugin-codegraph-tree-sitter/worktree
  */
 
 import { execFileSync } from 'node:child_process'

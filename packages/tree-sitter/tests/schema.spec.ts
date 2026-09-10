@@ -1,10 +1,25 @@
-import { mkdtemp, readdir } from 'node:fs/promises'
+import { mkdtemp, readdir, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { SCHEMA_VERSION, writeGraph } from '../src/schema.ts'
 import type { ExtractedFile, GraphEdge, GraphNode, UnresolvedRef } from '../src/resolve.ts'
+
+// Only `rename` is replaced: the replace-retry behavior under test reacts to the refusals Windows
+// reports while some handle holds the target open, and provoking one of those for real needs a
+// held handle the test cannot arrange portably. Everything else stays the real fs.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return { ...actual, rename: vi.fn(actual.rename) }
+})
+
+const realRename = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename
+
+beforeEach(() => {
+  vi.mocked(rename).mockClear()
+  vi.mocked(rename).mockImplementation(realRename)
+})
 
 const NOW = 1700000000000
 
@@ -130,5 +145,39 @@ describe('writeGraph', () => {
       .rejects.toThrow()
     const entries = await readdir(dirname(path))
     expect(entries).toEqual(['codegraph.db'])
+  })
+
+  it('replaces the graph even when the rename is refused once, as Windows does while a reader holds the old file', async () => {
+    const path = await tempDatabasePath()
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    // One refused attempt — a reader that raced this rebuild still holding the old file — then the
+    // retry lands: one busy reader must not fail an index run.
+    vi.mocked(rename).mockImplementationOnce(async () => {
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    })
+    await expect(writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW + 1 }))
+      .resolves.toBeUndefined()
+    const db = new DatabaseSync(path, { readOnly: true })
+    expect(db.prepare('SELECT MAX(applied_at) AS a FROM schema_versions').get()).toEqual({ a: NOW + 1 })
+    db.close()
+    // And the refused attempt left no temp file behind.
+    expect(await readdir(dirname(path))).toEqual(['codegraph.db'])
+  })
+
+  it('fails loud when the rename keeps being refused, still leaving no temp file behind', async () => {
+    const path = await tempDatabasePath()
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    // A holder that never lets go — the external codegraph CLI's daemon, or an antivirus scan that
+    // outlasts every backoff step — surfaces as a failed run, never as a silently lost rebuild.
+    vi.mocked(rename).mockImplementation(async () => {
+      throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+    })
+    await expect(writeGraph(path, { files: [], nodes: [], edges: [], unresolved: [], indexedAt: NOW + 1 }))
+      .rejects.toThrow(/EPERM/)
+    const db = new DatabaseSync(path, { readOnly: true })
+    // The previously written graph is untouched.
+    expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 2 })
+    db.close()
+    expect(await readdir(dirname(path))).toEqual(['codegraph.db'])
   })
 })
