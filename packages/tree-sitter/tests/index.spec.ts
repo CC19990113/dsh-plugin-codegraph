@@ -745,6 +745,44 @@ describe('codegraph-tree-sitter plugin', () => {
       expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
     })
 
+    it('keeps walking after a subdirectory that stays under the limit', async () => {
+      // The count recurses, so a workspace whose sources all sit one level down has to be measured
+      // the same way a flat one is. This directory is small enough to be walked past, which is the
+      // out-of-directory branch the flat tests never reach.
+      const root = await writeProject({
+        'src/a.ts': 'export const a = 1\n',
+        'src/b.ts': 'export const b = 2\n',
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 10 }, jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      const job = registry.started[0]!
+      await expect(driveJob(job).done).resolves.toEqual({ status: 'completed' })
+    })
+
+    it('counts files that live only in subdirectories', async () => {
+      // Same nesting shape, but past the limit: the recursive call is what has to report the
+      // overflow, and declining still means no graph and a failed outcome rather than silence.
+      const root = await writeProject({
+        'src/deep/b0.ts': 'export const b0 = 0\n',
+        'src/deep/b1.ts': 'export const b1 = 1\n',
+        'src/deep/b2.ts': 'export const b2 = 2\n',
+        'src/deep/b3.ts': 'export const b3 = 3\n',
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 }, jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      const job = registry.started[0]!
+      const outcome = await driveJob(job).done
+      expect(outcome.status).toBe('failed')
+      expect(job.output.join('')).toContain('past the 3-file session-start limit')
+      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+    })
+
     it('leaves a workspace whose index is fresh alone', async () => {
       const root = await writeProject({
         'a.ts': 'export function a() {}\n',
