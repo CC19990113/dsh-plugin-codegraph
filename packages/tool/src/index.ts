@@ -40,6 +40,8 @@ import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
 import { agentIdOf, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
 import { commandRunHint } from './command-log.ts'
+import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
+import type { UpdateChecker } from './version-check.ts'
 
 export {
   CODEGRAPH_INDEX_PARAMETERS,
@@ -74,6 +76,9 @@ export { clearCommandRuns, commandRunHint, COMMAND_LOG_WINDOW_MS, recentCommandR
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'tool-codegraph'
+
+/** The npm package this code ships as; the registry is asked about this name's own releases. */
+export const PACKAGE_NAME = 'dsh-plugin-codegraph'
 
 /** Services required by this plugin. */
 export const inject = ['tools', 'codegraph', 'fs', 'systemPrompt']
@@ -144,6 +149,19 @@ export interface Config {
    * only.
    */
   panel?: boolean
+  /**
+   * Whether to ask the registry for a newer release after this plugin's tools are used, and append one
+   * notice to the next step when there is one (default true). The notice is a user-role message, so it
+   * reaches the model and the user both; it is emitted once per release and never blocks a tool call.
+   * Turn this off in an offline or air-gapped deployment, where the check can only time out.
+   */
+  updateCheck?: boolean
+  /**
+   * Milliseconds a completed check stays trusted before the next one may start (default six hours).
+   * Shorter intervals mean a notice lands sooner after a release; the request itself is one small
+   * registry GET, so the cost of a shorter interval is latency nobody waits on, not tokens.
+   */
+  updateCheckIntervalMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -166,6 +184,8 @@ export const Config: z<Config> = z.object({
   backgroundIndex: z.union([z.const('auto'), z.boolean()]).default('auto'),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
   panel: z.boolean().default(true),
+  updateCheck: z.boolean().default(true),
+  updateCheckIntervalMs: z.number().default(DEFAULT_UPDATE_CHECK_INTERVAL_MS),
 })
 
 type ResolvedConfig = Required<Config>
@@ -236,6 +256,18 @@ export function apply(ctx: Context, config: Config): void {
   assertTimer('indexTimeoutMs', resolved.indexTimeoutMs)
   assertPositiveInteger('backgroundIndexThreshold', resolved.backgroundIndexThreshold)
 
+  // Version checking is a convenience, never a dependency: turned off, or with an unreachable
+  // registry, the tools above behave exactly as before. It only ever speaks after one of them ran —
+  // see `version-check.ts` for why that gate exists and what keeps it from repeating.
+  const updateChecker = resolved.updateCheck
+    ? createUpdateChecker({
+        packageName: PACKAGE_NAME,
+        currentVersion: readOwnVersion(),
+        stateFile: defaultStateFile(PACKAGE_NAME),
+        intervalMs: resolved.updateCheckIntervalMs,
+      })
+    : undefined
+
   // A function, not a string: the host re-evaluates it on every assembly, which is what lets the model
   // learn the workspace's index size and freshness for free instead of spending a `status` round-trip.
   ctx.systemPrompt.section({
@@ -262,6 +294,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     timeoutMs: resolved.timeoutMs,
     async execute(args, exec) {
+      updateChecker?.noteToolUse(agentIdOf(exec))
       return run(ctx, resolved, args, exec)
     },
     presentCall: args => ({
@@ -283,6 +316,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     timeoutMs: resolved.indexTimeoutMs,
     async execute(args, exec) {
+      updateChecker?.noteToolUse(agentIdOf(exec))
       return runIndex(ctx, resolved, args, exec)
     },
     presentCall: args => ({
@@ -298,6 +332,89 @@ export function apply(ctx: Context, config: Config): void {
   // tools above stay registered either way.
   registerPanelRoutes(ctx, resolved)
   registerCommands(ctx)
+
+  // The notice rides the host's step-admission waterfall: `agent/pre-step` is the one surface a
+  // plugin has between a tool result and the next model request, and it is where the host itself
+  // inserts its `[model changed: …]` notice. Registering it here (rather than at module scope) keeps
+  // the listener tied to this plugin instance's lifetime.
+  if (updateChecker !== undefined) registerUpdateNotice(ctx, updateChecker)
+}
+
+/**
+ * Structural face of the agent lifecycle this plugin listens to.
+ *
+ * Declared locally, like `tree-sitter`'s `agent/created` face, rather than by importing the agent
+ * package: this module needs two event names and two payload shapes, not the whole agent surface,
+ * and a static import of a host symbol is exactly what took this plugin off the host once before.
+ */
+interface AgentLifecycleContext {
+  on(name: 'agent/created', listener: (payload: AgentCreatedPayload) => void): () => boolean
+}
+
+/** The agent-created payload: the agent, and the scoped context its own hooks register on. */
+interface AgentCreatedPayload {
+  readonly agent?: {
+    readonly id?: unknown
+    /** The agent's scope. Registrations on it live and die with this agent. */
+    readonly ctx?: AgentScopedContext
+  }
+}
+
+/**
+ * The per-agent context, whose `agent/pre-step` waterfall runs before every model request.
+ *
+ * `prepend` puts the listener first in the chain; the host's own `[model changed: …]` notice registers
+ * the same way, which is why this shape is copied rather than invented.
+ */
+interface AgentScopedContext {
+  on(
+    name: 'agent/pre-step',
+    listener: (payload: AgentPreStepPayload, next: () => Promise<AgentPreStepDecision>) => Promise<AgentPreStepDecision>,
+    options?: { prepend?: boolean },
+  ): () => boolean
+}
+
+/** What the host passes into the waterfall; only the agent identity is read here. */
+interface AgentPreStepPayload {
+  readonly agent?: { readonly id?: unknown }
+  readonly signal?: AbortSignal
+}
+
+/**
+ * The admitted-step decision. `reject` carries no messages and must be passed through untouched;
+ * `enter` carries the batch that will be sent, which this plugin appends to.
+ */
+interface AgentPreStepDecision {
+  readonly kind: string
+  readonly messages: readonly unknown[]
+}
+
+/**
+ * Append the "a newer release exists" notice to the next admitted step, once per release.
+ *
+ * Registered per agent rather than globally: the hook is agent-scoped in the host, its `next` only
+ * means something inside that scope, and one registration per conversation is what keeps a notice
+ * out of a session that never called the tool.
+ * @param ctx - the plugin context.
+ * @param checker - the shared checker the tool calls already report into.
+ */
+export function registerUpdateNotice(ctx: Context, checker: UpdateChecker): void {
+  const events = ctx as unknown as AgentLifecycleContext
+  // Registered inside this effect so the subscription follows the plugin's own lifetime: unloading
+  // the plugin must stop future agents from calling into a checker that no longer exists.
+  ctx.effect(() => events.on('agent/created', payload => {
+    const agentCtx = payload.agent?.ctx
+    if (agentCtx === undefined) return
+    const agentId = agentIdOf(payload)
+    agentCtx.on('agent/pre-step', async (_payload, next) => {
+      const decision = await next()
+      // A rejected step sends nothing, so there is no conversation to put a notice into.
+      if (decision.kind !== 'enter') return decision
+      const notice = checker.takeNotice(agentId)
+      if (notice === undefined) return decision
+      return { ...decision, messages: [...decision.messages, notice] }
+    })
+  }))
 }
 
 /**

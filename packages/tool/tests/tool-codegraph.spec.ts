@@ -754,6 +754,16 @@ describe('the tool plugin', () => {
     await expect(mount(root, config)).rejects.toThrow(new RegExp(field))
   })
 
+  it('answers normally with update checking switched off', async () => {
+    // Both tools call `updateChecker?.noteToolUse(...)`, so the disabled path has to prove a call
+    // still answers rather than the optional chain short-circuiting the tool itself.
+    const root = await workspace()
+    const ctx = await mount(root, { updateCheck: false })
+    const owner = agent(ctx, root)
+    expect((await call(ctx, owner, { operation: 'status' })).isError).toBe(false)
+    expect((await callIndex(ctx, owner, { project_path: root })).isError).toBe(false)
+  })
+
   interface FakeJobHandle {
     append(text: string): void
     updateProgress(line: string): void
