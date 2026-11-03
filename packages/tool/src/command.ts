@@ -15,6 +15,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { CodegraphStatusResult } from 'dsh-plugin-codegraph-service'
 import { formatIndexedAt, workspaceOf } from './status-hint.ts'
+import { recordCommandRun } from './command-log.ts'
+import { agentIdOf } from './status-hint.ts'
 
 /** Command name, without the leading slash. */
 export const COMMAND_NAME = 'codegraph'
@@ -60,8 +62,9 @@ export type CommandResult =
 export interface CommandInvocation {
   /** Everything after the command name, including its leading separator whitespace. */
   readonly rawInput: string
-  /** The receiving agent; only its session workspace is read. */
+  /** The receiving agent: its id keys the prompt's command memory, its session names the workspace. */
   readonly agent?: {
+    readonly id?: unknown
     readonly session?: { readonly header?: { readonly cwd?: unknown } }
   }
   /** UI request cancellation, forwarded to every graph call. */
@@ -131,6 +134,28 @@ export function registerCommands(ctx: Context): void {
  * @returns the settled result.
  */
 async function runCommand(ctx: Context, invocation: CommandInvocation): Promise<CommandResult> {
+  const result = await dispatchCommand(ctx, invocation)
+  // Remember the outcome for the prompt: the host logs a command but never projects it into the
+  // model's messages, and the model is the next reader that cares (did the graph just change? did
+  // the user already see an answer it cannot?). Recording here rather than inside each subcommand
+  // keeps the four return paths from drifting.
+  recordCommandRun(agentIdOf(invocation) ?? '', {
+    input: invocation.rawInput.trim(),
+    /* v8 ignore next -- every subcommand above returns a `text`; the fallback is the type's, not a path. */
+    text: result.text ?? '',
+    ok: result.kind === 'success',
+    at: Date.now(),
+  })
+  return result
+}
+
+/**
+ * Execute one parsed invocation, without recording it.
+ * @param ctx - the plugin context carrying `codegraph`.
+ * @param invocation - the accepted command line and its context.
+ * @returns the settled result.
+ */
+async function dispatchCommand(ctx: Context, invocation: CommandInvocation): Promise<CommandResult> {
   const root = workspaceOf(invocation)
   if (root === undefined) {
     return { kind: 'error', text: '这个命令需要会话工作区：请在一个绑定了工作区的会话里运行' }

@@ -98,6 +98,12 @@ export function indexStatusHint(projectRoot: string | undefined): string {
  * @param context - the assembly context the host passes to a section's `text` function (`{ agent, scope, signal }`).
  * @returns the agent's session workspace root, or `undefined` when the session has none.
  */
+export function agentIdOf(context: unknown): string | undefined {
+  const agent = (context as { agent?: { id?: unknown } } | undefined)?.agent
+  const id = agent?.id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
 export function workspaceOf(context: unknown): string | undefined {
   const agent = (context as { agent?: { session?: { header?: { cwd?: unknown } } } } | undefined)?.agent
   const cwd = agent?.session?.header?.cwd

@@ -28,6 +28,7 @@ import { PANEL_ROUTE_PREFIX, registerPanelRoutes } from '../src/panel.ts'
 import type { PanelConfig, PanelRequest, PanelRoute } from '../src/panel.ts'
 import { expandTerms, ZH_SYNONYMS } from '../src/zh-synonyms.ts'
 import { toAffected, toHop, toRelation, toSymbol } from '../src/projection.ts'
+import { clearCommandRuns, commandRunHint } from '../src/command-log.ts'
 import { renderCodegraph } from '../src/render.ts'
 import type { CodegraphToolValue } from '../src/schema.ts'
 import { readSlice } from '../src/source.ts'
@@ -36,6 +37,7 @@ const roots: string[] = []
 let context: Context | undefined
 
 afterEach(async () => {
+  clearCommandRuns()
   await context?.fiber.dispose()
   context = undefined
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -1649,9 +1651,9 @@ function commandSubject(codegraph: Record<string, unknown>): {
   }
 }
 
-/** The agent face the command reads its workspace from. */
-function commandOwner(cwd: string): { session: { header: { cwd: string } } } {
-  return { session: { header: { cwd } } }
+/** The agent face the command reads its workspace and identity from. */
+function commandOwner(cwd: string, id = 'command-agent'): { id: string; session: { header: { cwd: string } } } {
+  return { id, session: { header: { cwd } } }
 }
 
 /** Call one command handler the way the registry does. */
@@ -1671,6 +1673,21 @@ async function runCommand(
 }
 
 describe('the /codegraph command', () => {
+  it('surfaces the run to the next prompt assembly, which the command plane never reaches', async () => {
+    const root = await workspace()
+    const subject = commandSubject({ available: () => Promise.resolve(true), query: () => Promise.resolve({
+      kind: 'status', projectRoot: root, fileCount: 2, nodeCount: 5, edgeCount: 3,
+      languages: [], formatVersion: 4, indexedAt: Date.UTC(2026, 10, 3, 3, 0),
+      staleFileCount: 0, staleFileCountTruncated: false,
+    }) })
+    const owner = commandOwner(root, 'agent-command')
+    const result = await runCommand(subject.definition(), 'status', { agent: owner })
+    expect(result.kind).toBe('success')
+    const hint = commandRunHint('agent-command')
+    expect(hint).toContain('the user ran /codegraph status')
+    expect(hint).toContain('已索引：2 文件')
+  })
+
   it('registers one command with its discovery copy and drops it on disposal', () => {
     const subject = commandSubject({})
     expect(subject.host.injections).toEqual([['commands']])

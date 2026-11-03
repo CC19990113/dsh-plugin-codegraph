@@ -38,7 +38,8 @@ import { CODEGRAPH_INDEX_PARAMETERS, CODEGRAPH_OUTPUT_SCHEMA, CODEGRAPH_PARAMETE
 import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue, CodegraphValueFor } from './schema.ts'
 import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
-import { indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+import { agentIdOf, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+import { commandRunHint } from './command-log.ts'
 
 export {
   CODEGRAPH_INDEX_PARAMETERS,
@@ -69,6 +70,7 @@ export { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 export { renderCodegraph } from './render.ts'
 export { readSlice } from './source.ts'
 export { formatIndexedAt, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+export { clearCommandRuns, commandRunHint, COMMAND_LOG_WINDOW_MS, recentCommandRun, recordCommandRun } from './command-log.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'tool-codegraph'
@@ -239,7 +241,14 @@ export function apply(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({
     name: 'tool:codegraph',
     order: 111,
-    text: assemblyContext => `${CODEGRAPH_PROMPT_TEXT}\n\n${indexStatusHint(workspaceOf(assemblyContext))}`,
+    // Three parts, each optional except the guidance itself: the static copy, the workspace's index
+    // state, and — when the user just ran `/codegraph` — what they asked and what came back. The
+    // command plane never reaches the model's messages, so this is the only place it can surface.
+    text: assemblyContext => [
+      CODEGRAPH_PROMPT_TEXT,
+      indexStatusHint(workspaceOf(assemblyContext)),
+      commandRunHint(agentIdOf(assemblyContext)),
+    ].filter(part => part !== '').join('\n\n'),
   })
 
   ctx.tools.register(defineTool({
