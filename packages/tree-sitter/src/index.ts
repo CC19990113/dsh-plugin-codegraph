@@ -28,7 +28,7 @@
  * @module dsh-plugin-codegraph-tree-sitter
  */
 
-import { existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -128,6 +128,9 @@ export const DEFAULT_WATCH_DEBOUNCE_MS = 2_000
 /** Default cap on directories watched individually, one watch each, by the fs seam. */
 export const DEFAULT_MAX_WATCHED_DIRECTORIES = 4_000
 
+/** Default age past which a session-open refreshes an existing index (ten minutes). */
+export const DEFAULT_AUTO_REFRESH_AFTER_MS = 10 * 60 * 1000
+
 /** Plugin configuration: the indexer's identity and every deployment-varying bound on a run. */
 export interface Config {
   /**
@@ -223,6 +226,13 @@ export interface Config {
    * so a composition without background jobs simply schedules nothing.
    */
   autoIndexOnSession?: boolean
+  /**
+   * How stale an existing index may be before a new session refreshes it in the background (default
+   * 600000, ten minutes). An index older than this is rebuilt on session start using the parse cache,
+   * which is milliseconds — and rebuilding is also what restarts the file watcher, since watching
+   * only ever begins after a successful index.
+   */
+  autoRefreshAfterMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -241,6 +251,7 @@ export const Config: z<Config> = z.object({
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
   autoIndexOnSession: z.boolean().default(true),
+  autoRefreshAfterMs: z.number().default(DEFAULT_AUTO_REFRESH_AFTER_MS),
 })
 
 type ResolvedConfig = Required<Config>
@@ -272,10 +283,11 @@ export function apply(ctx: Context, config: Config): void {
   // effect's cleanup below tears down on unload.
   const watchers = new Map<string, Watcher>()
 
-  // Roots this plugin instance has already started an automatic index for. The set is only a guard
-  // against a burst of agents opened on one workspace each scheduling the same rebuild; what a
-  // previous *process* indexed is recorded by the status sidecar `autoIndexOnSession` reads instead.
-  const autoIndexed = new Set<string>()
+  // When this instance last started an automatic index, keyed by root. This is not a "already done"
+  // set: an index goes stale while the process runs, so a later session in the same workspace may
+  // legitimately trigger another refresh. The map only keeps a burst of sessions opened at once from
+  // queueing the same rebuild repeatedly; the freshness decision itself reads the status sidecar.
+  const lastAutoRun = new Map<string, number>()
 
   // `agent/created` is typed by `@deepseek-ai/dsh-agent`'s module augmentation. Reading the event
   // through a local structural face keeps this package's host dependencies unchanged: it needs one
@@ -342,7 +354,7 @@ export function apply(ctx: Context, config: Config): void {
     if (resolved.autoIndexOnSession) {
       // Registered inside this effect so the listener follows the plugin's lifetime: unloading the
       // plugin must stop new sessions from scheduling work this instance can no longer run.
-      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, autoIndexed, payload))
+      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, payload))
     }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
@@ -443,28 +455,42 @@ interface AutoIndexJobOutcome {
 }
 
 /**
- * Index a new session's workspace in the background, when nothing has indexed it yet.
+ * Index a new session's workspace in the background — when nothing has indexed it yet, or when what
+ * is there has gone stale.
  *
  * Runs synchronously inside `agent/created` dispatch, so it must never block or throw: it only decides
  * whether a build is warranted and hands one to the host's job registry. A synchronous build here
  * would stall agent creation for the length of a parse, which is why a composition without background
  * jobs does nothing instead.
+ *
+ * Refreshing a stale index is what restarts the file watcher after a host restart: watching only
+ * begins once a successful index has established a baseline, so a workspace whose index is minutes
+ * old would otherwise stay frozen at whatever the last process left behind.
  * @param ctx - the plugin context, consulted for the optional job registry.
- * @param autoIndexed - roots this process has already started an automatic index for.
+ * @param config - the resolved plugin configuration, for the staleness threshold.
+ * @param lastAutoRun - when this instance last started an automatic index for each root.
  * @param payload - the `agent/created` dispatch payload.
  */
-function autoIndexOnSession(ctx: Context, autoIndexed: Set<string>, payload: AgentCreatedPayload): void {
+function autoIndexOnSession(
+  ctx: Context,
+  config: ResolvedConfig,
+  lastAutoRun: Map<string, number>,
+  payload: AgentCreatedPayload,
+): void {
   try {
     const agent = payload.agent
     const root = agent?.session?.header?.cwd
     // No workspace means no root to claim: an agent created without a `cwd` has nothing to index.
     if (agent === undefined || !root) return
-    // Once per root per process. A second agent opened on the same workspace must not queue a second
-    // full rebuild of a graph the first one is already building.
-    if (autoIndexed.has(root)) return
-    // An existing status sidecar means a previous run already indexed this workspace. Checked before
-    // the job lookup so a composition without background jobs never pays for a filesystem probe.
-    if (existsSync(join(root, INDEX_STATUS_RELATIVE_PATH))) return
+    const now = Date.now()
+    // A burst of sessions opened on one workspace must not queue the same rebuild repeatedly.
+    const previous = lastAutoRun.get(root)
+    if (previous !== undefined && now - previous < config.autoRefreshAfterMs) return
+    // A fresh sidecar means a recent run is already describing this workspace; an absent, unreadable
+    // or old one means the graph is missing or behind. Checked before the job lookup so a composition
+    // without background jobs never pays for the probe.
+    const indexedAt = readStatusIndexedAt(root)
+    if (indexedAt !== undefined && now - indexedAt < config.autoRefreshAfterMs) return
     // `ctx.get` rather than an `inject` entry: `jobs` is a host composition choice, and requiring it in
     // `inject` would hide this whole indexer from a profile that runs no background jobs.
     const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
@@ -478,11 +504,28 @@ function autoIndexOnSession(ctx: Context, autoIndexed: Set<string>, payload: Age
     })
     // Marked only after the registry accepted the job, so a transient refusal leaves the workspace
     // eligible for the next session that opens in it.
-    autoIndexed.add(root)
+    lastAutoRun.set(root, now)
   } catch (error) {
     // The host treats a throwing listener as vetoing publication. Losing an index is a degradation,
     // never a reason to stop a session from starting.
     console.error(`codegraph-tree-sitter: automatic indexing for a new session failed: ${String(error)}`)
+  }
+}
+
+/**
+ * When the workspace's sidecar says its index was built.
+ * @param root - the workspace root.
+ * @returns the epoch-millisecond timestamp, or `undefined` when the sidecar is absent or unreadable —
+ *   either way the graph cannot be trusted to be current.
+ */
+function readStatusIndexedAt(root: string): number | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(root, INDEX_STATUS_RELATIVE_PATH), 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const indexedAt = (parsed as { indexedAt?: unknown }).indexedAt
+    return typeof indexedAt === 'number' && Number.isFinite(indexedAt) ? indexedAt : undefined
+  } catch {
+    return undefined
   }
 }
 

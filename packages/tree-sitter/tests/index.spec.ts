@@ -720,12 +720,12 @@ describe('codegraph-tree-sitter plugin', () => {
       expect(functionNames(join(root, DATABASE_RELATIVE_PATH))).toEqual(['a'])
     })
 
-    it('leaves a workspace that already has an index alone', async () => {
+    it('leaves a workspace whose index is fresh alone', async () => {
       const root = await writeProject({
         'a.ts': 'export function a() {}\n',
-        // Only the sidecar's existence is consulted: it is the cross-process record that a previous
-        // run wrote a graph here, which is all this decision needs.
-        '.codegraph/status.json': '{"indexedAt":0}',
+        // The sidecar's timestamp is the cross-process record of how recently a run finished, which is
+        // what "already current" means here — not merely "a graph exists".
+        '.codegraph/status.json': JSON.stringify({ indexedAt: Date.now() }),
       })
       const registry = fakeJobs()
       const ctx = await autoIndexSeam({ jobs: registry.jobs })
@@ -733,6 +733,65 @@ describe('codegraph-tree-sitter plugin', () => {
       registerAgent(ctx, root)
 
       expect(registry.started).toHaveLength(0)
+    })
+
+    it('refreshes an index that has gone stale, which is also what restarts watching', async () => {
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/status.json': JSON.stringify({ indexedAt: 0 }),
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      // A rebuild on session start is what re-establishes the watcher's baseline: watching only
+      // begins after a successful index, so a stale workspace would otherwise stay frozen at whatever
+      // the previous host process left behind.
+      expect(registry.started).toHaveLength(1)
+      const hooks = driveJob(registry.started[0]!)
+      await expect(hooks.done).resolves.toEqual({ status: 'completed' })
+    })
+
+    it('treats an unreadable sidecar as stale, so a damaged record is rebuilt rather than trusted', async () => {
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/status.json': '{not json',
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      expect(registry.started).toHaveLength(1)
+    })
+
+    it('treats a sidecar that parses to a non-object as stale', async () => {
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/status.json': 'null',
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      // `null` parses fine but describes nothing; a reader that only guards `typeof === 'object'`
+      // would dereference it next.
+      expect(registry.started).toHaveLength(1)
+    })
+
+    it('treats a sidecar without a numeric timestamp as stale', async () => {
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/status.json': JSON.stringify({ indexedAt: 'yesterday' }),
+      })
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      expect(registry.started).toHaveLength(1)
     })
 
     it('schedules nothing when the composition has no jobs service', async () => {

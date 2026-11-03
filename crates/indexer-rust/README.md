@@ -26,6 +26,12 @@ declare function extractWorkspace(inputs: ExtractInput[], rulesJson: string): st
 - `supported` lists the languages this addon can extract **given that `rulesJson`** — the
   caller routes only those here and falls back to JS for the rest. Inputs in any other
   language are omitted from `results` (not an error), so one batch can carry mixed input.
+- **A file whose parse tree contains syntax errors is omitted from `results`** (it never
+  affects `supported`, which is a per-language list). The two engines' error recovery differs,
+  so each side extracts the files it parses cleanly and the caller extracts the missing paths
+  itself; the graph then records one interpretation per file instead of two different
+  recoveries. `examples/parse-errors` proves the omitted set is exactly the Rust-side
+  parse-error set.
 - Every `extraction` object has exactly the four `FileExtraction` fields, in the JS
   declaration order, with `null` (never a missing key) for `parentKey`/`callerKey` when
   there is no enclosing definition.
@@ -41,6 +47,9 @@ cd crates/indexer-rust
 npx --yes -p @napi-rs/cli napi build --platform --release --output-dir artifacts
 # => artifacts/codegraph-indexer.<platform>-<arch>.node (+ generated index.js/index.d.ts)
 ```
+
+`target/` and `artifacts/` are gitignored: building the addon is a local/CI step, not a
+committed artifact.
 
 Two environment facts this command depends on, both verified on this host:
 
@@ -94,49 +103,60 @@ The JS side loads `tree-sitter-wasms@0.1.13`, whose grammars are `tree-sitter-ty
 ^0.20.5` / `tree-sitter-javascript ^0.20.3`. This crate uses the current crates
 (`tree-sitter-typescript 0.23`, `tree-sitter-javascript 0.25`) against `tree-sitter 0.27`.
 Node types and field bindings the extraction table relies on are identical across those
-versions; the measured differences are confined to grammar **error recovery** and to two
-reserved-word edge cases (below).
+versions — on well-formed input the two engines produce byte-identical extractions. What
+does differ is **error recovery**, plus two reserved-word cases (`in` used as an import
+binding, `await` used as an identifier) that only appear in already-malformed input. Those
+are exactly the files the addon omits (see the contract above): the JS grammar sometimes
+recovers into an error-free tree where 0.25 produces `ERROR` nodes, and letting each side
+own its own recovery is what keeps the two results equal.
 
 ## Measured parity against `/Users/admin/www/adx-admin-backend`
 
 File set comes from the JS walker itself (`walkAndExtract` with the indexer's defaults), so
 both engines see one identical batch.
 
-| set | files | field-exact | notes |
-|---|---|---|---|
-| JS production set (4 languages) | 336 | **335 (99.7%)** | 337 indexed, 1 is `.py` |
-| + 23 minified files kept for stress | 359 | 356 (99.1%) | — |
+| set | files | result |
+|---|---|---|
+| production (indexer's own walk) | 337 (336 native + 1 `.py` handled by JS) | **337/337 accounted**: 334 returned and field-exact, 2 omitted -> JS fallback, 1 non-native language |
+| + 23 minified files kept for stress | 359 | 355 returned, **all 355 field-exact**; 4 omitted |
 
-The three differences, all explainable and none a port bug:
+Four files are omitted, and they are exactly the four this crate's grammar parses into an
+error tree (checked independently with `examples/parse-errors`; the omitted set and the
+Rust parse-error set were byte-for-byte identical):
 
-1. `canvases/hera-pages.canvas.tsx` — the file is **not valid TSX**: a JSX text node
-   contains a bare `&` (`配置（底价&利润）`), so both engines' root node is `ERROR` and the
-   remainder is recovery. Rust's recovery captured one extra bogus `method` named `if`.
-2. `dist-test/js/@rc-component/@rc-component.SyV4LPoI.js` — minified bundle using the
-   reserved word `in` as an import binding (`in as P`); grammar 0.20 tolerates it, 0.25
-   reads the specifier differently.
-3. `dist-test/js/index.CC5K3_PL.js` — minified bundle where Rust's grammar treats `await`
-   as an identifier in one `f=await(...)(...)` position and emits one extra call
-   (reproduced minimally: `async function f(){ let g = await(async n => n)(1) }`).
+- `canvases/hera-pages.canvas.tsx` — not valid TSX: a JSX text node holds a bare `&`
+  (`配置（底价&利润）`). The JS grammar also errors on it.
+- `src/pages/demand-ad-slot/BindAdSlotPage.tsx` — the JS grammar errors on it too.
+- `dist-test/js/@ant-design/@ant-design.BDp91I8a.js` and
+  `dist-test/js/@rc-component/@rc-component.SyV4LPoI.js` — minified bundles where 0.25 hits
+  `ERROR` nodes the older grammar tolerated; both are skipped by the indexer's minified
+  filter anyway.
 
-2 and 3 are both skipped by the indexer's minified filter, so they never reach a
-production graph. 1 is a source file that already fails to parse in the JS engine too.
+Before the omission policy these four contributed the only divergences (a phantom
+`method` named `if`, an off-by-one column, a mis-read `in as P` import, an extra `await`
+call). With the policy in place the returned set matches field for field, and the
+previously-differing `src/pages/ad-slot/ConfigAdSlotPage.tsx` turns out to parse cleanly in
+both grammars and its extraction is byte-identical.
 
 ## Timing (same 336 files, 2,966,770 bytes, Apple silicon, 8 cores)
 
 | phase | JS / WASM | Rust native (serial) |
 |---|---|---|
-| parse | 313.7 ms | 252.8 ms |
-| extract | 421.2 ms | 253.4 ms |
-| serialize | — | 2.7 ms |
-| **pipeline** | **735.8 ms** | **508.8 ms** |
-| addon, rayon + napi marshalling | — | **113–124 ms** (best of 3: 113.3) |
+| parse | 313.7–336.4 ms | 252.8–270.3 ms |
+| extract | 421.2–457.3 ms | 253.4–272.5 ms |
+| serialize | — | 2.6–2.7 ms |
+| **pipeline** | **735.8–806.6 ms** | **508.8–545.4 ms** |
+| addon, rayon + napi marshalling | — | **84–90 ms** (3 runs, best of 3 inside each) |
 
 The addon call — napi object marshalling + parallel parse/extract on 8 rayon workers +
-JSON serialization — is **6.5× faster** than the JS pipeline measured the same way
-(113.3 ms vs 735.8 ms). The indexer's quoted baseline (425 ms parse + 491 ms extract) was
-measured on different hardware/run conditions; re-measuring with this harness gave the
-numbers in the table.
+JSON serialization — lands around **85–90 ms** against **784–806 ms** for the JS pipeline
+measured the same way (median of three runs: 786.3 ms vs 89.7 ms, ≈ 8.8×). Numbers move by
+±10% between runs because the machine is shared. The JS timing covers all 336 native files
+while the addon omits the 2 its grammar cannot parse, so the ratio is, if anything, slightly
+flattering to Rust — though those two files are a rounding error (2 of 336).
+
+The indexer's quoted baseline (425 ms parse + 491 ms extract) was measured on different
+hardware/run conditions; the table is this host, re-measured by `tools/parity-adx.mjs`.
 
 ## Layout
 
@@ -148,4 +168,4 @@ numbers in the table.
 | `src/extract.rs` | the single-pass walk, container/scope stacks, `FileExtraction` wire types |
 | `tests/fixtures.rs` | fixture parity test with a first-difference diff |
 | `tools/` | expectation generator, addon contract check, real-workspace parity/bench |
-| `examples/` | `bench` (phase timings), `first-error` (grammar-drift diagnosis) |
+| `examples/` | `bench` (phase timings), `parse-errors` (which files the Rust grammar cannot parse), `first-error` (grammar-drift diagnosis) |

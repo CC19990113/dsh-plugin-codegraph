@@ -98,7 +98,7 @@ The **store is format-bound, not language-bound**: a graph the `codegraph` CLI b
 
 Three things keep the graph current without you asking:
 
-- **A new session starts with an index.** Open a session in a workspace that has never been indexed and the plugin starts a background build for it — the first structural question already has a graph. A workspace that already has one is left to the watcher.
+- **A new session starts with a current index.** Open a session in a workspace that has never been indexed — or whose index is more than ten minutes old — and the plugin starts a background build for it. That refresh is also what restarts the file watcher after a host restart, since watching only begins once a successful index has established a baseline; without it a restarted host would sit on the previous process's graph indefinitely.
 - **Watching is on by default.** Every in-scope directory is watched through the host's filesystem seam, and a debounced change triggers a rebuild. An empty change set schedules nothing, so the plugin's own `.codegraph` writes never loop.
 - **Re-indexing parses only what changed.** Each run persists its per-file extraction; the next one confirms each file by mtime+size (or a SHA-256, under `cacheVerify: 'hash'`) and reuses it. Measured on a 337-file workspace: **991 ms for the first run, 45 ms for every run after** — and a watch rebuild after one edit costs about the same as reusing everything else.
 
