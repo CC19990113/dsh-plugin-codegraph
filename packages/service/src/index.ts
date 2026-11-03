@@ -32,6 +32,8 @@ import type {
 } from './types.ts'
 
 export { assertNever } from './assert.ts'
+export { INDEX_STATUS_RELATIVE_PATH } from './status.ts'
+export type { IndexStatusFile } from './status.ts'
 export { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from './brand.ts'
 export type {
   CodegraphCalleesRequest,

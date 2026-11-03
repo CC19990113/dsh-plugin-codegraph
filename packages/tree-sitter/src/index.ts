@@ -10,6 +10,11 @@
  * runs implicitly from a query — it is a caller-initiated, potentially multi-minute operation, kept
  * out of the seam's read-only query path on purpose.
  *
+ * Watching a root runs through `ctx.fs` (see `./watcher.ts`): the package observes each in-scope
+ * directory through the host's filesystem seam rather than opening paths itself, so a workspace a
+ * backend serves from another execution world is watched where it actually lives, and a backend that
+ * cannot watch at all degrades to explicit indexing instead of failing the plugin.
+ *
  * Namespace plugin (named exports, no default export). Grammars load lazily, one per language, on
  * first sight of a matching file, and stay cached for the process — never eagerly for every grammar
  * this package ships with.
@@ -24,10 +29,11 @@ import { CodegraphIndexerId } from 'dsh-plugin-codegraph-service'
 import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
+import { writeParseCache } from './cache.ts'
 import { resolveWorkspace } from './resolve.ts'
 import { writeGraph } from './schema.ts'
 import { createWatcher } from './watcher.ts'
-import type { Watcher } from './watcher.ts'
+import type { WatchFileSystem, Watcher } from './watcher.ts'
 import { decideWatch, readProcVersion } from './watch-policy.ts'
 
 export { LANGUAGE_TABLE, languageFor } from './languages.ts'
@@ -41,10 +47,19 @@ export type { ExtractedFile, GraphEdge, GraphNode, ResolvedGraph, UnresolvedRef 
 export { isMinifiedName, looksMinified, measureText, MINIFIED_AVERAGE_LINE_LENGTH } from './minified.ts'
 export type { TextShape } from './minified.ts'
 export { SCHEMA_VERSION, writeGraph } from './schema.ts'
+export { EXTRACTION_CACHE_RELATIVE_PATH, EXTRACTION_CACHE_VERSION, readParseCache, writeParseCache } from './cache.ts'
+export type { CachedFile } from './cache.ts'
 export { isExcluded, walkAndExtract } from './walk.ts'
 export type { WalkConfig, WalkResult } from './walk.ts'
-export { createWatcher, nodeWatch } from './watcher.ts'
-export type { DegradeReason, WatchConfig, WatchHandle, WatchPrimitive, Watcher } from './watcher.ts'
+export { createWatcher } from './watcher.ts'
+export type {
+  DegradeReason,
+  WatchConfig,
+  WatchDirEntry,
+  WatchFileSystem,
+  WatchTarget,
+  Watcher,
+} from './watcher.ts'
 export { decideWatch, readProcVersion } from './watch-policy.ts'
 export type { WatchDecision, WatchPolicyInput } from './watch-policy.ts'
 export { detectWorktree, execGit } from './worktree.ts'
@@ -56,7 +71,7 @@ export type { GitHooksOptions } from './git-hooks.ts'
 export const name = 'codegraph-tree-sitter'
 
 /** Services required by this plugin. */
-export const inject = ['codegraph']
+export const inject = ['codegraph', 'fs']
 
 /** Path of the on-disk graph this package writes, relative to a project root. */
 export const DATABASE_RELATIVE_PATH = '.codegraph/codegraph.db'
@@ -83,7 +98,7 @@ export const DEFAULT_CONCURRENCY = 4
 /** Default quiet period after the last change before a watch-triggered refresh runs. */
 export const DEFAULT_WATCH_DEBOUNCE_MS = 2_000
 
-/** Default cap on directories watched individually, on platforms without a recursive `fs.watch`. */
+/** Default cap on directories watched individually, one watch each, by the fs seam. */
 export const DEFAULT_MAX_WATCHED_DIRECTORIES = 4_000
 
 /** Plugin configuration: the indexer's identity and every deployment-varying bound on a run. */
@@ -125,6 +140,22 @@ export interface Config {
   /** Files parsed concurrently (default 4). */
   concurrency?: number
   /**
+   * Reuse the extraction a previous run cached for every file whose content is unchanged (default
+   * true), so a repeat index — or a watch rebuild after one edit — parses only what actually changed
+   * instead of the whole workspace. The cache lives at
+   * {@link EXTRACTION_CACHE_RELATIVE_PATH} and is rewritten after each successful run. Set false to
+   * parse every file every time, at the cost of the full parse each run.
+   */
+  reuseParsedCache?: boolean
+  /**
+   * How a cached file's unchanged content is confirmed before its extraction is reused (default
+   * `'stat'`): `stat` compares the modification time and size the cache recorded and reads nothing;
+   * `hash` re-reads the file and compares a SHA-256, which also catches a rewrite that preserved both
+   * mtime and size (a checkout restoring an older file over a newer one). Hash mode still skips the
+   * parse and the tree walk, which dominate the per-file cost.
+   */
+  cacheVerify?: 'stat' | 'hash'
+  /**
    * Watch the workspace for file changes and refresh the index automatically after a successful
    * `index()` call establishes a baseline (default true). Set `watch: false` to keep indexing purely
    * explicit instead.
@@ -138,9 +169,10 @@ export interface Config {
   /** Quiet period after the last change before a watch-triggered refresh runs, in ms (default 2000). */
   watchDebounceMs?: number
   /**
-   * Hard cap on directories watched individually (default 4000). Only relevant on platforms without a
-   * recursive `fs.watch` (Linux); exceeding it degrades that root's watcher rather than covering only
-   * part of the tree.
+   * Hard cap on directories watched individually (default 4000). Watching goes through the host's
+   * filesystem seam, whose `watch` covers one directory's direct entries, so a workspace costs one
+   * watch per in-scope directory; exceeding this cap degrades that root's watcher rather than
+   * covering only part of the tree.
    */
   maxWatchedDirectories?: number
 }
@@ -154,6 +186,8 @@ export const Config: z<Config> = z.object({
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   maxFiles: z.number().default(DEFAULT_MAX_FILES),
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
+  reuseParsedCache: z.boolean().default(true),
+  cacheVerify: z.union([z.const('stat'), z.const('hash')]).default('stat'),
   watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
@@ -163,7 +197,7 @@ type ResolvedConfig = Required<Config>
 
 /**
  * Register the tree-sitter indexer.
- * @param ctx - the plugin context (must inject `codegraph`).
+ * @param ctx - the plugin context (must inject `codegraph` and `fs`).
  * @param config - the resolved plugin configuration.
  */
 export function apply(ctx: Context, config: Config): void {
@@ -173,6 +207,14 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('concurrency', resolved.concurrency)
   assertPositiveInteger('watchDebounceMs', resolved.watchDebounceMs)
   assertPositiveInteger('maxWatchedDirectories', resolved.maxWatchedDirectories)
+
+  // Watching goes through the host's filesystem seam rather than `node:fs`, so it follows the same
+  // execution world the rest of the harness reads: a remote or confined backend watches its own paths.
+  // The `fs` service is a declared dependency (see `inject`), so it is present whenever `apply` runs.
+  // It is read structurally instead of importing `@deepseek-ai/dsh-fs`: that package is not a
+  // dependency here, and its `watch` method only exists from host 0.2 onward, while this package
+  // supports older peers that have no such member to import.
+  const fileSystem = (ctx as Context & { readonly fs: WatchFileSystem }).fs
 
   // Keyed by project root, private to this plugin instance: never registered on `ctx`, so there is no
   // cross-plugin relation here for an invariant to describe — just process-local bookkeeping this
@@ -205,7 +247,7 @@ export function apply(ctx: Context, config: Config): void {
           'the index will no longer refresh on its own — run codegraph_index manually to update it.',
         )
       },
-    })
+    }, fileSystem)
     watchers.set(projectRoot, watcher)
     watcher.start()
   }
@@ -261,7 +303,7 @@ async function runSync(projectRoot: string, config: ResolvedConfig): Promise<{ f
  * @returns the run's report.
  */
 async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: AbortSignal): Promise<CodegraphIndexReport> {
-  const { files, filesSkipped, filesMinified } = await walkAndExtract(projectRoot, {
+  const { files, filesSkipped, filesMinified, filesReused } = await walkAndExtract(projectRoot, {
     exclude: config.exclude,
     respectGitignore: config.respectGitignore,
     skipMinified: config.skipMinified,
@@ -269,6 +311,8 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
     maxFiles: config.maxFiles,
     concurrency: config.concurrency,
     languages: config.languages,
+    reuseParsedCache: config.reuseParsedCache,
+    cacheVerify: config.cacheVerify,
   }, signal)
   signal?.throwIfAborted()
 
@@ -277,7 +321,14 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
   signal?.throwIfAborted()
 
   const databasePath = join(projectRoot, DATABASE_RELATIVE_PATH)
-  await writeGraph(databasePath, { files, nodes: graph.nodes, edges: graph.edges, unresolved: graph.unresolved, indexedAt })
+  await writeGraph(databasePath, {
+    files, nodes: graph.nodes, edges: graph.edges, unresolved: graph.unresolved, filesMinified, indexedAt,
+  })
+
+  // Only after the graph is in place: the cache records the extractions this run actually committed,
+  // so a run that failed before writing its graph leaves the previous cache — and the mtimes it was
+  // built from — alone instead of vouching for a graph that was never written.
+  await writeParseCache(projectRoot, files)
 
   const languageCounts = new Map<string, number>()
   for (const file of files) languageCounts.set(file.language, (languageCounts.get(file.language) ?? 0) + 1)
@@ -290,6 +341,7 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
     filesIndexed: files.length,
     filesSkipped,
     filesMinified,
+    filesReused,
     nodeCount: graph.nodes.length,
     edgeCount: graph.edges.length,
     unresolvedCount: graph.unresolved.length,

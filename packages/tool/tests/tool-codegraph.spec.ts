@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -32,7 +32,10 @@ afterEach(async () => {
 async function workspace(files: Record<string, string> = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-tool-codegraph-'))
   roots.push(root)
-  for (const [path, text] of Object.entries(files)) await writeFile(join(root, path), text)
+  for (const [path, text] of Object.entries(files)) {
+    await mkdir(join(root, path, '..'), { recursive: true })
+    await writeFile(join(root, path), text)
+  }
   return root
 }
 
@@ -338,6 +341,13 @@ describe('result rendering', () => {
     expect(text).toContain('Languages: none.')
   })
 
+  it('says a background run has no report yet and how to fetch it', () => {
+    const text = renderCodegraph({ ...base, operation: 'index', status: 'started', job_id: 'job-7' })
+    expect(text).toBe(
+      'Indexing /repo in the background as job job-7. The run outlives this call — read its report with job_output job-7, or stop it with job_kill.',
+    )
+  })
+
   it('renders explored and contextual files, including unreadable ones', () => {
     expect(renderCodegraph({
       ...base, operation: 'explore', total: 2, truncated: true,
@@ -421,11 +431,20 @@ describe('the tool plugin', () => {
   const seen: CodegraphRequest[] = []
   const indexed: string[] = []
   const indexReport: CodegraphIndexReport = {
-    projectRoot: '/repo', filesIndexed: 2, filesSkipped: 1, filesMinified: 3, nodeCount: 5, edgeCount: 3,
+    projectRoot: '/repo', filesIndexed: 2, filesSkipped: 1, filesMinified: 3, filesReused: 0, nodeCount: 5, edgeCount: 3,
     unresolvedCount: 1, unresolvedLikelyInternalCount: 1, languages: [{ language: 'typescript', fileCount: 2 }],
   }
 
-  async function mount(root: string, config?: Record<string, unknown>): Promise<Context> {
+  async function mount(
+    root: string,
+    config?: Record<string, unknown>,
+    options: {
+      /** A stand-in for the host's `jobs` service; omit to mount a composition that has none. */
+      jobs?: unknown
+      /** Replaces the stub indexer's body, for the job paths that fail or hang. */
+      index?: (projectRoot: string, signal: AbortSignal | undefined) => Promise<CodegraphIndexReport>
+    } = {},
+  ): Promise<Context> {
     seen.length = 0
     indexed.length = 0
     const ctx = new Context()
@@ -435,6 +454,7 @@ describe('the tool plugin', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(LocalFileSystem, { cwd: root })
     await ctx.plugin(Codegraph)
+    if (options.jobs !== undefined) ctx.provide('jobs', options.jobs)
     const store: CodegraphStoreProvider = {
       id: CodegraphStoreId('stub'),
       indexes: () => Promise.resolve(true),
@@ -447,10 +467,10 @@ describe('the tool plugin', () => {
     ctx.codegraph.registerIndexer({
       id: CodegraphIndexerId('stub-indexer'),
       canIndex: () => Promise.resolve(true),
-      index: (projectRoot) => {
+      index: options.index ?? ((projectRoot) => {
         indexed.push(projectRoot)
         return Promise.resolve({ ...indexReport, projectRoot })
-      },
+      }),
     })
     await ctx.plugin(ToolCodegraph, config)
     return ctx
@@ -528,6 +548,24 @@ describe('the tool plugin', () => {
     const result = await callIndex(ctx, undefined, { project_path: '/elsewhere' }, 'explicit')
     expect(result.isError).toBe(false)
     expect(indexed).toEqual(['/elsewhere'])
+  })
+
+  it('tells the model the workspace index state on every prompt assembly', async () => {
+    const root = await workspace({
+      '.codegraph/status.json': JSON.stringify({
+        indexedAt: Date.UTC(2026, 10, 3, 1, 57),
+        filesIndexed: 12, filesMinified: 3, nodeCount: 40, edgeCount: 30,
+        unresolvedCount: 5, unresolvedLikelyInternalCount: 2,
+      }),
+    })
+    const ctx = await mount(root)
+    const owner = agent(ctx, root)
+    const assembly = await ctx.systemPrompt.assemble({ agent: owner, scope: owner })
+    const section = assembly.sections.find(entry => entry.name === 'tool:codegraph')
+    expect(section?.text).toContain('Use codegraph for structural questions')
+    expect(section?.text).toContain(
+      `The code graph for ${root} was built 2026-11-03T01:57Z from 12 files: 40 declarations, 30 relationships. 3 generated files were left out.`,
+    )
   })
 
   it('carries its own timeout budget, distinct from the query tool', async () => {
@@ -633,9 +671,219 @@ describe('the tool plugin', () => {
     ['maxSourceFiles', { maxSourceFiles: 0 }],
     ['timeoutMs', { timeoutMs: 0 }],
     ['indexTimeoutMs', { indexTimeoutMs: 0 }],
+    ['backgroundIndexThreshold', { backgroundIndexThreshold: 0 }],
   ])('fails loading when %s is out of range', async (field, config) => {
     const root = await workspace()
     await expect(mount(root, config)).rejects.toThrow(new RegExp(field))
+  })
+
+  interface FakeJobHandle {
+    append(text: string): void
+    updateProgress(line: string): void
+  }
+
+  interface FakeJobHooks {
+    cancel(reason?: string): void
+    done: Promise<{ status: string; detail?: string; result?: string }>
+  }
+
+  interface RecordedJob {
+    spec: { owner?: string; kind: string; label: string; run: (handle: FakeJobHandle) => FakeJobHooks }
+    output: string[]
+    progress: string[]
+  }
+
+  /**
+   * A stand-in for `@deepseek-ai/dsh-jobs`'s registry. It never runs a producer itself — a test drives
+   * the recorded spec's `run` through {@link driveJob}, so both halves of the contract can be asserted:
+   * what the tool registered, and what the job body then wrote and settled with.
+   */
+  function fakeJobs(options: { refuse?: true } = {}) {
+    const started: RecordedJob[] = []
+    const jobs = {
+      start(spec: RecordedJob['spec']): string {
+        // The host refuses on two real conditions — no controller for the agent, owner at its cap —
+        // and the tool must treat both as "index here instead", so one throw stands in for both.
+        if (options.refuse === true) throw new Error('background jobs unavailable: no job controller serves this agent')
+        started.push({ spec, output: [], progress: [] })
+        return 'job-1'
+      },
+    }
+    return { started, jobs }
+  }
+
+  /** Invoke one recorded job's producer face; the caller awaits `hooks.done`. */
+  function driveJob(job: RecordedJob): { output: string[]; progress: string[]; hooks: FakeJobHooks } {
+    const hooks = job.spec.run({
+      append: (text) => { job.output.push(text) },
+      updateProgress: (line) => { job.progress.push(line) },
+    })
+    return { output: job.output, progress: job.progress, hooks }
+  }
+
+  /** A workspace whose last run left a status sidecar, which is what `'auto'` sizes it by. */
+  async function sizedWorkspace(filesIndexed: number): Promise<string> {
+    return workspace({
+      '.codegraph/status.json': JSON.stringify({
+        indexedAt: Date.UTC(2026, 10, 3, 1, 57),
+        filesIndexed, filesMinified: 0, nodeCount: 5, edgeCount: 3,
+        unresolvedCount: 0, unresolvedLikelyInternalCount: 0,
+      }),
+    })
+  }
+
+  /** The text blocks one tool result carries, joined as the model reads them. */
+  function resultText(result: { content: readonly { type: string; text?: string }[] }): string {
+    return result.content.map(block => (block.type === 'text' ? block.text ?? '' : '')).join('')
+  }
+
+  describe('background indexing', () => {
+    it('hands a large refresh to a background job and answers with its id', async () => {
+      const root = await sizedWorkspace(1000)
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, { jobs: registry.jobs })
+      const owner = agent(ctx, root)
+      const result = await callIndex(ctx, owner, {})
+      expect(result.isError).toBe(false)
+      // A job means the call did not index anything itself.
+      expect(indexed).toEqual([])
+      expect(registry.started).toHaveLength(1)
+      expect(registry.started[0]?.spec).toMatchObject({
+        owner: owner.id,
+        kind: 'codegraph-index',
+        label: `codegraph index ${root}`,
+      })
+      const text = resultText(result)
+      expect(text).toContain(`Indexing ${root} in the background as job job-1.`)
+      expect(text).toContain('job_output job-1')
+    })
+
+    it('indexes synchronously below the auto threshold', async () => {
+      const root = await sizedWorkspace(999)
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(registry.started).toHaveLength(0)
+      expect(indexed).toEqual([root])
+    })
+
+    it('indexes synchronously when no earlier run has sized the workspace', async () => {
+      const root = await workspace()
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(registry.started).toHaveLength(0)
+      expect(indexed).toEqual([root])
+    })
+
+    it('decides "auto" by the configured threshold', async () => {
+      const root = await sizedWorkspace(4)
+      const registry = fakeJobs()
+      const ctx = await mount(root, { backgroundIndexThreshold: 4 }, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(registry.started).toHaveLength(1)
+    })
+
+    it('always uses a job when backgroundIndex is true, however small the workspace', async () => {
+      const root = await workspace()
+      const registry = fakeJobs()
+      const ctx = await mount(root, { backgroundIndex: true }, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(registry.started).toHaveLength(1)
+      expect(indexed).toEqual([])
+    })
+
+    it('never uses a job when backgroundIndex is false, however large the workspace', async () => {
+      const root = await sizedWorkspace(5000)
+      const registry = fakeJobs()
+      const ctx = await mount(root, { backgroundIndex: false }, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(registry.started).toHaveLength(0)
+      expect(indexed).toEqual([root])
+    })
+
+    it('indexes synchronously when the composition has no jobs service', async () => {
+      const root = await sizedWorkspace(5000)
+      const ctx = await mount(root)
+      await callIndex(ctx, agent(ctx, root), {})
+      expect(indexed).toEqual([root])
+    })
+
+    it('falls back to a synchronous run when the registry refuses the registration', async () => {
+      const root = await sizedWorkspace(5000)
+      const registry = fakeJobs({ refuse: true })
+      const ctx = await mount(root, undefined, { jobs: registry.jobs })
+      const result = await callIndex(ctx, agent(ctx, root), {})
+      expect(result.isError).toBe(false)
+      expect(indexed).toEqual([root])
+      expect(resultText(result)).toContain('files indexed')
+    })
+
+    it('runs the job to completion and reports what it wrote', async () => {
+      const root = await sizedWorkspace(1000)
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, { jobs: registry.jobs })
+      await callIndex(ctx, agent(ctx, root), {})
+      const job = registry.started[0] as RecordedJob
+      const { output, progress, hooks } = driveJob(job)
+      const outcome = await hooks.done
+      expect(progress).toEqual([`indexing ${root}`])
+      expect(output).toEqual([`Indexed ${root}: 2 files, 5 symbols, 3 relationships.\n`])
+      expect(outcome.status).toBe('completed')
+      expect(outcome.result).toContain(`Indexed ${root}:`)
+      expect(outcome.result).toContain('2 files indexed, 1 skipped, 3 generated files left out.')
+    })
+
+    it('reports a failed run through the job instead of throwing', async () => {
+      const root = await sizedWorkspace(1000)
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, {
+        jobs: registry.jobs,
+        index: () => Promise.reject(new Error('stub exploded')),
+      })
+      await callIndex(ctx, agent(ctx, root), {})
+      const { output, hooks } = driveJob(registry.started[0] as RecordedJob)
+      const outcome = await hooks.done
+      expect(output).toEqual([`codegraph index failed for ${root}: stub exploded\n`])
+      expect(outcome).toEqual({ status: 'failed', detail: 'stub exploded' })
+    })
+
+    it('reports a non-Error rejection as its string form', async () => {
+      const root = await sizedWorkspace(1000)
+      const registry = fakeJobs()
+      const ctx = await mount(root, undefined, {
+        jobs: registry.jobs,
+        index: () => Promise.reject('plain string'),
+      })
+      await callIndex(ctx, agent(ctx, root), {})
+      const { output, hooks } = driveJob(registry.started[0] as RecordedJob)
+      expect(await hooks.done).toEqual({ status: 'failed', detail: 'plain string' })
+      expect(output[0]).toContain('plain string')
+    })
+
+    it('stops a running job through its cancellation hook', async () => {
+      const root = await sizedWorkspace(1000)
+      const registry = fakeJobs()
+      let seen: AbortSignal | undefined
+      const ctx = await mount(root, undefined, {
+        jobs: registry.jobs,
+        // Answers only when cancelled, so the job is still running when the hook fires. The up-front
+        // check covers the other ordering: the run may start after the abort already happened.
+        index: (_projectRoot, signal) => {
+          seen = signal
+          if (signal?.aborted === true) return Promise.reject(new Error('index aborted'))
+          return new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(new Error('index aborted')))
+          })
+        },
+      })
+      await callIndex(ctx, agent(ctx, root), {})
+      const { output, hooks } = driveJob(registry.started[0] as RecordedJob)
+      hooks.cancel('the model changed its mind')
+      expect(await hooks.done).toEqual({ status: 'failed', detail: 'index aborted' })
+      expect(seen?.aborted).toBe(true)
+      expect(output).toEqual([`codegraph index failed for ${root}: index aborted\n`])
+    })
   })
 })
 

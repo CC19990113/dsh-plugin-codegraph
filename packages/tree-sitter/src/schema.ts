@@ -11,10 +11,12 @@
  * @module dsh-plugin-codegraph-tree-sitter/schema
  */
 
-import { mkdir, rename, rm } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
+import { INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
+import type { IndexStatusFile } from 'dsh-plugin-codegraph-service'
 import type { ExtractedFile, GraphEdge, GraphNode, UnresolvedRef } from './resolve.ts'
 
 /** The schema version this package writes, matching the format `dsh-codegraph-sqlite` reads. */
@@ -56,6 +58,8 @@ export interface WriteInput {
   readonly nodes: readonly GraphNode[]
   readonly edges: readonly GraphEdge[]
   readonly unresolved: readonly UnresolvedRef[]
+  /** Generated artifacts this run left out of the graph, carried into the status sidecar. */
+  readonly filesMinified: number
   readonly indexedAt: number
 }
 
@@ -148,4 +152,30 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
   // rename() only moves the main file; the temp name's own sidecars (should the driver have left any)
   // never travel with it and would otherwise linger under the temp name forever.
   await removeGraphFiles(tempPath)
+
+  await writeStatusFile(dirname(databasePath), {
+    indexedAt: input.indexedAt,
+    filesIndexed: input.files.length,
+    filesMinified: input.filesMinified,
+    nodeCount: input.nodes.length,
+    edgeCount: input.edges.length,
+    unresolvedCount: input.unresolved.length,
+    unresolvedLikelyInternalCount: input.unresolved.filter(ref => !ref.likelyExternal).length,
+  })
+}
+
+/**
+ * Write the prompt-time status sidecar beside the graph, replacing it atomically.
+ *
+ * Deliberately after the graph's own rename: a reader that sees this file can trust that the graph it
+ * summarizes is already in place, which is what lets a prompt line report "336 files, built 12s ago"
+ * without opening SQLite on every model request.
+ * @param directory - the graph's directory (`.codegraph`).
+ * @param status - this run's summary.
+ */
+async function writeStatusFile(directory: string, status: IndexStatusFile): Promise<void> {
+  const target = join(directory, basename(INDEX_STATUS_RELATIVE_PATH))
+  const temp = `${target}.tmp`
+  await writeFile(temp, JSON.stringify(status))
+  await rename(temp, target)
 }

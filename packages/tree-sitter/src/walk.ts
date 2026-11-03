@@ -12,6 +12,8 @@
 import { createHash } from 'node:crypto'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
+import { readParseCache } from './cache.ts'
+import type { CachedFile } from './cache.ts'
 import { createParser } from './grammar.ts'
 import { extractFile } from './extract.ts'
 import { loadGitignore, matchesGitignore } from './gitignore.ts'
@@ -65,6 +67,21 @@ export interface WalkConfig {
    * workspace-wide name wins" call resolution would pick between them arbitrarily.
    */
   readonly respectGitignore: boolean
+  /**
+   * Reuse the extraction a previous run cached for every file whose content is unchanged, instead of
+   * reading and parsing it again. The cache lives under `<projectRoot>/.codegraph/cache` and is
+   * written by the indexer after a run succeeds; a missing or unusable cache simply means every file
+   * is parsed.
+   */
+  readonly reuseParsedCache: boolean
+  /**
+   * How a cached file is confirmed unchanged before its extraction is reused. `'stat'` compares the
+   * modification time and size the cache recorded — no read at all, and enough for a watcher rebuild,
+   * whose changes always move mtime. `'hash'` reads the file and compares a SHA-256, which also
+   * catches a rewrite that preserved both mtime and size (a checkout restoring an old file) at the
+   * cost of the read it would otherwise save.
+   */
+  readonly cacheVerify: 'stat' | 'hash'
 }
 
 /** What the walk produced. */
@@ -75,6 +92,12 @@ export interface WalkResult {
   readonly filesSkipped: number
   /** Candidates skipped because they are generated output — see {@link WalkConfig.skipMinified}. */
   readonly filesMinified: number
+  /**
+   * Files whose extraction came from the parse cache instead of a fresh parse. These are still
+   * present in {@link files} and still indexed — the count says how much work the cache saved, not
+   * how much of the workspace was left out.
+   */
+  readonly filesReused: number
 }
 
 /** One candidate file the directory scan found, not yet parsed. */
@@ -128,45 +151,103 @@ async function discover(
   return { candidates, overflow }
 }
 
+/** What the walk decided to do with one candidate. */
+type CandidateOutcome =
+  | { readonly outcome: 'extracted'; readonly file: ExtractedFile; readonly reused: boolean }
+  | { readonly outcome: 'minified' }
+  | { readonly outcome: 'skipped' }
+
 /**
- * Parse one candidate.
+ * The walk's view of a file whose extraction came from the cache: the same record a fresh parse
+ * would have produced, with the extraction the cache matched.
+ *
+ * The modification time and size come from the stat taken just now, not from the cache entry, because
+ * the graph records them and `status` measures staleness as `file mtime > recorded mtime`. Under
+ * stat verification the two are equal by construction; under hash verification a file whose content
+ * matched but whose mtime was touched would otherwise be recorded with the old mtime and reported
+ * stale on every later status call, even though the graph describes its exact content.
+ * @param path - the candidate's project-relative path, which the cache entry does not store itself.
+ * @param cached - the entry this file's content matched.
+ * @param stats - the file's stat from this run.
+ * @returns the file as the resolver and graph writer expect it.
+ */
+function reusedFile(path: string, cached: CachedFile, stats: { readonly mtimeMs: number; readonly size: number }): ExtractedFile {
+  return {
+    path,
+    language: cached.language,
+    size: stats.size,
+    modifiedAt: stats.mtimeMs,
+    contentHash: cached.contentHash,
+    lineCount: cached.lineCount,
+    extraction: cached.extraction,
+  }
+}
+
+/**
+ * Parse one candidate, or reuse the extraction a previous run cached for it.
  * @param candidate - the file to parse.
  * @param config - the walk's bounds.
+ * @param cache - the previous run's extractions, keyed by project-relative path.
  * @param signal - aborts the parse.
- * @returns the extracted file, `'minified'` when it was skipped as generated output, or `undefined`
- *   when it is over {@link WalkConfig.maxFileBytes}.
+ * @returns the extracted file (and whether it came from the cache), `'minified'` when it was skipped
+ *   as generated output, or `'skipped'` when it is over {@link WalkConfig.maxFileBytes}.
  */
 async function parseCandidate(
   candidate: Candidate,
   config: WalkConfig,
+  cache: ReadonlyMap<string, CachedFile>,
   signal?: AbortSignal,
-): Promise<ExtractedFile | 'minified' | undefined> {
+): Promise<CandidateOutcome> {
   // Checked before the stat and read: a `.min.` name settles it with no I/O at all.
-  if (config.skipMinified && isMinifiedName(candidate.path)) return 'minified'
+  if (config.skipMinified && isMinifiedName(candidate.path)) return { outcome: 'minified' }
   const stats = await stat(candidate.absolute)
-  if (stats.size > config.maxFileBytes) return undefined
+  if (stats.size > config.maxFileBytes) return { outcome: 'skipped' }
   const spec = languageFor(posix.extname(candidate.path))
   /* v8 ignore next 2 -- discover() only ever produces a candidate whose extension resolved to a spec. */
-  if (spec === undefined) return undefined
-  const text = await readFile(candidate.absolute, 'utf8')
+  if (spec === undefined) return { outcome: 'skipped' }
+
+  // Verified before the parser is even created: this is the whole point of the cache — an unchanged
+  // file costs one stat when stat verification is configured, and nothing beyond that.
+  const cached = cache.get(candidate.path)
+  let text: string | undefined
+  if (cached !== undefined) {
+    if (config.cacheVerify === 'stat') {
+      if (cached.modifiedAt === stats.mtimeMs && cached.size === stats.size) {
+        return { outcome: 'extracted', file: reusedFile(candidate.path, cached, stats), reused: true }
+      }
+    } else {
+      // Content is the only thing this mode trusts, so the read it needs to verify is also the read
+      // the parse below would need — a miss here costs nothing extra.
+      text = await readFile(candidate.absolute, 'utf8')
+      if (createHash('sha256').update(text).digest('hex') === cached.contentHash) {
+        return { outcome: 'extracted', file: reusedFile(candidate.path, cached, stats), reused: true }
+      }
+    }
+  }
+
+  text ??= await readFile(candidate.absolute, 'utf8')
   const shape = measureText(text)
-  if (config.skipMinified && looksMinified(candidate.path, shape)) return 'minified'
+  if (config.skipMinified && looksMinified(candidate.path, shape)) return { outcome: 'minified' }
   const parser = await createParser(spec)
   try {
     signal?.throwIfAborted()
     const tree = parser.parse(text)
     /* v8 ignore next 2 -- createParser() always assigns a language before returning; parse() returns
      * null only when the parser has none. */
-    if (tree === null) return undefined
+    if (tree === null) return { outcome: 'skipped' }
     const extraction = extractFile(tree, spec)
     return {
-      path: candidate.path,
-      language: spec.language,
-      size: stats.size,
-      modifiedAt: stats.mtimeMs,
-      contentHash: createHash('sha256').update(text).digest('hex'),
-      lineCount: shape.lineCount,
-      extraction,
+      outcome: 'extracted',
+      reused: false,
+      file: {
+        path: candidate.path,
+        language: spec.language,
+        size: stats.size,
+        modifiedAt: stats.mtimeMs,
+        contentHash: createHash('sha256').update(text).digest('hex'),
+        lineCount: shape.lineCount,
+        extraction,
+      },
     }
   } finally {
     parser.delete()
@@ -198,22 +279,29 @@ async function mapWithConcurrency<T, R>(
 }
 
 /**
- * Walk `projectRoot` and parse every candidate file it finds.
+ * Walk `projectRoot` and parse every candidate file it finds — or reuse the extraction a previous
+ * run cached for it.
  * @param projectRoot - absolute path of the workspace to index.
  * @param config - the walk's bounds.
  * @param signal - aborts the walk.
- * @returns the parsed files and how many candidates were skipped (over size, or past `maxFiles`).
+ * @returns the parsed files, how many candidates were skipped (over size, or past `maxFiles`), and
+ *   how many files reused a cached extraction.
  */
 export async function walkAndExtract(projectRoot: string, config: WalkConfig, signal?: AbortSignal): Promise<WalkResult> {
   const { candidates, overflow } = await discover(projectRoot, config, signal)
-  const parsed = await mapWithConcurrency(candidates, config.concurrency, candidate => parseCandidate(candidate, config, signal))
+  const cache = config.reuseParsedCache ? await readParseCache(projectRoot) : new Map<string, CachedFile>()
+  const parsed = await mapWithConcurrency(candidates, config.concurrency, candidate => parseCandidate(candidate, config, cache, signal))
   const files: ExtractedFile[] = []
   let filesSkipped = overflow
   let filesMinified = 0
+  let filesReused = 0
   for (const result of parsed) {
-    if (result === undefined) filesSkipped++
-    else if (result === 'minified') filesMinified++
-    else files.push(result)
+    if (result.outcome === 'skipped') filesSkipped++
+    else if (result.outcome === 'minified') filesMinified++
+    else {
+      files.push(result.file)
+      if (result.reused) filesReused++
+    }
   }
-  return { files, filesSkipped, filesMinified }
+  return { files, filesSkipped, filesMinified, filesReused }
 }

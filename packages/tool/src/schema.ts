@@ -217,6 +217,15 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
       related: { type: 'array', required: true, items: RELATION },
       files: { type: 'array', required: true, items: EXPLORED_FILE },
     }),
+    // A background run answers before it has anything to report, so `index` is two members rather than
+    // one object with optional counts. The started member carries only what the call honestly knows —
+    // a job id — and the report member keeps every count required, so a renderer never has to invent a
+    // zero for a report that has not been written yet: "0 files indexed" and "not indexed yet" are
+    // different answers and must stay distinguishable.
+    member('index', {
+      status: { type: 'string', required: true, const: 'started' },
+      job_id: { type: 'string', required: true },
+    }),
     member('index', {
       files_indexed: { type: 'integer', required: true },
       files_skipped: { type: 'integer', required: true },

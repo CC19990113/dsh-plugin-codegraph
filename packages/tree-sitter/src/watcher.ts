@@ -1,70 +1,113 @@
 /**
- * File-watch-driven reindexing: debounce a workspace's file-change events into a bounded number of
- * `sync` calls, using a per-platform strategy chosen to keep the open-descriptor / kernel-watch cost
- * BOUNDED rather than growing with the number of files:
+ * File-watch-driven reindexing over the harness filesystem seam (`ctx.fs`): turn a workspace's
+ * file-change notifications into a bounded number of `sync` calls, using ONE WATCH PER DIRECTORY.
  *
- *  - macOS / Windows: a SINGLE recursive `fs.watch(root, {recursive:true})`. This is the fix for the
- *    macOS file-table exhaustion a reference implementation hit watching one file descriptor per
- *    watched file (tens of thousands of REG fds), which exhausted `kern.maxfiles` and crashed
- *    unrelated processes system-wide (see NOTES.local.md). One recursive stream costs O(1)
- *    descriptors no matter how large the tree.
- *  - Linux: recursive `fs.watch` is unsupported, so one inotify watch is installed per (non-excluded)
- *    directory — O(directories), NOT O(files). New directories are picked up dynamically as events
- *    reveal them, and {@link WatchConfig.maxWatchedDirectories} bounds inotify usage on pathological
- *    monorepos.
+ * Two facts about the seam decide this module's shape. `watch()` reports a directory's DIRECT
+ * entries only (`depth: 0`, so a nested change never arrives on an ancestor's watch), and it never
+ * names the path that changed:
  *
- * `sync` is always a full rebuild in this version: the `paths` a debounce window collected are passed
- * through but never consulted by the caller supplied here (`runIndex` reruns `walkAndExtract` over the
- * whole tree regardless). That keeps this file's only new correctness surface confined to "when do we
- * call sync", not "what does sync do with a subset of files" — the latter is deliberately deferred
- * until a real incremental reindex is built (see NOTES.local.md). Because sync is always full, a
- * directory delete or a `mkdir` immediately followed by writes inside it never needs special-casing:
- * the parent directory's own create event is enough to schedule a rebuild that discovers (or removes)
- * everything under the path from scratch, watched or not.
+ *  - Coverage, therefore, comes from watching every in-scope directory: O(directories) watches, never
+ *    O(files). A directory created after startup is picked up by the same re-listing that a parent's
+ *    event triggers, so the watch tree grows with the workspace instead of freezing at `start()`.
+ *  - A notification is a directory-level invalidation with no filename, so attributing it to paths
+ *    means re-listing that directory and diffing it against the previous listing, using the
+ *    `version`/`size` the listing itself carries. That diff is what keeps a rebuild from being
+ *    scheduled by a change this indexer excludes — notably a change to `.codegraph`, which is what
+ *    stops the watcher from rebuilding forever off its own graph write.
+ *
+ * `sync` is still always a full rebuild: the paths a debounce window collected are passed through but
+ * never consulted by the caller supplied here (see `runSync` in `./index.ts`). That keeps this file's
+ * correctness surface confined to "when do we call sync", not "what does sync do with a subset of
+ * files".
+ *
+ * A change landing between the baseline index that starts the watcher and the listing that arms its
+ * root is in no snapshot and so produces no notification. That window is one directory listing wide,
+ * and the next attributable change — or the next explicit index — covers whatever it missed.
+ *
+ * Resource discipline is explicit. Every watch's disposer is retained and invoked on `stop()` or
+ * permanent degradation, and a watch whose initialization finishes after its watcher was stopped is
+ * closed immediately instead of being adopted — a late init can never leak a live watch. A
+ * generation counter invalidates every in-flight async step of a previous start(), so a restart
+ * cannot inherit state from the session it replaced. {@link WatchConfig.maxWatchedDirectories}
+ * bounds the number of open watches, and reaching it degrades the whole watcher rather than silently
+ * covering only part of the tree.
  * @module dsh-plugin-codegraph-tree-sitter/watcher
  */
 
-import { readdir, stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
-import * as fs from 'node:fs'
 import { loadGitignore } from './gitignore.ts'
 import type { GitignoreRule } from './gitignore.ts'
 import { isExcluded } from './walk.ts'
 
-/** One raw watch event, in the shape `node:fs`'s `fs.watch` listener callback receives. */
-export type WatchEventListener = (eventType: 'rename' | 'change', filename: string | null) => void
+/**
+ * One resolved filesystem target — the opaque identity `ctx.fs` hands back and every other fs call
+ * takes. Only `targetKey` is read here: the module never parses it, and a remote backend's key is
+ * as valid as a local path.
+ */
+export interface WatchTarget {
+  /** Opaque backend identity of the target. */
+  readonly targetKey: string
+}
 
-/** A watch error, in the shape `fs.watch`'s `'error'` event delivers. */
-export type WatchErrorListener = (error: unknown) => void
-
-/** A live OS-level watch, closeable independent of anything else this module tracks. */
-export interface WatchHandle {
-  close(): void
+/** One direct child of a listed directory, as `ctx.fs.listDir` reports it. */
+export interface WatchDirEntry {
+  /** Basename of the child inside the listed directory. */
+  readonly name: string
+  /** Whether the child is a regular file, a directory, or something else. */
+  readonly type: 'file' | 'directory' | 'other'
+  /** Resolved child target, usable for a follow-up `watch`/`listDir`. */
+  readonly target: WatchTarget
+  /**
+   * Opaque freshness token, when the backend can report one cheaply. Opting into it is what makes a
+   * same-size content change visible to the change diff below, so a backend that omits it can still
+   * attribute creations, removals, and size-changing rewrites — but not a rewrite that preserved the
+   * size, which is then covered by the next attributable change or by the next explicit index.
+   */
+  readonly version?: string
+  /** Byte size of a regular file, when the backend can report one. */
+  readonly size?: number
 }
 
 /**
- * Indirection over `fs.watch` so tests can inject a fake that emits events/errors deterministically —
- * `fs.watch` is a non-configurable module property that can't be spied, and provoking real EMFILE/
- * ENOSPC exhaustion in a test run isn't reliable. Production always uses {@link nodeWatch}.
+ * The narrow slice of `ctx.fs` this module consumes.
+ *
+ * Deliberately structural rather than an import of the host's `FileSystem`: the tree-sitter package
+ * declares no dependency on `@deepseek-ai/dsh-fs`, and `watch` only exists from host 0.2 onward,
+ * while the package's supported peer range starts earlier. Naming the three calls it uses — resolve a
+ * directory, list it, observe it — keeps this module compilable and loadable across that range, and
+ * keeps the port small enough that a test double is a few lines.
  */
-export type WatchPrimitive = (
-  path: string,
-  options: { readonly recursive: boolean },
-  onEvent: WatchEventListener,
-  onError: WatchErrorListener,
-) => WatchHandle
-
-/** The real `fs.watch`-backed primitive. */
-export const nodeWatch: WatchPrimitive = (path, options, onEvent, onError) => {
-  const watcher = fs.watch(path, { recursive: options.recursive, persistent: true }, onEvent)
-  watcher.on('error', onError)
-  return { close: () => watcher.close() }
+export interface WatchFileSystem {
+  /**
+   * Resolve a path into a stable backend target.
+   * @param path - the path to resolve; absolute paths are what this module passes.
+   * @param opts - optional resolution base and cancellation signal.
+   * @returns the resolved target.
+   */
+  resolve(path: string, opts?: { readonly cwd?: string; readonly signal?: AbortSignal }): Promise<WatchTarget>
+  /**
+   * List one directory's direct children.
+   * @param target - the resolved directory target.
+   * @param signal - aborts the listing.
+   * @returns one entry per direct child.
+   */
+  listDir(target: WatchTarget, signal?: AbortSignal): Promise<readonly WatchDirEntry[]>
+  /**
+   * Observe one directory's direct entries.
+   * @param target - the resolved directory target.
+   * @param changed - invalidation callback, called with no argument for a change and with an error
+   *   when the backend loses the watch; initialization failures are reported by rejecting instead.
+   * @param signal - cancels initialization only; an initialized watch is released through the
+   *   returned disposer.
+   * @returns the disposer that releases the watch.
+   */
+  watch(target: WatchTarget, changed: (error?: Error) => void, signal: AbortSignal): Promise<() => Promise<void>>
 }
 
 /** Why live watching was permanently disabled for this watcher instance. */
 export type DegradeReason =
   | { readonly code: 'RESOURCE_EXHAUSTED'; readonly cause: NodeJS.ErrnoException }
   | { readonly code: 'WATCH_LIMIT_EXCEEDED' }
+  | { readonly code: 'WATCH_UNAVAILABLE'; readonly cause: unknown }
   | { readonly code: 'SYNC_FAILURE_LIMIT'; readonly cause: unknown }
 
 /** Error codes that mean "the OS ran out of watch resources", across the platforms that report them. */
@@ -83,11 +126,11 @@ export interface WatchConfig {
   readonly respectGitignore: boolean
   /** Milliseconds of quiet after the last change before `sync` runs. */
   readonly debounceMs: number
-  /** Hard cap on directories watched individually (Linux only); exceeding it degrades the watcher. */
+  /** Hard cap on directories watched individually; exceeding it degrades the watcher. */
   readonly maxWatchedDirectories: number
   /**
-   * Run one reindex. `paths` are the project-relative paths a debounce window collected, offered for
-   * a future incremental sync to consult; this version's caller always ignores them and rebuilds the
+   * Run one reindex. `paths` are the project-relative paths of the direct entries whose change the
+   * per-directory watch could attribute; this version's caller always ignores them and rebuilds the
    * whole graph.
    */
   readonly sync: (paths?: readonly string[]) => Promise<{ filesChanged: number; durationMs: number }>
@@ -103,28 +146,76 @@ export interface Watcher {
   stop(): void
   /** Whether live watching has permanently degraded (until the next {@link start}). */
   isDegraded(): boolean
-  /** Project-relative paths seen since the last debounce window fired a sync. */
+  /**
+   * Project-relative paths of the entries whose change is queued for the next sync, collected since
+   * the last debounce window fired one. A path names a direct entry of a watched directory — file or
+   * directory — because that is the finest grain the seam can attribute a change to.
+   */
   getPendingFiles(): readonly string[]
+}
+
+/** What the previous listing of one directory recorded about each entry, for the change diff. */
+interface EntryStamp {
+  readonly type: WatchDirEntry['type']
+  readonly version: string | undefined
+  readonly size: number | undefined
 }
 
 /**
  * Build a watcher over one workspace root. Nothing runs until {@link Watcher.start} is called.
  * @param config - scope, timing, and the sync callback to drive.
- * @param primitive - the watch primitive to use; defaults to the real `fs.watch`.
+ * @param fs - the filesystem seam to resolve, enumerate, and watch through.
+ * @returns the watcher; every resource it acquires is released by {@link Watcher.stop}.
  */
-export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = nodeWatch): Watcher {
+export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher {
   const excluded = new Set(config.exclude)
   let gitignoreRules: readonly GitignoreRule[] = []
+  /** Project-relative paths of the directories currently watched. */
   const watchedDirs = new Set<string>()
-  const handles: WatchHandle[] = []
+  /** One disposer per live watch, invoked exactly once on teardown. */
+  const disposers: (() => Promise<void>)[] = []
+  /** The last listing of each watched directory, keyed by project-relative path. */
+  const snapshots = new Map<string, Map<string, EntryStamp>>()
   const pendingPaths = new Set<string>()
+  /** Directories whose change-triggered re-listing is currently in flight. */
+  const refreshing = new Set<string>()
+  /** Directories that reported another change while their re-listing was in flight. */
+  const dirtyDirs = new Set<string>()
 
   let running = false
   let degraded = false
+  /** Bumped by every teardown, so async work from a previous start() can recognize itself as stale. */
+  let generation = 0
+  let controller: AbortController | undefined
   let debounceTimer: NodeJS.Timeout | undefined
   let syncing = false
   let rerunNeeded = false
   let syncFailureCount = 0
+
+  /**
+   * Whether async work started under `gen` still belongs to a live watching session. Everything
+   * that resumes after an `await` checks this before touching shared state: a stop, a degrade, or a
+   * restart all invalidate the generation the work captured.
+   * @param gen - the generation the caller started under.
+   * @returns whether that generation is still the live, non-degraded one.
+   */
+  function live(gen: number): boolean {
+    return running && !degraded && gen === generation
+  }
+
+  /**
+   * Release one watch, swallowing both ways a backend's close can fail. A watcher is being torn down
+   * whenever this runs; there is no caller to report to and nothing to recover, and an unhandled
+   * rejection here would crash a process that was only shutting a watcher down.
+   * @param dispose - the disposer the backend returned.
+   */
+  function closeQuietly(dispose: () => Promise<void>): void {
+    try {
+      void dispose().catch(() => {})
+    } catch {
+      // A backend whose close throws synchronously instead of rejecting is released all the same.
+    }
+  }
 
   /** One-way: once degraded, only a fresh `start()` clears it. */
   function degrade(reason: DegradeReason): void {
@@ -134,31 +225,75 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
     config.onDegraded?.(reason)
   }
 
-  /** Close every live watch and clear the debounce timer, without touching `degraded`. */
+  /** Close every live watch and clear in-flight bookkeeping, without touching `degraded`. */
   function teardown(): void {
     running = false
-    for (const handle of handles.splice(0)) handle.close()
+    generation += 1
+    controller?.abort()
+    controller = undefined
+    for (const dispose of disposers.splice(0)) closeQuietly(dispose)
     watchedDirs.clear()
+    snapshots.clear()
+    dirtyDirs.clear()
+    // Cleared even though the re-listing that owns this marker still holds it: that work belongs to
+    // a dead generation and will drop out at its next `live()` check, and leaving the marker behind
+    // would make a restarted watcher treat the directory as perpetually mid-refresh.
+    refreshing.clear()
     if (debounceTimer !== undefined) {
       clearTimeout(debounceTimer)
       debounceTimer = undefined
     }
   }
 
+  /**
+   * Read the `code` a watch failure carries, if it carries one.
+   * @param error - the rejection reason to inspect.
+   * @returns the code as a string, or undefined when there is none.
+   */
   function errorCode(error: unknown): string | undefined {
     return typeof error === 'object' && error !== null && 'code' in error
-      ? String((error as NodeJS.ErrnoException).code)
+      ? String((error as { readonly code: unknown }).code)
       : undefined
   }
 
-  function handleWatchError(error: unknown): void {
-    if (!running || degraded) return
+  /**
+   * Whether a failure means the OS ran out of watch resources.
+   * @param error - the rejection reason to inspect.
+   * @returns whether its code is one of the resource-exhaustion codes.
+   */
+  function resourceExhausted(error: unknown): boolean {
     const code = errorCode(error)
-    if (code !== undefined && RESOURCE_EXHAUSTION_CODES.has(code)) {
+    return code !== undefined && RESOURCE_EXHAUSTION_CODES.has(code)
+  }
+
+  /**
+   * Degrade for a watch that never initialized. Unlike an error reported later by a live watch, a
+   * failed initialization leaves that directory — and everything under it — uncovered, and silent
+   * partial coverage is precisely what the caller cannot recover from on its own.
+   * @param error - the rejection reason from `fs.watch`.
+   */
+  function handleInstallFailure(error: unknown): void {
+    if (resourceExhausted(error)) {
       degrade({ code: 'RESOURCE_EXHAUSTED', cause: error as NodeJS.ErrnoException })
+      return
     }
-    // An error this watcher doesn't recognize as resource exhaustion is left to the OS-level watch's
-    // own reporting; it doesn't by itself prove live watching can no longer make progress.
+    degrade({ code: 'WATCH_UNAVAILABLE', cause: error })
+  }
+
+  /**
+   * Degrade for an error an already-running watch reported. Only resource exhaustion and the seam's
+   * own "this provider cannot watch" code prove that live watching can no longer make progress; any
+   * other error is the backend's own report about one watch and leaves the rest working.
+   * @param error - the error the backend passed to the change callback.
+   * @param gen - the generation of the watch that reported it.
+   */
+  function handleWatchError(error: unknown, gen: number): void {
+    if (!live(gen)) return
+    if (resourceExhausted(error)) {
+      degrade({ code: 'RESOURCE_EXHAUSTED', cause: error as NodeJS.ErrnoException })
+    } else if (errorCode(error) === 'FS_IO_ERROR') {
+      degrade({ code: 'WATCH_UNAVAILABLE', cause: error })
+    }
   }
 
   function scheduleSync(): void {
@@ -168,7 +303,7 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
 
   function runSync(): void {
     // Also called directly (not just as the timer callback) when a queued rerun fires immediately;
-    // clear any timer a later event armed in the meantime so it can't fire a redundant, empty sync.
+    // clear any timer a later change armed in the meantime so it can't fire a redundant, empty sync.
     if (debounceTimer !== undefined) {
       clearTimeout(debounceTimer)
       debounceTimer = undefined
@@ -182,11 +317,10 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
     const batch = [...pendingPaths]
     pendingPaths.clear()
     syncing = true
-    // `batch` is never actually empty here: the only two ways into this function are the debounce
-    // timer (armed exclusively by handleChange(), right after it adds to pendingPaths) and a queued
-    // rerun (only set when handleChange() re-armed the timer while a sync was already in flight,
-    // which itself added to pendingPaths). The `undefined` branch is API contract, not reachable code.
-    /* v8 ignore next */
+    // `batch` is empty when the change that armed this timer could not be attributed to any entry —
+    // either the re-listing failed, or it found nothing in scope while the backend cannot report a
+    // version for an in-place modification. The rebuild is still what the caller asked for; only the
+    // path list is missing.
     config.sync(batch.length === 0 ? undefined : batch)
       .then(() => {
         syncFailureCount = 0
@@ -211,124 +345,210 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
   }
 
   /**
-   * Whether one path segment, already known to sit inside in-scope ancestors, is itself in scope.
-   * Used while recursing the initial watch tree, where every ancestor was already checked on the way
-   * down — checking only the leaf segment here is enough, and cheaper than re-testing the whole path.
+   * Whether a listed entry is unchanged relative to the previous listing.
+   *
+   * `version` is preferred when both listings have one: it is the backend's own freshness token, so a
+   * content change that preserved size and mtime still shows up. A backend that omits it falls back
+   * to size, which catches truncation and growth but not a same-size rewrite — that case is left to
+   * the next change the backend can describe.
+   * @param previous - the stamp recorded for this entry name on the previous listing, if any.
+   * @param entry - the entry from the listing taken now.
+   * @returns whether the entry looks identical to the one recorded before.
    */
-  function segmentInScope(name: string, relativePath: string, isDirectory: boolean): boolean {
-    return !isExcluded(name, relativePath, isDirectory, excluded, gitignoreRules)
+  function sameEntry(previous: EntryStamp | undefined, entry: WatchDirEntry): boolean {
+    if (previous === undefined) return false
+    if (previous.type !== entry.type) return false
+    if (previous.version !== undefined && entry.version !== undefined) return previous.version === entry.version
+    return previous.size === entry.size
   }
 
   /**
-   * Whether a path an `fs.watch` event named — possibly several segments deep, with no guarantee any
-   * ancestor was checked first (the recursive macOS/Windows watch reports the whole subtree in one
-   * stream) — is in scope. Walks every prefix from the root down, exactly like the initial directory
-   * walk would if it descended this far, so `node_modules/dep/index.js` is excluded by its
-   * `node_modules` ancestor even though the leaf name itself is unremarkable.
+   * Re-list one directory: watch any new in-scope subdirectory, and report which direct entries
+   * changed since the previous listing of it.
+   *
+   * The first listing of a directory records a snapshot and reports no changes: everything it shows
+   * was already there when the baseline index ran, so reporting it would only schedule a redundant
+   * rebuild.
+   * @param relativePath - the directory's project-relative path (`''` is the root).
+   * @param target - the directory's resolved target.
+   * @param gen - the generation this re-listing belongs to.
+   * @param signal - cancels the listing and any watch it initializes.
+   * @returns the project-relative paths that changed, or undefined when the listing itself failed and
+   *   the change therefore cannot be attributed at all.
    */
-  function pathInScope(relativePath: string, leafIsDirectory: boolean): boolean {
-    const segments = relativePath.split('/')
-    let prefix = ''
-    for (const [index, name] of segments.entries()) {
-      prefix = index === 0 ? name : `${prefix}/${name}`
-      const isDirectory = index < segments.length - 1 || leafIsDirectory
-      if (!segmentInScope(name, prefix, isDirectory)) return false
-    }
-    return true
-  }
-
-  /**
-   * Record one in-scope change and arm the debounce. Also picks up a directory created after startup
-   * so Linux's per-directory watch tree grows with the workspace instead of only covering what existed
-   * at `start()`.
-   */
-  function handleChange(relativePath: string): void {
-    if (!running || degraded) return
-    if (relativePath === '') return
-    if (!pathInScope(relativePath, false)) return
-    pendingPaths.add(relativePath)
-    scheduleSync()
-    if (process.platform !== 'darwin' && process.platform !== 'win32' && !watchedDirs.has(relativePath)) {
-      // Fire-and-forget: a directory that turns out not to exist (a file event, or something already
-      // removed again) simply fails the stat and watchDirectory() is never called.
-      void maybeWatchNewDirectory(relativePath)
-    }
-  }
-
-  async function maybeWatchNewDirectory(relativePath: string): Promise<void> {
-    let isDirectory: boolean
+  async function listAndWatchChildren(
+    relativePath: string,
+    target: WatchTarget,
+    gen: number,
+    signal: AbortSignal,
+  ): Promise<string[] | undefined> {
+    let entries: readonly WatchDirEntry[]
     try {
-      isDirectory = (await stat(join(config.root, relativePath))).isDirectory()
+      entries = await fs.listDir(target, signal)
     } catch {
+      // The directory vanished, or the backend refused the listing. Its own watch still reports its
+      // direct entries, so the caller rebuilds rather than assuming nothing changed.
+      return undefined
+    }
+    const previous = snapshots.get(relativePath)
+    const next = new Map<string, EntryStamp>()
+    const changed: string[] = []
+    for (const entry of entries) {
+      const childPath = relativePath === '' ? entry.name : `${relativePath}/${entry.name}`
+      const isDirectory = entry.type === 'directory'
+      // Same predicate, same arguments, that the walk applies to the same entry: `exclude` plus the
+      // project's `.gitignore`, so what is watched and what is indexed cannot drift apart.
+      if (isExcluded(entry.name, childPath, isDirectory, excluded, gitignoreRules)) continue
+      next.set(entry.name, { type: entry.type, version: entry.version, size: entry.size })
+      if (previous !== undefined && !sameEntry(previous.get(entry.name), entry)) changed.push(childPath)
+      if (isDirectory) await watchDirectory(childPath, entry.target, gen, signal)
+    }
+    if (previous !== undefined) {
+      for (const name of previous.keys()) {
+        if (next.has(name)) continue
+        changed.push(relativePath === '' ? name : `${relativePath}/${name}`)
+      }
+    }
+    // A teardown mid-listing means this snapshot describes a session that no longer exists; keeping
+    // it would let the next session diff against stale state.
+    if (!live(gen)) return undefined
+    snapshots.set(relativePath, next)
+    return changed
+  }
+
+  /**
+   * React to one directory reporting a change: re-list it, record what changed, and arm the debounce.
+   *
+   * The parent directory's reported change and its own listing are both async, and a burst of writes
+   * produces many notifications for one directory; re-listing for each of them would read the same
+   * entries repeatedly. A per-directory "in flight" marker coalesces the burst into one listing plus
+   * at most one follow-up listing for whatever arrived while the first was reading.
+   * @param relativePath - the directory's project-relative path (`''` is the root).
+   * @param target - the directory's resolved target.
+   * @param gen - the generation this re-listing belongs to.
+   * @param signal - cancels the work.
+   */
+  async function refreshDirectory(relativePath: string, target: WatchTarget, gen: number, signal: AbortSignal): Promise<void> {
+    try {
+      for (;;) {
+        dirtyDirs.delete(relativePath)
+        const changed = await listAndWatchChildren(relativePath, target, gen, signal)
+        if (!live(gen)) return
+        if (changed === undefined) {
+          // Nothing could be attributed, so the change itself is the only fact available: rebuild.
+          scheduleSync()
+        } else if (changed.length > 0) {
+          for (const path of changed) pendingPaths.add(path)
+          scheduleSync()
+        }
+        // An empty diff schedules nothing on purpose: that is how a change to an excluded entry —
+        // `.codegraph`'s own writes included — stops here instead of retriggering the rebuild that
+        // wrote it.
+        if (!dirtyDirs.has(relativePath)) return
+      }
+    } finally {
+      refreshing.delete(relativePath)
+    }
+  }
+
+  /**
+   * Handle one notification from a directory's watch.
+   * @param relativePath - the watched directory's project-relative path.
+   * @param target - the watched directory's resolved target.
+   * @param gen - the generation of the watch that reported it.
+   * @param signal - cancels the work this notification starts.
+   * @param error - the backend's error report, when the notification is not a change.
+   */
+  function onDirectoryEvent(
+    relativePath: string,
+    target: WatchTarget,
+    gen: number,
+    signal: AbortSignal,
+    error?: Error,
+  ): void {
+    if (error !== undefined) {
+      handleWatchError(error, gen)
       return
     }
-    // `running`/`degraded` are re-checked inside watchDirectory() itself; no need to duplicate that
-    // check here too.
-    if (!isDirectory || watchedDirs.has(relativePath) || !pathInScope(relativePath, true)) return
-    await watchDirectory(relativePath)
-  }
-
-  /** Normalize an `fs.watch` filename (native separators, possibly nested under `recursive`) to posix. */
-  function toRelativePosix(filename: string): string {
-    return filename.split(sep).join('/')
-  }
-
-  function startRecursive(): void {
-    try {
-      const handle = primitive(config.root, { recursive: true }, (_eventType, filename) => {
-        if (filename === null) return
-        handleChange(toRelativePosix(filename))
-      }, handleWatchError)
-      handles.push(handle)
-    } catch (error) {
-      handleWatchError(error)
-      // A platform that claims to support recursive watch but rejects this call outright (not just an
-      // ENOSYS at the fs.watch layer, which never reaches here) has nothing more this watcher can try.
+    if (!live(gen)) return
+    if (refreshing.has(relativePath)) {
+      dirtyDirs.add(relativePath)
+      return
     }
+    refreshing.add(relativePath)
+    void refreshDirectory(relativePath, target, gen, signal)
   }
 
   /**
-   * Install one inotify watch on `relativePath` (project-relative; `''` is the root) and recurse into
-   * its non-excluded subdirectories. Degrades the whole watcher, rather than silently covering only
-   * part of the tree, once {@link WatchConfig.maxWatchedDirectories} is reached.
+   * Install one watch on `relativePath` and recurse into its in-scope subdirectories.
+   *
+   * Degrades the whole watcher, rather than silently covering only part of the tree, once
+   * {@link WatchConfig.maxWatchedDirectories} is reached.
+   * @param relativePath - the directory's project-relative path (`''` is the root).
+   * @param target - the directory's resolved target.
+   * @param gen - the generation this watch belongs to.
+   * @param signal - cancels initialization.
    */
-  async function watchDirectory(relativePath: string): Promise<void> {
-    if (!running || degraded || watchedDirs.has(relativePath)) return
+  async function watchDirectory(relativePath: string, target: WatchTarget, gen: number, signal: AbortSignal): Promise<void> {
+    if (!live(gen) || watchedDirs.has(relativePath)) return
     if (watchedDirs.size >= config.maxWatchedDirectories) {
       degrade({ code: 'WATCH_LIMIT_EXCEEDED' })
       return
     }
-    const absolute = join(config.root, relativePath)
-    let handle: WatchHandle
-    try {
-      handle = primitive(absolute, { recursive: false }, (_eventType, filename) => {
-        if (filename === null) return
-        const childPosix = toRelativePosix(filename)
-        handleChange(relativePath === '' ? childPosix : `${relativePath}/${childPosix}`)
-      }, handleWatchError)
-    } catch (error) {
-      handleWatchError(error)
-      return
-    }
-    handles.push(handle)
+    // Reserved before the await below, so two notifications for the same new directory cannot
+    // initialize two watches on it.
     watchedDirs.add(relativePath)
-
-    let entries: import('node:fs').Dirent[]
+    let dispose: () => Promise<void>
     try {
-      entries = await readdir(absolute, { withFileTypes: true })
-    } catch {
-      // The directory disappeared between being discovered and being listed; its own watch (or the
-      // parent's) already reported enough to trigger a sync that reconciles this.
+      dispose = await fs.watch(target, (error?: Error) => onDirectoryEvent(relativePath, target, gen, signal, error), signal)
+    } catch (error) {
+      // A failure that lands after teardown is a canceled initialization, not evidence about the
+      // backend — teardown already cleared the reservation, so there is nothing to undo here.
+      if (!live(gen)) return
+      watchedDirs.delete(relativePath)
+      handleInstallFailure(error)
       return
     }
-    for (const entry of entries) {
-      // Not re-checking `running`/`degraded` here: a stop/degrade mid-loop just means the recursive
-      // watchDirectory() call below no-ops immediately (same check, at the top of that call).
-      if (!entry.isDirectory()) continue
-      const childPath = relativePath === '' ? entry.name : `${relativePath}/${entry.name}`
-      if (!segmentInScope(entry.name, childPath, true)) continue
-      await watchDirectory(childPath)
+    if (!live(gen)) {
+      // Initialization finished after the watcher moved on. Adopting the watch would leak it into a
+      // session that never asked for it, so release it here instead.
+      closeQuietly(dispose)
+      return
     }
+    disposers.push(dispose)
+    await listAndWatchChildren(relativePath, target, gen, signal)
+  }
+
+  /**
+   * Resolve the workspace root, or report that there is nothing to watch.
+   * @param gen - the generation this resolution belongs to.
+   * @param signal - cancels the resolution.
+   * @returns the resolved root target, or undefined when it cannot be resolved (or the session ended
+   *   while resolving it).
+   */
+  async function resolveRoot(gen: number, signal: AbortSignal): Promise<WatchTarget | undefined> {
+    try {
+      const target = await fs.resolve(config.root, { signal })
+      return live(gen) ? target : undefined
+    } catch {
+      // A root that cannot be resolved is not a watch failure to report: the index that started this
+      // watcher already proved the root exists, so this is a race (the workspace moved) that the next
+      // successful index() call will retry.
+      return undefined
+    }
+  }
+
+  /**
+   * Arm the whole watch tree for this session: read the exclusion list, resolve the root, then recurse.
+   * @param gen - the generation this session runs under.
+   * @param signal - cancels the work.
+   */
+  async function startWatching(gen: number, signal: AbortSignal): Promise<void> {
+    gitignoreRules = config.respectGitignore ? await loadGitignore(config.root) : []
+    if (!live(gen)) return
+    const root = await resolveRoot(gen, signal)
+    if (root === undefined) return
+    await watchDirectory('', root, gen, signal)
   }
 
   return {
@@ -338,26 +558,10 @@ export function createWatcher(config: WatchConfig, primitive: WatchPrimitive = n
       degraded = false
       syncFailureCount = 0
       pendingPaths.clear()
-      if (process.platform === 'darwin' || process.platform === 'win32') {
-        // Started immediately, unlike the per-directory branch below, because the recursive `fs.watch`
-        // call itself must stay synchronous within start() — nothing here should make callers await a
-        // gitignore read just to get a watch installed. `gitignoreRules` starts empty and is filled in
-        // once the read resolves; every event that arrives before then is a startup-window race no
-        // different in kind from the FSEvents kernel-side warm-up delay already documented above, and
-        // resolves in the time to read one small file, not the time a human takes to edit one.
-        startRecursive()
-        if (config.respectGitignore) {
-          void loadGitignore(config.root).then(rules => {
-            if (running) gitignoreRules = rules
-          })
-        }
-        return
-      }
-      void (async () => {
-        gitignoreRules = config.respectGitignore ? await loadGitignore(config.root) : []
-        if (!running) return
-        await watchDirectory('')
-      })()
+      const abort = new AbortController()
+      controller = abort
+      const gen = generation
+      void startWatching(gen, abort.signal)
     },
     stop() {
       teardown()

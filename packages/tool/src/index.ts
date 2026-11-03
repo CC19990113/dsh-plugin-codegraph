@@ -21,7 +21,7 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { assertNever, CodegraphError } from 'dsh-plugin-codegraph-service'
-import type { CodegraphNode, CodegraphRelation } from 'dsh-plugin-codegraph-service'
+import type { CodegraphIndexReport, CodegraphNode, CodegraphRelation } from 'dsh-plugin-codegraph-service'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -31,9 +31,10 @@ import { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 import type { ProjectionLimits, SymbolView } from './projection.ts'
 import { renderCodegraph } from './render.ts'
 import { CODEGRAPH_INDEX_PARAMETERS, CODEGRAPH_OUTPUT_SCHEMA, CODEGRAPH_PARAMETERS } from './schema.ts'
-import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue } from './schema.ts'
+import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue, CodegraphValueFor } from './schema.ts'
 import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
+import { indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
 
 export {
   CODEGRAPH_INDEX_PARAMETERS,
@@ -50,6 +51,7 @@ export { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms }
 export { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 export { renderCodegraph } from './render.ts'
 export { readSlice } from './source.ts'
+export { formatIndexedAt, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
 
 /** Cordis plugin name for loader diagnostics. */
 export const name = 'tool-codegraph'
@@ -63,9 +65,16 @@ export const DEFAULT_CODEGRAPH_TOOL_TIMEOUT_MS = 30_000
 /** Default timeout budget (ms) for the `codegraph_index` tool. Indexing a monorepo is a different order of work than a query. */
 export const DEFAULT_CODEGRAPH_INDEX_TIMEOUT_MS = 300_000
 
+/**
+ * Files a workspace's last index must have covered before `backgroundIndex: 'auto'` hands the next run
+ * to a background job. A thousand files is roughly the point where a full parse stops fitting in a
+ * single tool call's timeout, which is the only reason the job exists.
+ */
+export const DEFAULT_BACKGROUND_INDEX_THRESHOLD = 1000
+
 /** The stable system-prompt guidance positioning the code graph against search and read. */
 export const CODEGRAPH_PROMPT_TEXT =
-  'Use codegraph for structural questions about code: where a symbol is declared, what calls it, what it calls, what a change to it reaches, and how one symbol reaches another. It answers from a pre-built index, so it is both faster and more precise than grepping for a name, which also matches comments, strings, and unrelated identifiers. Use search/read instead for literal text, and when codegraph reports no index for a workspace. When status reports no index, call codegraph_index once to build one — it runs on its own, longer timeout budget than a query — then retry. Results reflect the last time the workspace was indexed; a declaration added since then is absent.'
+  'Use codegraph for structural questions about code: where a symbol is declared, what calls it, what it calls, what a change to it reaches, and how one symbol reaches another. It answers from a pre-built index, so it is both faster and more precise than grepping for a name, which also matches comments, strings, and unrelated identifiers. Use search/read instead for literal text, and when codegraph reports no index for a workspace. When status reports no index, call codegraph_index once to build one — it runs on its own, longer timeout budget than a query. In a large workspace that run becomes a background job instead of blocking: the call returns a job id, and job_output reads its report. Re-indexing reuses the previous parse for every file that did not change, so repeating it after an edit is cheap. Results reflect the last time the workspace was indexed; a declaration added since then is absent.'
 
 /** Plugin configuration: the defaults and caps the seam requires the consumer to own. */
 export interface Config {
@@ -95,6 +104,14 @@ export interface Config {
   timeoutMs?: number
   /** Tool-call timeout budget in ms for the `codegraph_index` tool (default 300000). */
   indexTimeoutMs?: number
+  /**
+   * Whether an indexing run moves to the host's background-job registry: `'auto'` (default) decides by
+   * the workspace's last indexed file count, `true` always uses a job when the host offers one, and
+   * `false` always runs synchronously inside the tool call.
+   */
+  backgroundIndex?: 'auto' | boolean
+  /** Files the last index must have covered before `'auto'` uses a job (default 1000). */
+  backgroundIndexThreshold?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -111,6 +128,8 @@ export const Config: z<Config> = z.object({
   maxContextTerms: z.number().default(6),
   timeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_CODEGRAPH_TOOL_TIMEOUT_MS),
   indexTimeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_CODEGRAPH_INDEX_TIMEOUT_MS),
+  backgroundIndex: z.union([z.const('auto'), z.boolean()]).default('auto'),
+  backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
 })
 
 type ResolvedConfig = Required<Config>
@@ -179,8 +198,15 @@ export function apply(ctx: Context, config: Config): void {
   }
   assertTimer('timeoutMs', resolved.timeoutMs)
   assertTimer('indexTimeoutMs', resolved.indexTimeoutMs)
+  assertPositiveInteger('backgroundIndexThreshold', resolved.backgroundIndexThreshold)
 
-  ctx.systemPrompt.section({ name: 'tool:codegraph', order: 111, text: CODEGRAPH_PROMPT_TEXT })
+  // A function, not a string: the host re-evaluates it on every assembly, which is what lets the model
+  // learn the workspace's index size and freshness for free instead of spending a `status` round-trip.
+  ctx.systemPrompt.section({
+    name: 'tool:codegraph',
+    order: 111,
+    text: assemblyContext => `${CODEGRAPH_PROMPT_TEXT}\n\n${indexStatusHint(workspaceOf(assemblyContext))}`,
+  })
 
   ctx.tools.register(defineTool({
     name: 'codegraph',
@@ -206,7 +232,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'codegraph_index',
     description:
-      'Build or refresh the codegraph index for a workspace, so the codegraph tool can answer. Indexing a large workspace can take minutes, so this runs on its own timeout budget, separate from codegraph\'s query operations.',
+      'Build or refresh the codegraph index for a workspace, so the codegraph tool can answer. Indexing a large workspace can take minutes, so this runs on its own timeout budget, separate from codegraph\'s query operations. A large run may be handed to a background job and answer immediately with that job\'s id; read its report with job_output.',
     parameters: CODEGRAPH_INDEX_PARAMETERS,
     output: {
       schema: CODEGRAPH_OUTPUT_SCHEMA,
@@ -214,7 +240,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     timeoutMs: resolved.indexTimeoutMs,
     async execute(args, exec) {
-      return runIndex(ctx, args, exec)
+      return runIndex(ctx, resolved, args, exec)
     },
     presentCall: args => ({
       card: 'generic' as const,
@@ -240,18 +266,133 @@ export function callTitle(args: CodegraphToolArgs): string {
 /**
  * Build or refresh the on-disk index for one project. The dedicated tool this backs carries its own,
  * much larger timeout budget than a query — indexing a monorepo is a different order of work.
+ *
+ * A run large enough to outlive the call moves to the host's background-job registry, where it keeps
+ * its own timeout-free lifetime and reports through that job instead of this value. Everything that
+ * cannot start a job — no registry in the composition, no owning agent, a workspace still small, a
+ * refusal from the registry — falls through to the synchronous run, so the tool's answer never depends
+ * on a host feature being present.
  * @param ctx - the plugin context.
+ * @param config - the resolved plugin configuration.
  * @param args - the index tool's validated arguments.
  * @param exec - the tool-execution context.
- * @returns the index operation's canonical value.
+ * @returns the index operation's canonical value: a started job, or the finished run's report.
  */
 async function runIndex(
   ctx: Context,
+  config: ResolvedConfig,
   args: CodegraphIndexToolArgs,
   exec: ToolExecution,
 ): Promise<CodegraphToolValue> {
   const root = resolvedProjectRoot(args.project_path, exec)
+  const jobId = startBackgroundIndex(ctx, config, root, exec)
+  if (jobId !== undefined) {
+    return { operation: 'index', project_path: root, status: 'started', job_id: jobId }
+  }
   const report = await ctx.codegraph.index(root, exec.signal)
+  return indexReportValue(root, report)
+}
+
+/**
+ * Hand one indexing run to the host's background-job registry, when the host offers one and the run
+ * looks large enough to outlive the call.
+ *
+ * Every reason not to start a job falls back to the synchronous run rather than failing the call: a
+ * composition without a job controller is a normal deployment, not an error, and the tool's contract
+ * has always been "index it now".
+ * @param ctx - the plugin context.
+ * @param config - the resolved plugin configuration.
+ * @param root - the project root to index.
+ * @param exec - the tool-execution context; its agent owns the job.
+ * @returns the started job's id, or `undefined` when this call must index synchronously.
+ */
+function startBackgroundIndex(
+  ctx: Context,
+  config: ResolvedConfig,
+  root: string,
+  exec: ToolExecution,
+): string | undefined {
+  const owner = exec.agent
+  if (owner === undefined) return undefined
+  // `ctx.get` rather than an `inject` entry: `jobs` is a host composition choice, and requiring it in
+  // `inject` would hide this entire tool family from a profile that runs no background jobs. Reading
+  // the service optionally is what lets one build serve both kinds of deployment.
+  const jobs = ctx.get('jobs') as BackgroundJobRegistry | undefined
+  if (jobs === undefined) return undefined
+  // Asked last, so a composition without a registry never pays for the status read below.
+  if (!backgroundRunWanted(config, root)) return undefined
+  try {
+    return jobs.start({
+      // The registry keys a job by its owning *session id*, not the agent object: it resolves the live
+      // agent from that id and hangs the job's teardown (and therefore its cancellation) off it.
+      owner: owner.id,
+      kind: 'codegraph-index',
+      label: `codegraph index ${root}`,
+      run: handle => runIndexJob(ctx, root, handle),
+    })
+  } catch {
+    // No controller serves this agent, or the owner already holds its maximum number of jobs: both
+    // mean "do the work here instead", never "fail the model's call".
+    return undefined
+  }
+}
+
+/**
+ * Whether this run is large enough — or configured — to belong in a background job.
+ *
+ * `'auto'` reads the previous run's file count from the status sidecar, which is the only size signal
+ * available before a run starts and exactly the case a job exists for: a refresh of the workspace that
+ * took minutes last time. A workspace with no summary has never been indexed by this plugin, so there
+ * is no evidence it is large; it runs synchronously and writes the summary the next call decides from.
+ * @param config - the resolved plugin configuration.
+ * @param root - the project root to index.
+ * @returns whether the caller should try to start a job.
+ */
+function backgroundRunWanted(config: ResolvedConfig, root: string): boolean {
+  if (config.backgroundIndex === false) return false
+  if (config.backgroundIndex === true) return true
+  const status = readIndexStatus(root)
+  return status !== undefined && status.filesIndexed >= config.backgroundIndexThreshold
+}
+
+/**
+ * The producer body of one background indexing job.
+ *
+ * Both outcomes are reported twice on purpose: the appended line is the live log while the job is
+ * recent, and the returned outcome carries the terminal status plus the report a later `job_output`
+ * delivers even after the ring is trimmed. Neither may throw — a rejected `done` breaks the registry's
+ * producer contract, which it can only log, leaving the job to look stuck.
+ * @param ctx - the plugin context.
+ * @param root - the project root to index.
+ * @param handle - the job's producer face.
+ * @returns the job's cancellation hook and settlement promise.
+ */
+function runIndexJob(ctx: Context, root: string, handle: BackgroundJobHandle): BackgroundJobHooks {
+  const controller = new AbortController()
+  // Called while the registry is still building the job record, so it seeds the registered projection
+  // instead of racing an update against a job that does not exist yet.
+  handle.updateProgress(`indexing ${root}`)
+  const done = (async (): Promise<BackgroundJobOutcome> => {
+    try {
+      const report = await ctx.codegraph.index(root, controller.signal)
+      handle.append(`${indexSummaryLine(root, report)}\n`)
+      return { status: 'completed', result: renderCodegraph(indexReportValue(root, report)) }
+    } catch (error) {
+      const message = failureMessage(error)
+      handle.append(`codegraph index failed for ${root}: ${message}\n`)
+      return { status: 'failed', detail: message }
+    }
+  })()
+  return { cancel: () => controller.abort(), done }
+}
+
+/**
+ * The canonical value for a finished indexing run.
+ * @param root - the indexed project root, as reported to the model.
+ * @param report - the indexer's report.
+ * @returns the `index` operation's completed-report value.
+ */
+function indexReportValue(root: string, report: CodegraphIndexReport): CodegraphValueFor<'index'> {
   return {
     operation: 'index',
     project_path: root,
@@ -264,6 +405,89 @@ async function runIndex(
     unresolved_likely_internal_count: report.unresolvedLikelyInternalCount,
     languages: report.languages.map(entry => ({ language: entry.language, file_count: entry.fileCount })),
   }
+}
+
+/**
+ * One line of the counts a finished run wrote, for a job's live log.
+ * @param root - the indexed project root.
+ * @param report - the indexer's report.
+ * @returns the summary line.
+ */
+function indexSummaryLine(root: string, report: CodegraphIndexReport): string {
+  return `Indexed ${root}: ${report.filesIndexed} files, ${report.nodeCount} symbols, ${report.edgeCount} relationships.`
+}
+
+/**
+ * The text a failed job reports.
+ * @param error - whatever the indexer threw.
+ * @returns the error's own message when it has one, else its string form.
+ */
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The slice of the host's background-job registry this plugin calls, declared structurally.
+ *
+ * `@deepseek-ai/dsh-jobs` is deliberately not a dependency: the service may be absent, which is what
+ * the optional lookup tolerates, and importing its types would tie this package's install to a host
+ * package it is written to live without. The shape below is the seam's public contract — a job is
+ * registered with one owner, one label, and a producer whose settlement promise the registry watches.
+ */
+interface BackgroundJobRegistry {
+  /**
+   * Register a job and return its id immediately.
+   * @param spec - the job's owner, label, and producer body.
+   * @returns the new job's id.
+   */
+  start(spec: BackgroundJobSpec): string
+}
+
+/** One job registration. */
+interface BackgroundJobSpec {
+  /** Session id of the agent that owns the job; its disposal cancels the work. */
+  owner?: string
+  /** Stable kind, used for retention and diagnostics (`codegraph-index`). */
+  kind: string
+  /** Human-readable label shown in job listings and completion notices. */
+  label: string
+  /** The producer body, invoked once while the registration is still being built. */
+  run(handle: BackgroundJobHandle): BackgroundJobHooks
+}
+
+/** What a producer may write while its job runs. */
+interface BackgroundJobHandle {
+  /**
+   * Append one chunk of output to the job's log.
+   * @param text - the text to append, verbatim.
+   */
+  append(text: string): void
+  /**
+   * Replace the job's live progress line.
+   * @param line - the new progress line.
+   */
+  updateProgress(line: string): void
+}
+
+/** What a producer hands back so the registry can stop and await it. */
+interface BackgroundJobHooks {
+  /**
+   * Stop the work.
+   * @param reason - why the job was stopped, when the caller has a reason.
+   */
+  cancel(reason?: string): void
+  /** Settles once the producer is done, carrying the job's terminal outcome. */
+  done: Promise<BackgroundJobOutcome>
+}
+
+/** The terminal report a producer settles with. */
+interface BackgroundJobOutcome {
+  /** Terminal status the registry records. */
+  status: 'completed' | 'failed' | 'killed'
+  /** Failure detail, when the job failed. */
+  detail?: string
+  /** The result a `job_output` read delivers, when the job completed. */
+  result?: string
 }
 
 /**

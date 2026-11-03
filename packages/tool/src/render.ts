@@ -163,6 +163,12 @@ export function renderCodegraph(value: CodegraphToolValue): string {
       return lines.join('\n')
     }
     case 'index': {
+      // A background run has no report to render yet. Saying so, and naming the job that will carry
+      // it, is the whole answer: the model must not read "started" as "indexed" and query a graph the
+      // run is still replacing.
+      if ('status' in value) {
+        return `Indexing ${value.project_path} in the background as job ${value.job_id}. The run outlives this call — read its report with job_output ${value.job_id}, or stop it with job_kill.`
+      }
       const languages = value.languages.map(entry => `${entry.language} ${entry.file_count}`).join(', ')
       const unresolved = value.unresolved_count === 0
         ? 'Every call site resolved.'

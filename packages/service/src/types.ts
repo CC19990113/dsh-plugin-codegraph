@@ -415,6 +415,15 @@ export interface CodegraphIndexReport {
   readonly projectRoot: string
   /** Files parsed and written to the graph. */
   readonly filesIndexed: number
+  /**
+   * Of {@link filesIndexed}, how many reused the extraction a previous run recorded for them instead
+   * of being read and parsed again, because their content had not changed. Reported apart from
+   * {@link filesIndexed} because it says how much of this run was incremental work — a run that
+   * reports every file reused touched the index without touching the filesystem, while `0` on a
+   * workspace that was indexed before means the cache was unusable and everything was parsed. Zero
+   * for an indexer that keeps no parse cache.
+   */
+  readonly filesReused: number
   /** Files skipped before parsing: over the size ceiling, or cut off by the file-count ceiling. */
   readonly filesSkipped: number
   /**

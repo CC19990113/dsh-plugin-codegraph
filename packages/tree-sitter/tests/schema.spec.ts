@@ -47,7 +47,7 @@ async function tempDatabasePath(): Promise<string> {
 describe('writeGraph', () => {
   it('creates the parent directory and writes a readable schema-v4 database', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
     const db = new DatabaseSync(path, { readOnly: true })
     const version = db.prepare('SELECT MAX(version) AS v FROM schema_versions').get() as { v: number }
     expect(version.v).toBe(SCHEMA_VERSION)
@@ -56,7 +56,7 @@ describe('writeGraph', () => {
 
   it('writes every node, edge, file, and unresolved-ref row', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
     const db = new DatabaseSync(path, { readOnly: true })
     expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 2 })
     expect(db.prepare('SELECT count(*) AS c FROM edges').get()).toEqual({ c: 1 })
@@ -73,7 +73,7 @@ describe('writeGraph', () => {
 
   it('is queryable through FTS5 by name', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: [], indexedAt: NOW })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: [], filesMinified: 0, indexedAt: NOW })
     const db = new DatabaseSync(path, { readOnly: true })
     const match = db.prepare("SELECT id FROM nodes_fts WHERE nodes_fts MATCH 'foo'").get() as { id: string }
     expect(match.id).toBe('a.ts:1:0')
@@ -82,8 +82,8 @@ describe('writeGraph', () => {
 
   it('replaces whatever was at the path on a second run', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
-    await writeGraph(path, { files: [], nodes: [], edges: [], unresolved: [], indexedAt: NOW + 1 })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
+    await writeGraph(path, { files: [], nodes: [], edges: [], unresolved: [], filesMinified: 0, indexedAt: NOW + 1 })
     const db = new DatabaseSync(path, { readOnly: true })
     expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 0 })
     expect(db.prepare('SELECT MAX(applied_at) AS a FROM schema_versions').get()).toEqual({ a: NOW + 1 })
@@ -93,7 +93,7 @@ describe('writeGraph', () => {
   it('records node_count 0 for a file with no declaration nodes', async () => {
     const path = await tempDatabasePath()
     const emptyFile = { ...FILE, path: 'empty.ts' }
-    await writeGraph(path, { files: [emptyFile], nodes: [], edges: [], unresolved: [], indexedAt: NOW })
+    await writeGraph(path, { files: [emptyFile], nodes: [], edges: [], unresolved: [], filesMinified: 0, indexedAt: NOW })
     const db = new DatabaseSync(path, { readOnly: true })
     expect(db.prepare('SELECT node_count FROM files WHERE path = ?').get('empty.ts')).toEqual({ node_count: 0 })
     db.close()
@@ -102,7 +102,7 @@ describe('writeGraph', () => {
   it('rethrows when a write violates the schema, leaving no file behind on a first write', async () => {
     const path = await tempDatabasePath()
     const duplicateNodes = [NODES[0]!, NODES[0]!]
-    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW }))
+    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], filesMinified: 0, indexedAt: NOW }))
       .rejects.toThrow()
     // The build happens on a temp file that is only renamed into place on success; a failed first
     // write never creates `path` at all, rather than leaving a schema-only, zero-row database there.
@@ -111,9 +111,9 @@ describe('writeGraph', () => {
 
   it('leaves a previously written graph untouched when a later write fails', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
     const duplicateNodes = [NODES[0]!, NODES[0]!]
-    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW + 1 }))
+    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], filesMinified: 0, indexedAt: NOW + 1 }))
       .rejects.toThrow()
     const db = new DatabaseSync(path, { readOnly: true })
     // The failed write built and discarded its own temp file; it never touched the live database.
@@ -124,11 +124,11 @@ describe('writeGraph', () => {
 
   it('leaves no temp file behind after a successful write or a failed one', async () => {
     const path = await tempDatabasePath()
-    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, indexedAt: NOW })
+    await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
     const duplicateNodes = [NODES[0]!, NODES[0]!]
-    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], indexedAt: NOW + 1 }))
+    await expect(writeGraph(path, { files: [FILE], nodes: duplicateNodes, edges: [], unresolved: [], filesMinified: 0, indexedAt: NOW + 1 }))
       .rejects.toThrow()
     const entries = await readdir(dirname(path))
-    expect(entries).toEqual(['codegraph.db'])
+    expect(entries.sort()).toEqual(['codegraph.db', 'status.json'])
   })
 })
