@@ -318,12 +318,12 @@ describe('result rendering', () => {
 
   it('renders an index report in plain-fact style, distinguishing genuine gaps from likely-external noise', () => {
     const text = renderCodegraph({
-      ...base, operation: 'index', files_indexed: 12, files_skipped: 1, symbol_count: 40,
-      edge_count: 30, unresolved_count: 5, unresolved_likely_internal_count: 2,
+      ...base, operation: 'index', files_indexed: 12, files_skipped: 1, files_minified: 3,
+      symbol_count: 40, edge_count: 30, unresolved_count: 5, unresolved_likely_internal_count: 2,
       languages: [{ language: 'typescript', file_count: 12 }],
     })
     expect(text).toContain('Indexed /repo:')
-    expect(text).toContain('12 files indexed, 1 skipped.')
+    expect(text).toContain('12 files indexed, 1 skipped, 3 generated files left out.')
     expect(text).toContain('40 symbols, 30 relationships.')
     expect(text).toContain('2 of 5 unresolved call sites look like genuine gaps')
     expect(text).toContain('Languages: typescript 12.')
@@ -331,7 +331,7 @@ describe('result rendering', () => {
 
   it('reports every call site resolved when none are left unresolved', () => {
     const text = renderCodegraph({
-      ...base, operation: 'index', files_indexed: 0, files_skipped: 0, symbol_count: 0,
+      ...base, operation: 'index', files_indexed: 0, files_skipped: 0, files_minified: 0, symbol_count: 0,
       edge_count: 0, unresolved_count: 0, unresolved_likely_internal_count: 0, languages: [],
     })
     expect(text).toContain('Every call site resolved.')
@@ -421,7 +421,7 @@ describe('the tool plugin', () => {
   const seen: CodegraphRequest[] = []
   const indexed: string[] = []
   const indexReport: CodegraphIndexReport = {
-    projectRoot: '/repo', filesIndexed: 2, filesSkipped: 1, nodeCount: 5, edgeCount: 3,
+    projectRoot: '/repo', filesIndexed: 2, filesSkipped: 1, filesMinified: 3, nodeCount: 5, edgeCount: 3,
     unresolvedCount: 1, unresolvedLikelyInternalCount: 1, languages: [{ language: 'typescript', fileCount: 2 }],
   }
 
@@ -519,7 +519,7 @@ describe('the tool plugin', () => {
     expect(indexed).toEqual([root])
     const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
     expect(text).toContain('Indexed')
-    expect(text).toContain('2 files indexed, 1 skipped')
+    expect(text).toContain('2 files indexed, 1 skipped, 3 generated files left out')
   })
 
   it('lets the index tool target an explicit project outside any session', async () => {

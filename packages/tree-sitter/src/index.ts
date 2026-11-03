@@ -38,6 +38,8 @@ export { loadGitignore, matchesGitignore, parseGitignore } from './gitignore.ts'
 export type { GitignoreRule } from './gitignore.ts'
 export { resolveWorkspace } from './resolve.ts'
 export type { ExtractedFile, GraphEdge, GraphNode, ResolvedGraph, UnresolvedRef } from './resolve.ts'
+export { isMinifiedName, looksMinified, measureText, MINIFIED_AVERAGE_LINE_LENGTH } from './minified.ts'
+export type { TextShape } from './minified.ts'
 export { SCHEMA_VERSION, writeGraph } from './schema.ts'
 export { isExcluded, walkAndExtract } from './walk.ts'
 export type { WalkConfig, WalkResult } from './walk.ts'
@@ -104,6 +106,18 @@ export interface Config {
    * see `./gitignore.ts`. A project with no root `.gitignore` is unaffected either way.
    */
   respectGitignore?: boolean
+  /**
+   * Leave generated (bundled or minified) artifacts out of the index instead of parsing them
+   * (default true). A workspace that commits its build output — `dist/` in version control so a
+   * server can serve it — hands the walk megabytes of bundler output declaring thousands of short
+   * mangled names; indexing it both dominates the run's time and collides with real source symbols,
+   * making "one unique workspace-wide name wins" refuse calls the duplicates made ambiguous.
+   *
+   * Two signals, one structural: a `.min.` path segment, or an average line length past
+   * {@link MINIFIED_AVERAGE_LINE_LENGTH}. Set false to index such files anyway, or name their
+   * directory in `exclude`.
+   */
+  skipMinified?: boolean
   /** Files larger than this are skipped and counted in the report, never parsed (default 2000000). */
   maxFileBytes?: number
   /** The walk stops discovering new files once this many have been found (default 50000). */
@@ -136,6 +150,7 @@ export const Config: z<Config> = z.object({
   languages: z.array(z.string()).default([...new Set(LANGUAGE_TABLE.map(spec => spec.language))]),
   exclude: z.array(z.string()).default(DEFAULT_EXCLUDE),
   respectGitignore: z.boolean().default(true),
+  skipMinified: z.boolean().default(true),
   maxFileBytes: z.number().default(DEFAULT_MAX_FILE_BYTES),
   maxFiles: z.number().default(DEFAULT_MAX_FILES),
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
@@ -246,9 +261,10 @@ async function runSync(projectRoot: string, config: ResolvedConfig): Promise<{ f
  * @returns the run's report.
  */
 async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: AbortSignal): Promise<CodegraphIndexReport> {
-  const { files, filesSkipped } = await walkAndExtract(projectRoot, {
+  const { files, filesSkipped, filesMinified } = await walkAndExtract(projectRoot, {
     exclude: config.exclude,
     respectGitignore: config.respectGitignore,
+    skipMinified: config.skipMinified,
     maxFileBytes: config.maxFileBytes,
     maxFiles: config.maxFiles,
     concurrency: config.concurrency,
@@ -273,6 +289,7 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
     projectRoot,
     filesIndexed: files.length,
     filesSkipped,
+    filesMinified,
     nodeCount: graph.nodes.length,
     edgeCount: graph.edges.length,
     unresolvedCount: graph.unresolved.length,

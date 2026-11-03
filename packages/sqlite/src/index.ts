@@ -17,14 +17,13 @@
 import { access } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CodegraphStoreId } from 'dsh-plugin-codegraph-service'
+import { assertNever, CodegraphStoreId } from 'dsh-plugin-codegraph-service'
 import type {
   CodegraphRequest,
   CodegraphResultFor,
   CodegraphStoreProvider,
 } from 'dsh-plugin-codegraph-service'
 import type {} from 'dsh-plugin-codegraph-service'
-import { assertNever } from '@deepseek-ai/dsh-llm'
 import { GraphPool, databasePath } from './database.ts'
 import { files, impact, node, relations, search, status, trace } from './queries.ts'
 import { walkImpact, walkTrace } from './traverse.ts'

@@ -6,6 +6,7 @@ import { writeProject } from './fixture.ts'
 const BASE = {
   exclude: ['node_modules', '.git'],
   respectGitignore: true,
+  skipMinified: true,
   maxFileBytes: 2_000_000,
   maxFiles: 50_000,
   concurrency: 4,
@@ -56,6 +57,7 @@ describe('walkAndExtract', () => {
     expect(files).toHaveLength(1)
     expect(files[0]?.extraction.definitions).toContainEqual(expect.objectContaining({ name: 'foo' }))
     expect(files[0]?.size).toBeGreaterThan(0)
+    expect(files[0]?.lineCount).toBe(2)
     expect(files[0]?.contentHash).toMatch(/^[0-9a-f]{64}$/)
   })
 
@@ -99,5 +101,39 @@ describe('walkAndExtract', () => {
     const withGitignore = await walkAndExtract(root, BASE)
     const withoutGitignore = await walkAndExtract(root, { ...BASE, respectGitignore: false })
     expect(withGitignore.files.map(file => file.path)).toEqual(withoutGitignore.files.map(file => file.path))
+  })
+
+  it('skips a committed bundle by its line shape, counting it apart from a size skip', async () => {
+    const root = await writeProject({
+      'src/a.ts': 'export function a() { return 1 }\n',
+      'dist-test/js/vendor.js': `var a=1;${'b=2;'.repeat(400)}\n`,
+    })
+    const { files, filesSkipped, filesMinified } = await walkAndExtract(root, BASE)
+    expect(files.map(file => file.path)).toEqual(['src/a.ts'])
+    expect(filesMinified).toBe(1)
+    expect(filesSkipped).toBe(0)
+  })
+
+  it('skips a .min. file by name alone, however ordinary its lines are', async () => {
+    const root = await writeProject({
+      'src/a.ts': 'export function a() { return 1 }\n',
+      'lib/util.min.js': 'export function util() {\n  return 2\n}\n',
+    })
+    const { files, filesMinified } = await walkAndExtract(root, BASE)
+    expect(files.map(file => file.path)).toEqual(['src/a.ts'])
+    expect(filesMinified).toBe(1)
+  })
+
+  it('indexes generated files when skipMinified is false', async () => {
+    const root = await writeProject({ 'bundle.min.js': `var a = 1\n` })
+    const { files, filesMinified } = await walkAndExtract(root, { ...BASE, skipMinified: false })
+    expect(files.map(file => file.path)).toEqual(['bundle.min.js'])
+    expect(filesMinified).toBe(0)
+  })
+
+  it('reports no generated files for a workspace of ordinary source', async () => {
+    const root = await writeProject({ 'src/a.ts': 'export function a() { return 1 }\n' })
+    const { filesMinified } = await walkAndExtract(root, BASE)
+    expect(filesMinified).toBe(0)
   })
 })

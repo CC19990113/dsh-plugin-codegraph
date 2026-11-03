@@ -220,6 +220,7 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
     member('index', {
       files_indexed: { type: 'integer', required: true },
       files_skipped: { type: 'integer', required: true },
+      files_minified: { type: 'integer', required: true },
       symbol_count: { type: 'integer', required: true },
       edge_count: { type: 'integer', required: true },
       unresolved_count: { type: 'integer', required: true },

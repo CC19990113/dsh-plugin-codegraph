@@ -56,6 +56,7 @@ describe('codegraph-tree-sitter plugin', () => {
       projectRoot: root,
       filesIndexed: 2,
       filesSkipped: 0,
+      filesMinified: 0,
       unresolvedCount: 0,
       unresolvedLikelyInternalCount: 0,
       languages: [{ language: 'typescript', fileCount: 2 }],

@@ -415,8 +415,16 @@ export interface CodegraphIndexReport {
   readonly projectRoot: string
   /** Files parsed and written to the graph. */
   readonly filesIndexed: number
-  /** Files skipped (too large, over the file-count ceiling, or excluded). */
+  /** Files skipped before parsing: over the size ceiling, or cut off by the file-count ceiling. */
   readonly filesSkipped: number
+  /**
+   * Files left out because they are generated output — a `.min.` name, or an average line length past
+   * the indexer's threshold — rather than source. Reported separately from {@link filesSkipped}
+   * because it describes a decision about what the workspace *is*, not a bound the run hit: a large
+   * count here means the workspace commits a build artifact tree, and naming that tree in `exclude` is
+   * the cheaper fix. Zero for an indexer that does not detect generated output.
+   */
+  readonly filesMinified: number
   /** Declaration nodes written. */
   readonly nodeCount: number
   /** Relationship edges written. */

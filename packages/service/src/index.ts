@@ -31,6 +31,7 @@ import type {
   CodegraphStoreProvider,
 } from './types.ts'
 
+export { assertNever } from './assert.ts'
 export { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from './brand.ts'
 export type {
   CodegraphCalleesRequest,

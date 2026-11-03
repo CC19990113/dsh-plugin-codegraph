@@ -3,13 +3,20 @@
  *
  * Pass 1 collects every definition into a name index. Pass 2 resolves each call site's callee name,
  * in order: (1) the enclosing file imports that name from a relative specifier resolving to a file
- * this run indexed — that file's matching declaration wins; (2) otherwise exactly one definition
- * workspace-wide carries the name — it wins; (3) otherwise the call is recorded in `unresolved` and no
- * `calls` edge is written. An ambiguous edge is worse than a missing one: the model acts on `callers`
- * output, so a confidently wrong caller sends it to edit the wrong file, while a missing caller merely
- * sends it back to text search.
+ * this run indexed — that file's matching declaration wins; (2) otherwise exactly one definition **in
+ * the calling file itself** carries the name — lexical scope settles it before the workspace gets a
+ * say, which is what keeps a helper declared in two test files (or a `render` in two components) from
+ * being counted as ambiguous; (3) otherwise exactly one definition workspace-wide carries the name —
+ * it wins; (4) otherwise the call is recorded in `unresolved` and no `calls` edge is written. An
+ * ambiguous edge is worse than a missing one: the model acts on `callers` output, so a confidently
+ * wrong caller sends it to edit the wrong file, while a missing caller merely sends it back to text
+ * search.
  *
- * Rule 3's `unresolved` entries are not one uniform signal. Each carries {@link UnresolvedRef.likelyExternal},
+ * Rule 2 is restricted to bare calls. A member call (`x.map()`) names a property of a receiver whose
+ * type this resolver does not track, so a same-named local declaration winning it would be a guess
+ * rather than a scope resolution — exactly the kind of confidently wrong edge rule 4 exists to avoid.
+ *
+ * Rule 4's `unresolved` entries are not one uniform signal. Each carries {@link UnresolvedRef.likelyExternal},
  * which is true for a member call (no type information behind its receiver) or a name the file itself
  * imports (a known external origin the specifier just didn't resolve) — both real code that was never a
  * candidate for a workspace edge, as against a bare, undeclared name, which is the actual gap this
@@ -174,6 +181,21 @@ function buildNameIndex(nodesByFile: ReadonlyMap<string, GraphNode[]>): Map<stri
 }
 
 /**
+ * Group one file's own nodes by declaration name, for the same-file tier of call resolution.
+ * @param nodes - the nodes declared in one file.
+ * @returns every name that file declares, mapped to the nodes carrying it.
+ */
+function indexByName(nodes: readonly GraphNode[]): Map<string, GraphNode[]> {
+  const index = new Map<string, GraphNode[]>()
+  for (const node of nodes) {
+    const existing = index.get(node.name)
+    if (existing === undefined) index.set(node.name, [node])
+    else existing.push(node)
+  }
+  return index
+}
+
+/**
  * A name index restricted to `class`/`interface` nodes, for `extends`/`implements` resolution.
  * `extractHeritage` only ever names a base class or interface, never a function or variable — indexing
  * only those kinds keeps a same-named function or module-level `const` (`packages/tree-sitter/src/
@@ -301,9 +323,10 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
 
     const keyToId = mustGet(defIdByKey, file.path)
     const importedLocalNames = new Set(file.extraction.imports.map(binding => binding.localName))
+    const localByName = indexByName(mustGet(nodesByFile, file.path))
     for (const call of file.extraction.calls) {
       const callerId = call.callerKey === null ? mustGet(fileNodeId, file.path) : mustGet(keyToId, call.callerKey)
-      const resolved = resolveName(call.calleeName, bindings, nodesByFile, nameIndex)
+      const resolved = resolveName(call.calleeName, bindings, nodesByFile, call.isMemberCall ? undefined : localByName, nameIndex)
       if (resolved === undefined) {
         const likelyExternal = call.isMemberCall || importedLocalNames.has(call.calleeName)
         unresolved.push({ source: callerId, filePath: file.path, calleeName: call.calleeName, line: call.line, col: call.column, likelyExternal })
@@ -317,7 +340,7 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
     // on it) is a calibrated signal specifically about call-resolution gaps; folding in a different edge
     // kind would change what that count measures.
     for (const ref of file.extraction.heritage) {
-      const resolved = resolveName(ref.targetName, bindings, nodesByFile, typeNameIndex)
+      const resolved = resolveName(ref.targetName, bindings, nodesByFile, undefined, typeNameIndex)
       if (resolved === undefined) continue
       edges.push({ source: mustGet(keyToId, ref.sourceKey), target: resolved, kind: ref.relation, provenance: 'tree-sitter' })
     }
@@ -327,16 +350,25 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
 }
 
 /**
- * Resolve a bare name to exactly one declaration, or `undefined` per rule 3 — shared by call
+ * Resolve a bare name to exactly one declaration, or `undefined` per rule 4 — shared by call
  * resolution (against the workspace-wide, any-kind `nameIndex`) and `extends`/`implements` resolution
- * (against the `class`/`interface`-only {@link buildTypeNameIndex}); the two-tier rule itself (an
- * imported binding wins if unambiguous in its target file, else a workspace-wide-unique name wins) does
- * not depend on which candidate pool the caller passes in.
+ * (against the `class`/`interface`-only {@link buildTypeNameIndex}); the rule itself (an imported
+ * binding wins if unambiguous in its target file, else a same-file declaration when the caller passes
+ * one, else a workspace-wide-unique name wins) does not depend on which candidate pool the caller
+ * passes in.
+ * @param calleeName - the name at the call or heritage site.
+ * @param bindings - the calling file's resolved import bindings.
+ * @param nodesByFile - every file's declarations, for the import target lookup.
+ * @param localByName - the calling file's own declarations, or `undefined` to skip the same-file tier
+ *   (the caller decides: member calls and heritage references do not get it).
+ * @param nameIndex - the workspace-wide candidate pool this reference resolves against.
+ * @returns the winning declaration's node id, or `undefined` when nothing settles it.
  */
 function resolveName(
   calleeName: string,
   bindings: FileImportBindings,
   nodesByFile: ReadonlyMap<string, GraphNode[]>,
+  localByName: ReadonlyMap<string, GraphNode[]> | undefined,
   nameIndex: ReadonlyMap<string, GraphNode[]>,
 ): string | undefined {
   const bound = bindings.byLocalName.get(calleeName)
@@ -347,6 +379,10 @@ function resolveName(
       : targetNodes.filter(node => node.name === bound.importedName)
     if (candidates.length === 1) return candidates[0]?.id
   }
+  // Lexical scope before workspace scope: a name this very file declares is the call's declaration
+  // whenever exactly one declaration carries it, no matter how many other files reuse the name.
+  const local = localByName?.get(calleeName)
+  if (local !== undefined && local.length === 1) return local[0]?.id
   const workspaceWide = nameIndex.get(calleeName) ?? []
   return workspaceWide.length === 1 ? workspaceWide[0]?.id : undefined
 }

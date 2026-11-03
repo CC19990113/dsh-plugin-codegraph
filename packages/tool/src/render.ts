@@ -7,7 +7,7 @@
  * @module dsh-plugin-codegraph-tool/render
  */
 
-import { assertNever } from '@deepseek-ai/dsh-llm'
+import { assertNever } from 'dsh-plugin-codegraph-service'
 import type { CodegraphToolValue } from './schema.ts'
 
 /** A symbol as one scannable line. */
@@ -169,7 +169,7 @@ export function renderCodegraph(value: CodegraphToolValue): string {
         : `${value.unresolved_likely_internal_count} of ${value.unresolved_count} unresolved call sites look like genuine gaps; the rest are member calls or already-imported names, never workspace-edge candidates.`
       return [
         `Indexed ${value.project_path}:`,
-        `${value.files_indexed} files indexed, ${value.files_skipped} skipped.`,
+        `${value.files_indexed} files indexed, ${value.files_skipped} skipped${value.files_minified === 0 ? '' : `, ${value.files_minified} generated files left out`}.`,
         `${value.symbol_count} symbols, ${value.edge_count} relationships. ${unresolved}`,
         `Languages: ${languages || 'none'}.`,
       ].join('\n')

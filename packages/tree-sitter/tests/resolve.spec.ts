@@ -120,6 +120,59 @@ describe('resolveWorkspace', () => {
     expect(graph.edges).toContainEqual(expect.objectContaining({ target: 'b.ts:1:0', kind: 'calls' }))
   })
 
+  it('resolves a call the calling file itself declares, even when other files reuse the name', () => {
+    const files = [
+      file('a.ts', [def({ key: '1:0', name: 'helper' })], [
+        { callerKey: null, calleeName: 'helper', line: 3, column: 1, isMemberCall: false },
+      ]),
+      file('b.ts', [def({ key: '1:0', name: 'helper' })]),
+      file('c.ts', [def({ key: '1:0', name: 'helper' })]),
+    ]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'file:a.ts', target: 'a.ts:1:0', kind: 'calls' }))
+    expect(graph.unresolved).toEqual([])
+  })
+
+  it('attributes a same-file call to its enclosing declaration, not to the file node', () => {
+    const files = [file('a.ts', [
+      def({ key: '1:0', name: 'outer', kind: 'function' }),
+      def({ key: '2:2', name: 'inner', kind: 'function', parentKey: '1:0', container: ['outer'], startLine: 2, startColumn: 2 }),
+    ], [
+      { callerKey: '1:0', calleeName: 'inner', line: 2, column: 2, isMemberCall: false },
+    ])]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'a.ts:1:0', target: 'a.ts:2:2', kind: 'calls' }))
+  })
+
+  it('does not apply the same-file tier to a member call, whose receiver it cannot type', () => {
+    const files = [
+      file('a.ts', [def({ key: '1:0', name: 'map' })], [
+        { callerKey: null, calleeName: 'map', line: 3, column: 1, isMemberCall: true },
+      ]),
+      file('b.ts', [def({ key: '1:0', name: 'map' })]),
+    ]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.edges.filter(edge => edge.kind === 'calls')).toEqual([])
+    expect(graph.unresolved).toEqual([
+      { source: 'file:a.ts', filePath: 'a.ts', calleeName: 'map', line: 3, col: 1, likelyExternal: true },
+    ])
+  })
+
+  it('falls through to the workspace-wide rule when the calling file declares the name twice', () => {
+    const files = [
+      file('a.ts', [
+        def({ key: '1:0', name: 'dup' }),
+        def({ key: '5:0', name: 'dup' }),
+      ], [
+        { callerKey: null, calleeName: 'dup', line: 9, column: 0, isMemberCall: false },
+      ]),
+      file('b.ts', [def({ key: '1:0', name: 'other' })]),
+    ]
+    const graph = resolveWorkspace(files, NOW)
+    expect(graph.edges.filter(edge => edge.kind === 'calls')).toEqual([])
+    expect(graph.unresolved).toHaveLength(1)
+  })
+
   it('rule 3: a same-named twin in another module leaves the call unresolved with no calls edge', () => {
     const files = [
       file('a.ts', [], [{ callerKey: null, calleeName: 'ambiguous', line: 3, column: 1, isMemberCall: false }]),

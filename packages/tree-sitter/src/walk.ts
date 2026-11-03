@@ -17,6 +17,7 @@ import { extractFile } from './extract.ts'
 import { loadGitignore, matchesGitignore } from './gitignore.ts'
 import type { GitignoreRule } from './gitignore.ts'
 import { languageFor } from './languages.ts'
+import { isMinifiedName, looksMinified, measureText } from './minified.ts'
 import type { ExtractedFile } from './resolve.ts'
 
 /**
@@ -52,6 +53,12 @@ export interface WalkConfig {
   /** Restrict extraction to these seam language labels when set; every loaded grammar otherwise. */
   readonly languages?: readonly string[]
   /**
+   * Leave generated (bundled or minified) artifacts out of the index instead of parsing them. See
+   * `./minified.ts` for the two signals; a workspace that commits its build output is the case this
+   * exists for, since such output is neither gitignored nor declared in `exclude`.
+   */
+  readonly skipMinified: boolean
+  /**
    * Also exclude whatever the project root's `.gitignore` names, unioned with `exclude`. A project
    * that compiles to a gitignored directory (`lib`, `dist`, ...) would otherwise hand the same symbol
    * to the resolver twice — once from source, once from the build output — and "the one unique
@@ -63,7 +70,11 @@ export interface WalkConfig {
 /** What the walk produced. */
 export interface WalkResult {
   readonly files: ExtractedFile[]
+  /** Candidates skipped for a reason other than being generated output: over `maxFileBytes`, or cut
+   * off by `maxFiles`. */
   readonly filesSkipped: number
+  /** Candidates skipped because they are generated output — see {@link WalkConfig.skipMinified}. */
+  readonly filesMinified: number
 }
 
 /** One candidate file the directory scan found, not yet parsed. */
@@ -117,14 +128,29 @@ async function discover(
   return { candidates, overflow }
 }
 
-/** Parse one candidate, or return `undefined` when it is over {@link WalkConfig.maxFileBytes}. */
-async function parseCandidate(candidate: Candidate, config: WalkConfig, signal?: AbortSignal): Promise<ExtractedFile | undefined> {
+/**
+ * Parse one candidate.
+ * @param candidate - the file to parse.
+ * @param config - the walk's bounds.
+ * @param signal - aborts the parse.
+ * @returns the extracted file, `'minified'` when it was skipped as generated output, or `undefined`
+ *   when it is over {@link WalkConfig.maxFileBytes}.
+ */
+async function parseCandidate(
+  candidate: Candidate,
+  config: WalkConfig,
+  signal?: AbortSignal,
+): Promise<ExtractedFile | 'minified' | undefined> {
+  // Checked before the stat and read: a `.min.` name settles it with no I/O at all.
+  if (config.skipMinified && isMinifiedName(candidate.path)) return 'minified'
   const stats = await stat(candidate.absolute)
   if (stats.size > config.maxFileBytes) return undefined
   const spec = languageFor(posix.extname(candidate.path))
   /* v8 ignore next 2 -- discover() only ever produces a candidate whose extension resolved to a spec. */
   if (spec === undefined) return undefined
   const text = await readFile(candidate.absolute, 'utf8')
+  const shape = measureText(text)
+  if (config.skipMinified && looksMinified(candidate.path, shape)) return 'minified'
   const parser = await createParser(spec)
   try {
     signal?.throwIfAborted()
@@ -139,7 +165,7 @@ async function parseCandidate(candidate: Candidate, config: WalkConfig, signal?:
       size: stats.size,
       modifiedAt: stats.mtimeMs,
       contentHash: createHash('sha256').update(text).digest('hex'),
-      lineCount: text.split('\n').length,
+      lineCount: shape.lineCount,
       extraction,
     }
   } finally {
@@ -183,9 +209,11 @@ export async function walkAndExtract(projectRoot: string, config: WalkConfig, si
   const parsed = await mapWithConcurrency(candidates, config.concurrency, candidate => parseCandidate(candidate, config, signal))
   const files: ExtractedFile[] = []
   let filesSkipped = overflow
-  for (const file of parsed) {
-    if (file === undefined) filesSkipped++
-    else files.push(file)
+  let filesMinified = 0
+  for (const result of parsed) {
+    if (result === undefined) filesSkipped++
+    else if (result === 'minified') filesMinified++
+    else files.push(result)
   }
-  return { files, filesSkipped }
+  return { files, filesSkipped, filesMinified }
 }
