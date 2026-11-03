@@ -31,8 +31,8 @@ window.__ModuleLoader__.load({
       tertiary: "var(--dsw-alias-label-tertiary, #8c959f)",
       border: "var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12))",
       bg: "var(--dsw-alias-bg-l1, rgba(0, 0, 0, 0.03))",
-      danger: "#d9534f",
-      ok: "#2e7d32",
+      danger: "var(--dsw-alias-state-error-primary, #d9534f)",
+      ok: "var(--dsw-alias-state-success-primary, #2e7d32)",
     };
 
     const BTN = {
@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
     const S = {
       root: {
         padding: "16px 20px",
-        fontSize: 13,
+        fontSize: "var(--dsh-content-font-size, 13px)",
         lineHeight: 1.5,
         color: C.primary,
         display: "flex",

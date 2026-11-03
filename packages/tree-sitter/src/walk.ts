@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { readParseCache } from './cache.ts'
-import type { CachedFile } from './cache.ts'
+import type { CachedFile, ParseCacheFileSystem } from './cache.ts'
 import { createParser } from './grammar.ts'
 import { extractFile } from './extract.ts'
 import { loadGitignore, matchesGitignore } from './gitignore.ts'
@@ -69,9 +69,10 @@ export interface WalkConfig {
   readonly respectGitignore: boolean
   /**
    * Reuse the extraction a previous run cached for every file whose content is unchanged, instead of
-   * reading and parsing it again. The cache lives under `<projectRoot>/.codegraph/cache` and is
-   * written by the indexer after a run succeeds; a missing or unusable cache simply means every file
-   * is parsed.
+   * reading and parsing it again. The cache lives under `<projectRoot>/.codegraph/cache`, is read
+   * through the host's filesystem seam (the `fs` argument to {@link walkAndExtract}), and is written
+   * by the indexer after a run succeeds; a missing or unusable cache simply means every file is
+   * parsed.
    */
   readonly reuseParsedCache: boolean
   /**
@@ -281,15 +282,27 @@ async function mapWithConcurrency<T, R>(
 /**
  * Walk `projectRoot` and parse every candidate file it finds — or reuse the extraction a previous
  * run cached for it.
+ *
+ * `fs` is a parameter rather than a `WalkConfig` field on purpose: the walk's own directory scan and
+ * file reads still go straight to `node:fs` — they compare the mtime and size it stats itself, which
+ * is the identity every cache entry is recorded under — and the only seam-mediated work here is the
+ * parse cache's read. A capability is not a bound, so it does not belong in the config that mirrors
+ * this package's `Config`.
  * @param projectRoot - absolute path of the workspace to index.
  * @param config - the walk's bounds.
+ * @param fs - the filesystem seam the parse cache is read through.
  * @param signal - aborts the walk.
  * @returns the parsed files, how many candidates were skipped (over size, or past `maxFiles`), and
  *   how many files reused a cached extraction.
  */
-export async function walkAndExtract(projectRoot: string, config: WalkConfig, signal?: AbortSignal): Promise<WalkResult> {
+export async function walkAndExtract(
+  projectRoot: string,
+  config: WalkConfig,
+  fs: ParseCacheFileSystem,
+  signal?: AbortSignal,
+): Promise<WalkResult> {
   const { candidates, overflow } = await discover(projectRoot, config, signal)
-  const cache = config.reuseParsedCache ? await readParseCache(projectRoot) : new Map<string, CachedFile>()
+  const cache = config.reuseParsedCache ? await readParseCache(fs, projectRoot) : new Map<string, CachedFile>()
   const parsed = await mapWithConcurrency(candidates, config.concurrency, candidate => parseCandidate(candidate, config, cache, signal))
   const files: ExtractedFile[] = []
   let filesSkipped = overflow

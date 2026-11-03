@@ -38,6 +38,7 @@ import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegrap
 import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
 import { writeParseCache } from './cache.ts'
+import type { ParseCacheFileSystem } from './cache.ts'
 import { resolveWorkspace } from './resolve.ts'
 import { writeGraph } from './schema.ts'
 import { createWatcher } from './watcher.ts'
@@ -56,7 +57,7 @@ export { isMinifiedName, looksMinified, measureText, MINIFIED_AVERAGE_LINE_LENGT
 export type { TextShape } from './minified.ts'
 export { SCHEMA_VERSION, writeGraph } from './schema.ts'
 export { EXTRACTION_CACHE_RELATIVE_PATH, EXTRACTION_CACHE_VERSION, readParseCache, writeParseCache } from './cache.ts'
-export type { CachedFile } from './cache.ts'
+export type { CachedFile, CacheTarget, CacheTargetInfo, ParseCacheFileSystem } from './cache.ts'
 export { isExcluded, walkAndExtract } from './walk.ts'
 export type { WalkConfig, WalkResult } from './walk.ts'
 export { createWatcher } from './watcher.ts'
@@ -70,8 +71,20 @@ export type {
 } from './watcher.ts'
 export { decideWatch, readProcVersion } from './watch-policy.ts'
 export type { WatchDecision, WatchPolicyInput } from './watch-policy.ts'
+// Git diagnostics stay library functions rather than plugin wiring: nothing in `apply` runs git, so
+// `inject` deliberately omits `subprocess` — requiring it would hide this whole indexer from a
+// composition that provides none. A caller that wants worktree diagnostics passes `ctx.subprocess`
+// to `execGit` itself; installing the git hooks touches no subprocess at all.
 export { detectWorktree, execGit } from './worktree.ts'
-export type { GitExec, WorktreeInfo } from './worktree.ts'
+export type {
+  GitExec,
+  GitSpawnHandle,
+  GitSpawnOutcome,
+  GitSpawnPort,
+  GitSpawnReader,
+  GitSpawnSpec,
+  WorktreeInfo,
+} from './worktree.ts'
 export { HOOK_MARKER_BEGIN, HOOK_MARKER_END, installGitHooks, uninstallGitHooks } from './git-hooks.ts'
 export type { GitHooksOptions } from './git-hooks.ts'
 
@@ -227,13 +240,14 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('watchDebounceMs', resolved.watchDebounceMs)
   assertPositiveInteger('maxWatchedDirectories', resolved.maxWatchedDirectories)
 
-  // Watching goes through the host's filesystem seam rather than `node:fs`, so it follows the same
-  // execution world the rest of the harness reads: a remote or confined backend watches its own paths.
-  // The `fs` service is a declared dependency (see `inject`), so it is present whenever `apply` runs.
-  // It is read structurally instead of importing `@deepseek-ai/dsh-fs`: that package is not a
-  // dependency here, and its `watch` method only exists from host 0.2 onward, while this package
-  // supports older peers that have no such member to import.
-  const fileSystem = (ctx as Context & { readonly fs: WatchFileSystem }).fs
+  // Watching and the parse cache both go through the host's filesystem seam rather than `node:fs`, so
+  // they follow the same execution world the rest of the harness reads: a remote or confined backend
+  // watches and caches on its own side, and the cache's read/write pass through the same policy the
+  // graph's readers do. The `fs` service is a declared dependency (see `inject`), so it is present
+  // whenever `apply` runs. Both ports are read structurally instead of importing
+  // `@deepseek-ai/dsh-fs`: that package is not a dependency here, and its `watch` method only exists
+  // from host 0.2 onward, while this package supports older peers that have no such member to import.
+  const fileSystem = (ctx as Context & { readonly fs: WatchFileSystem & ParseCacheFileSystem }).fs
 
   // Keyed by project root, private to this plugin instance: never registered on `ctx`, so there is no
   // cross-plugin relation here for an invariant to describe — just process-local bookkeeping this
@@ -267,7 +281,7 @@ export function apply(ctx: Context, config: Config): void {
       respectGitignore: resolved.respectGitignore,
       debounceMs: resolved.watchDebounceMs,
       maxWatchedDirectories: resolved.maxWatchedDirectories,
-      sync: () => runSync(projectRoot, resolved),
+      sync: () => runSync(projectRoot, resolved, fileSystem),
       // No diagnostics service is wired into this package's dependencies; this is the floor for
       // "degradation must be visible" until one is, per NOTES.local.md.
       onDegraded: (reason) => {
@@ -294,7 +308,7 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
     async index(projectRoot, signal) {
-      const report = await runIndex(projectRoot, resolved, signal)
+      const report = await runIndex(projectRoot, resolved, fileSystem, signal)
       // Watching starts only after a successful index establishes the baseline it refreshes — never
       // from a canIndex() probe or a failed run.
       ensureWatching(projectRoot)
@@ -489,11 +503,16 @@ function runAutoIndexJob(ctx: Context, root: string, handle: AutoIndexJobHandle)
  * a file subset — so the watcher's own collected paths are not consulted here.
  * @param projectRoot - absolute path of the workspace to refresh.
  * @param config - the resolved plugin configuration.
+ * @param fs - the filesystem seam the parse cache is read and written through.
  * @returns how many files the rebuild indexed, and how long it took.
  */
-async function runSync(projectRoot: string, config: ResolvedConfig): Promise<{ filesChanged: number; durationMs: number }> {
+async function runSync(
+  projectRoot: string,
+  config: ResolvedConfig,
+  fs: ParseCacheFileSystem,
+): Promise<{ filesChanged: number; durationMs: number }> {
   const startedAt = Date.now()
-  const report = await runIndex(projectRoot, config)
+  const report = await runIndex(projectRoot, config, fs)
   return { filesChanged: report.filesIndexed, durationMs: Date.now() - startedAt }
 }
 
@@ -501,10 +520,16 @@ async function runSync(projectRoot: string, config: ResolvedConfig): Promise<{ f
  * One indexing run: walk, parse, resolve, and write.
  * @param projectRoot - absolute path of the workspace to index.
  * @param config - the resolved plugin configuration.
+ * @param fs - the filesystem seam the parse cache is read and written through.
  * @param signal - aborts the run.
  * @returns the run's report.
  */
-async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: AbortSignal): Promise<CodegraphIndexReport> {
+async function runIndex(
+  projectRoot: string,
+  config: ResolvedConfig,
+  fs: ParseCacheFileSystem,
+  signal?: AbortSignal,
+): Promise<CodegraphIndexReport> {
   const { files, filesSkipped, filesMinified, filesReused } = await walkAndExtract(projectRoot, {
     exclude: config.exclude,
     respectGitignore: config.respectGitignore,
@@ -515,7 +540,7 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
     languages: config.languages,
     reuseParsedCache: config.reuseParsedCache,
     cacheVerify: config.cacheVerify,
-  }, signal)
+  }, fs, signal)
   signal?.throwIfAborted()
 
   const indexedAt = Date.now()
@@ -530,7 +555,7 @@ async function runIndex(projectRoot: string, config: ResolvedConfig, signal?: Ab
   // Only after the graph is in place: the cache records the extractions this run actually committed,
   // so a run that failed before writing its graph leaves the previous cache — and the mtimes it was
   // built from — alone instead of vouching for a graph that was never written.
-  await writeParseCache(projectRoot, files)
+  await writeParseCache(fs, projectRoot, files)
 
   const languageCounts = new Map<string, number>()
   for (const file of files) languageCounts.set(file.language, (languageCounts.get(file.language) ?? 0) + 1)

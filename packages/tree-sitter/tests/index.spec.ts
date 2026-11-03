@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat as fsStat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -27,12 +27,14 @@ interface FakeWatchRecord {
 }
 
 /**
- * The filesystem seam the plugin consumes, backed by the real disk for `resolve`/`listDir` and by
- * test-driven, recorded watches for `watch`.
+ * The filesystem seam the plugin consumes, backed by the real disk for `resolve`/`stat`/`readText`/
+ * `writeText`/`listDir` and by test-driven, recorded watches for `watch`.
  *
  * Listing real files is what makes the end-to-end watcher test meaningful: the change the test writes
  * to disk is what a re-listing sees, so the rebuild it drives is the production path. Driving `watch`
- * from the test is what makes it deterministic — no kernel-side event latency and no polling.
+ * from the test is what makes it deterministic — no kernel-side event latency and no polling. The
+ * parse cache reaches its document through the same seam, so its read and write are disk-backed here
+ * too: a test that counts reused files is evidence about the real round trip, not about a double.
  */
 class FakeFs extends Service {
   readonly watches: FakeWatchRecord[] = []
@@ -55,6 +57,40 @@ class FakeFs extends Service {
   }
 
   /**
+   * Report a target's metadata the way the seam does: presence, plus what kind of entry is there.
+   * @param target - the target to probe.
+   * @returns the metadata, or undefined when nothing is there.
+   */
+  async stat(target: WatchTarget): Promise<{ readonly type: 'file' | 'directory' | 'other' } | undefined> {
+    try {
+      const stats = await fsStat(target.targetKey)
+      return { type: stats.isFile() ? 'file' : stats.isDirectory() ? 'directory' : 'other' }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Read one file's text.
+   * @param target - the file to read.
+   * @returns its content.
+   */
+  async readText(target: WatchTarget): Promise<string> {
+    return readFile(target.targetKey, 'utf8')
+  }
+
+  /**
+   * Replace one file's text. Creating a missing parent directory mirrors the local backend, which is
+   * what lets the cache's first write land without a `mkdir` the seam does not offer.
+   * @param target - the file to write.
+   * @param content - the full new content.
+   */
+  async writeText(target: WatchTarget, content: string): Promise<void> {
+    await mkdir(dirname(target.targetKey), { recursive: true })
+    await writeFile(target.targetKey, content)
+  }
+
+  /**
    * List one real directory, with a freshness token derived from the entry's own stat.
    * @param target - the directory to list.
    * @returns its direct children.
@@ -66,7 +102,7 @@ class FakeFs extends Service {
       const absolute = join(target.targetKey, entry.name)
       const isDirectory = entry.isDirectory()
       const isFile = entry.isFile()
-      const stats = await stat(absolute)
+      const stats = await fsStat(absolute)
       listed.push({
         name: entry.name,
         type: isDirectory ? 'directory' : isFile ? 'file' : 'other',
@@ -458,14 +494,14 @@ describe('codegraph-tree-sitter plugin', () => {
     await writeFile(join(root, 'a.ts'), 'export function second() { return 2 }\n')
     fs.emit(root)
     await waitFor(() => functionNames(databasePath).includes('second'))
-    const mtimeAfterEdit = (await stat(databasePath)).mtimeMs
+    const mtimeAfterEdit = (await fsStat(databasePath)).mtimeMs
 
     // Every rebuild writes `.codegraph`, and the root's watch does report a change to a direct child
     // of the root, so the notification below is exactly what the watcher's own write provokes. It
     // must not rebuild: `.codegraph` is excluded, so the re-listing attributes no in-scope change.
     fs.emit(root)
     await new Promise(resolve => setTimeout(resolve, 400))
-    expect((await stat(databasePath)).mtimeMs).toBe(mtimeAfterEdit)
+    expect((await fsStat(databasePath)).mtimeMs).toBe(mtimeAfterEdit)
     await ctx.fiber.dispose()
   }, 15_000)
 
