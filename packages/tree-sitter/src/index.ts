@@ -29,14 +29,15 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { readdir } from 'node:fs/promises'
 import { stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CodegraphIndexerId, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
 import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
-import { LANGUAGE_TABLE } from './languages.ts'
-import { walkAndExtract } from './walk.ts'
+import { LANGUAGE_TABLE, languageFor } from './languages.ts'
+import { isExcluded, walkAndExtract } from './walk.ts'
 import type { EngineMode } from './walk.ts'
 import { writeParseCache } from './cache.ts'
 import type { ParseCacheFileSystem } from './cache.ts'
@@ -118,6 +119,18 @@ export const DEFAULT_MAX_FILE_BYTES = 2_000_000
 
 /** Default ceiling on how many files one run indexes. */
 export const DEFAULT_MAX_FILES = 50_000
+
+/**
+ * How many candidate source files a workspace may contain before a **session-start** index declines
+ * to run (default 8,000).
+ *
+ * `maxFiles` above is the bound for a run someone asked for; this one guards the run nobody asked
+ * for. A session opened with `cwd` pointing at a home directory or a tool's own data directory can
+ * cover tens of thousands of files — a real case reached 21,752 under `~/.dsh`, under the 50,000
+ * ceiling, and the Tree-sitter WASM heap died mid-parse while the desktop froze. Declining early
+ * costs one `readdir` pass; declining late costs the whole machine.
+ */
+export const DEFAULT_AUTO_INDEX_MAX_FILES = 8_000
 
 /** Default number of files parsed concurrently. */
 export const DEFAULT_CONCURRENCY = 4
@@ -225,6 +238,8 @@ export interface Config {
    * Requires the host's `jobs` service: the build is never run synchronously inside session creation,
    * so a composition without background jobs simply schedules nothing.
    */
+  /** Cap on candidate source files a session-start scan may find before it declines to index. */
+  autoIndexMaxFiles?: number
   autoIndexOnSession?: boolean
   /**
    * How stale an existing index may be before a new session refreshes it in the background (default
@@ -250,6 +265,8 @@ export const Config: z<Config> = z.object({
   watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
+  /** Cap on candidate source files a session-start scan may find before it declines to index. */
+  autoIndexMaxFiles: z.number().default(DEFAULT_AUTO_INDEX_MAX_FILES),
   autoIndexOnSession: z.boolean().default(true),
   autoRefreshAfterMs: z.number().default(DEFAULT_AUTO_REFRESH_AFTER_MS),
 })
@@ -500,7 +517,7 @@ function autoIndexOnSession(
       owner: agent.id,
       kind: AUTO_INDEX_JOB_KIND,
       label: `codegraph auto index ${root}`,
-      run: handle => runAutoIndexJob(ctx, root, handle),
+      run: handle => runAutoIndexJob(ctx, root, config, handle),
     })
     // Marked only after the registry accepted the job, so a transient refusal leaves the workspace
     // eligible for the next session that opens in it.
@@ -510,6 +527,54 @@ function autoIndexOnSession(
     // never a reason to stop a session from starting.
     console.error(`codegraph-tree-sitter: automatic indexing for a new session failed: ${String(error)}`)
   }
+}
+
+/**
+ * How many candidate source files `root` holds, when that is past the session-start limit.
+ *
+ * Deliberately a **bounded directory walk that never reads a file**: it counts what `discover` would
+ * hand the parser and stops one past the limit. The alternative — starting the real run and bailing
+ * when memory runs out — is what froze the machine this guard exists to prevent.
+ * @param root - absolute workspace path.
+ * @param config - the resolved plugin configuration (for the limit and the exclude list).
+ * @param signal - aborts the walk.
+ * @returns the count once it exceeds the limit, or `undefined` when the workspace is small enough.
+ */
+async function exceedsAutoIndexLimit(
+  root: string,
+  config: ResolvedConfig,
+  signal: AbortSignal,
+): Promise<number | undefined> {
+  const excluded = new Set(config.exclude)
+  const limit = config.autoIndexMaxFiles
+  let count = 0
+
+  async function scan(relativeDir: string): Promise<boolean> {
+    signal.throwIfAborted()
+    let entries
+    try {
+      entries = await readdir(posix.join(root, relativeDir), { withFileTypes: true })
+    } catch {
+      // An unreadable directory contributes nothing to a count that exists to protect against size.
+      return false
+    }
+    for (const entry of entries) {
+      const relativePath = relativeDir === '' ? entry.name : `${relativeDir}/${entry.name}`
+      if (isExcluded(entry.name, relativePath, entry.isDirectory(), excluded, [])) continue
+      if (entry.isDirectory()) {
+        if (await scan(relativePath)) return true
+        continue
+      }
+      if (!entry.isFile()) continue
+      const spec = languageFor(posix.extname(entry.name))
+      if (spec === undefined) continue
+      count += 1
+      if (count > limit) return true
+    }
+    return false
+  }
+
+  return (await scan('')) ? count : undefined
 }
 
 /**
@@ -540,10 +605,26 @@ function readStatusIndexedAt(root: string): number | undefined {
  * @param handle - the job's producer face, for the job's live log.
  * @returns the job's cancellation hook and settlement promise.
  */
-function runAutoIndexJob(ctx: Context, root: string, handle: AutoIndexJobHandle): AutoIndexJobHooks {
+function runAutoIndexJob(
+  ctx: Context,
+  root: string,
+  config: ResolvedConfig,
+  handle: AutoIndexJobHandle,
+): AutoIndexJobHooks {
   const controller = new AbortController()
   const done = (async (): Promise<AutoIndexJobOutcome> => {
     try {
+      const oversized = await exceedsAutoIndexLimit(root, config, controller.signal)
+      if (oversized !== undefined) {
+        // Declining here is the whole point of the check: parsing this workspace would exhaust the
+        // WASM heap and take the desktop down with it, and an automatic index is a convenience.
+        handle.append(
+          `Skipped automatic indexing of ${root}: it holds at least ${String(oversized)} candidate ` +
+            `source files, past the ${String(config.autoIndexMaxFiles)}-file session-start limit. ` +
+            `Run codegraph_index yourself if you want a graph for it.\n`,
+        )
+        return { status: 'failed', detail: 'workspace too large for automatic indexing' }
+      }
       const report = await ctx.codegraph.index(root, controller.signal)
       handle.append(
         `Indexed ${root}: ${report.filesIndexed} files, ${report.nodeCount} symbols, ` +

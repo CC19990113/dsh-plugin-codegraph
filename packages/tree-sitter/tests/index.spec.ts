@@ -720,6 +720,31 @@ describe('codegraph-tree-sitter plugin', () => {
       expect(functionNames(join(root, DATABASE_RELATIVE_PATH))).toEqual(['a'])
     })
 
+    it('declines a workspace past the session-start file limit instead of killing the heap', async () => {
+      // The real case this guards: a session opened in a home or tool-data directory. `maxFiles`
+      // (50,000) does not stop it — 21,752 files under ~/.dsh stayed below that ceiling and the
+      // Tree-sitter WASM heap died mid-parse while the desktop froze. The session-start limit is
+      // intentionally far lower than the manual one, so the guard fires in a test-sized project.
+      const files = Object.fromEntries(
+        Array.from({ length: 6 }, (_, index) => [`f${String(index)}.ts`, `export const v${String(index)} = ${String(index)}\n`]),
+      )
+      const root = await writeProject(files)
+      const registry = fakeJobs()
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 }, jobs: registry.jobs })
+
+      registerAgent(ctx, root)
+
+      // The job still starts — the check runs inside its producer, off the event dispatch — and it
+      // settles as failed with the reason, rather than skipping silently.
+      expect(registry.started).toHaveLength(1)
+      const job = registry.started[0]!
+      const outcome = await driveJob(job).done
+      expect(outcome.status).toBe('failed')
+      expect(job.output.join('')).toContain('past the 3-file session-start limit')
+      // Nothing was written: declining means no graph, not a partial one.
+      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+    })
+
     it('leaves a workspace whose index is fresh alone', async () => {
       const root = await writeProject({
         'a.ts': 'export function a() {}\n',
