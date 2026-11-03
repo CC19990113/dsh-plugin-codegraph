@@ -74,13 +74,71 @@ A plugin can wrap `@colbymchenry/codegraph`'s own CLI instead of reimplementing 
 
 - **No second thing to install.** Shelling out to a CLI means the host needs that binary on `PATH`, at a version the plugin was actually tested against — an extra install step, and an extra way for the two to drift out of sync. `npm install` is the whole story here; the indexer and store run in-process.
 - **Fewer tools, not more.** Every tool's schema rides along in the system prompt on every turn, whether or not it gets called that turn. Ten single-purpose tools (one per CLI subcommand) cost more of that budget, every turn, than the two this plugin exposes — `codegraph`'s `operation` field is a dispatch, not a compromise.
-- **No incremental reparse, on purpose.** "Sync only the changed files" sounds obviously faster, but the rule this graph resolves calls by — one unique name wins workspace-wide — is global: adding a symbol in file A that collides with one already indexed from file B should invalidate edges that point at B, even though B never changed. A parser that reparses only the touched files and patches in their own new edges has no way to notice that. `codegraph_index` always rebuilds the whole graph instead — cheaper to reparse everything than to get that invalidation wrong — leaving incremental reparse as a future optimization only once it's an actual, measured bottleneck, not a default.
+- **The parse cache is incremental; the edges are not.** "Sync only the changed files" sounds obviously faster, but the rule this graph resolves calls by — one unique name wins workspace-wide — is global: adding a symbol in file A that collides with one already indexed from file B should invalidate edges that point at B, even though B never changed. A parser that reparses only the touched files *and patches in their own new edges* has no way to notice that. So this plugin splits the two: each file's extraction is cached and reused (**991 ms → 45 ms** on a 337-file workspace), while edges are rebuilt over the whole graph on every run. Reparsing everything was the wrong thing to save; re-resolving everything is cheap.
 
 ## Language coverage
 
-The bundled indexer parses **TypeScript, TSX, JavaScript, JSX, Python, Go, Java, C, C++, C#, PHP, Rust, Ruby, Zig, Kotlin, Swift, Dart, and Scala**. Grammars load lazily — one per language, on first sight of a matching file — so a Go-only workspace never loads a Python grammar.
+Eighteen languages, all bundled — no per-language setup, and grammars load lazily, so a Go-only workspace never pays for the Python one.
 
-The **store is format-bound, not language-bound**: a graph built by the `codegraph` CLI over languages this indexer does not parse is still fully queryable. If you need broader indexing coverage today, index with the CLI and query through this plugin.
+| Language | Extensions | Language | Extensions |
+|---|---|---|---|
+| TypeScript | `.ts` `.mts` `.cts` | C | `.c` `.h` |
+| TSX | `.tsx` | C++ | `.cpp` `.cc` `.cxx` `.hpp` `.hh` `.hxx` |
+| JavaScript | `.js` `.mjs` `.cjs` | C# | `.cs` |
+| JSX | `.jsx` | PHP | `.php` |
+| Python | `.py` `.pyi` | Rust | `.rs` |
+| Go | `.go` | Ruby | `.rb` |
+| Java | `.java` | Zig | `.zig` |
+| Kotlin | `.kt` `.kts` | Swift | `.swift` |
+| Dart | `.dart` | Scala | `.scala` `.sc` |
+
+The **store is format-bound, not language-bound**: a graph the `codegraph` CLI built over languages this indexer does not parse stays fully queryable. For anything outside the table above, index with the CLI and query through this plugin.
+
+## Auto-indexing
+
+Three things keep the graph current without you asking:
+
+- **A new session starts with an index.** Open a session in a workspace that has never been indexed and the plugin starts a background build for it — the first structural question already has a graph. A workspace that already has one is left to the watcher.
+- **Watching is on by default.** Every in-scope directory is watched through the host's filesystem seam, and a debounced change triggers a rebuild. An empty change set schedules nothing, so the plugin's own `.codegraph` writes never loop.
+- **Re-indexing parses only what changed.** Each run persists its per-file extraction; the next one confirms each file by mtime+size (or a SHA-256, under `cacheVerify: 'hash'`) and reuses it. Measured on a 337-file workspace: **991 ms for the first run, 45 ms for every run after** — and a watch rebuild after one edit costs about the same as reusing everything else.
+
+Two more things keep it *correct* rather than just current: committed build output (a checked-in `dist/` tree) is skipped by shape so its mangled names never pollute resolution, and a large workspace's first index moves to a background job instead of holding a tool call open.
+
+## What this plugin adds
+
+Five things you do not get from a CLI an agent shells out to:
+
+1. **No second runtime.** `dsh plugin add dsh-plugin-codegraph` is the whole install — no binary on `PATH`, no MCP server to wire, no version to keep in sync with the plugin.
+2. **An index that starts itself.** Opening a session in an unindexed workspace builds one in the background, and every change after that is picked up by a watcher.
+3. **A model that knows the state of what it is querying.** Every request's prompt carries how large the index is, when it was built, and how many generated files were skipped — for free, instead of a `status` round-trip.
+4. **Entry points for a human.** `/codegraph status|index|files`, and a settings panel with a rebuild button. Neither spends a model turn.
+5. **Re-indexes that are cheap.** A parse cache makes a repeat run 991 ms → 45 ms on a 337-file workspace, so "just re-index before you answer" stops being an expensive habit.
+
+## Compared with the `codegraph` CLI
+
+The CLI is the origin of the on-disk format this plugin reads and writes, and it covers more languages than this indexer parses. They are aimed at different things:
+
+| | This plugin | [`@colbymchenry/codegraph`](https://github.com/colbymchenry/codegraph) |
+|---|---|---|
+| **Shape** | A DSH plugin: two tools, a `/codegraph` command, a settings panel, and a prompt section | An MCP server plus a CLI you install and wire into each agent |
+| **Install** | `dsh plugin add dsh-plugin-codegraph` — no second runtime, no MCP config | Install the CLI, run its setup to wire the MCP server per agent, then `codegraph init` per project |
+| **First index** | Automatic: opening a session in an unindexed workspace starts one | Explicit `codegraph init` per project |
+| **Index state** | One line in the prompt on every request (size, age, skipped artifacts) plus a settings panel | Ask its MCP tool |
+| **Re-index cost** | Parse cache — 991 ms → 45 ms on a 337-file workspace | Not measured here |
+| **Background indexing** | Past ~1000 files the run becomes a `ctx.jobs` job | Not measured here |
+| **Committed bundles** | Skipped by shape (`.min.`, or an average line > 500 chars) | Not measured here |
+| **Languages** | 18 bundled grammars | 40+, including ArkTS, Vue, Svelte, Solidity, Terraform |
+| **On-disk format** | Schema v4 — the CLI's own path and format | Schema v4 (origin) |
+
+What this plugin adds is not a better graph — it is the same graph, delivered where DSH can act on it: no second process, no MCP plumbing, a state line the model reads for free, a human command, and a UI.
+
+## Roadmap: a Rust core
+
+The indexer is the one place this plugin is visibly slow on a first run, and the reason is structural: parsing runs on the host's main thread through `web-tree-sitter`, one file at a time. On a 337-file workspace a cold walk is 920 ms, and parsing plus extraction is essentially all of it — measured serially, 425 ms of `parse` and 491 ms of `extractFile`.
+
+The plan is to move extraction into a Rust core — `tree-sitter`'s native crate behind a `napi-rs` addon, with a worker pool parsing files in parallel — keeping every behaviour above (same cache keys, same resolution rules, same schema v4 output) so nothing user-visible changes except the clock. A sibling indexer here went from 17.6 s single-threaded in JS to 4.1 s on 8 threads in Rust (4.3×) on a different, heavier workload; that is the right order of magnitude for this one, not a promise.
+
+**Not in the current release.** Until it lands, the parse cache is what makes repeats cheap, and the first run is what it is.
 
 ## Call resolution never guesses
 
