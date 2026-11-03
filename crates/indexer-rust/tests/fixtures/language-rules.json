@@ -1,0 +1,334 @@
+[
+  {
+    "language": "typescript",
+    "extensions": [
+      ".ts",
+      ".mts",
+      ".cts"
+    ],
+    "wasmFile": "tree-sitter-typescript.wasm",
+    "definitions": [
+      {
+        "nodeType": "function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "generator_function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "method_definition",
+        "kind": "method",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "class_declaration",
+        "kind": "class",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "function",
+        "nameField": "name",
+        "value": {
+          "field": "value",
+          "types": [
+            "arrow_function",
+            "function_expression",
+            "generator_function"
+          ]
+        }
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "variable",
+        "nameField": "name",
+        "nameNodeTypes": [
+          "identifier"
+        ],
+        "scopeRestricted": true
+      },
+      {
+        "nodeType": "interface_declaration",
+        "kind": "interface",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "type_alias_declaration",
+        "kind": "type_alias",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "enum_declaration",
+        "kind": "enum",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "property_identifier",
+        "kind": "enum_member",
+        "nameField": "@self",
+        "parentType": "enum_body"
+      },
+      {
+        "nodeType": "enum_assignment",
+        "kind": "enum_member",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "public_field_definition",
+        "kind": "field",
+        "nameField": "name",
+        "scopeRestricted": true
+      }
+    ],
+    "callTypes": [
+      "call_expression"
+    ],
+    "callFunctionField": "function",
+    "importTypes": [
+      "import_statement"
+    ],
+    "bareFunctionScopeTypes": [
+      "function_expression",
+      "arrow_function",
+      "generator_function"
+    ]
+  },
+  {
+    "language": "tsx",
+    "extensions": [
+      ".tsx"
+    ],
+    "wasmFile": "tree-sitter-tsx.wasm",
+    "definitions": [
+      {
+        "nodeType": "function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "generator_function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "method_definition",
+        "kind": "method",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "class_declaration",
+        "kind": "class",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "function",
+        "nameField": "name",
+        "value": {
+          "field": "value",
+          "types": [
+            "arrow_function",
+            "function_expression",
+            "generator_function"
+          ]
+        }
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "variable",
+        "nameField": "name",
+        "nameNodeTypes": [
+          "identifier"
+        ],
+        "scopeRestricted": true
+      },
+      {
+        "nodeType": "interface_declaration",
+        "kind": "interface",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "type_alias_declaration",
+        "kind": "type_alias",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "enum_declaration",
+        "kind": "enum",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "property_identifier",
+        "kind": "enum_member",
+        "nameField": "@self",
+        "parentType": "enum_body"
+      },
+      {
+        "nodeType": "enum_assignment",
+        "kind": "enum_member",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "public_field_definition",
+        "kind": "field",
+        "nameField": "name",
+        "scopeRestricted": true
+      }
+    ],
+    "callTypes": [
+      "call_expression"
+    ],
+    "callFunctionField": "function",
+    "importTypes": [
+      "import_statement"
+    ],
+    "bareFunctionScopeTypes": [
+      "function_expression",
+      "arrow_function",
+      "generator_function"
+    ]
+  },
+  {
+    "language": "javascript",
+    "extensions": [
+      ".js",
+      ".mjs",
+      ".cjs"
+    ],
+    "wasmFile": "tree-sitter-javascript.wasm",
+    "definitions": [
+      {
+        "nodeType": "function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "generator_function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "method_definition",
+        "kind": "method",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "class_declaration",
+        "kind": "class",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "function",
+        "nameField": "name",
+        "value": {
+          "field": "value",
+          "types": [
+            "arrow_function",
+            "function_expression",
+            "generator_function"
+          ]
+        }
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "variable",
+        "nameField": "name",
+        "nameNodeTypes": [
+          "identifier"
+        ],
+        "scopeRestricted": true
+      },
+      {
+        "nodeType": "field_definition",
+        "kind": "field",
+        "nameField": "property",
+        "scopeRestricted": true
+      }
+    ],
+    "callTypes": [
+      "call_expression"
+    ],
+    "callFunctionField": "function",
+    "importTypes": [
+      "import_statement"
+    ],
+    "bareFunctionScopeTypes": [
+      "function_expression",
+      "arrow_function",
+      "generator_function"
+    ]
+  },
+  {
+    "language": "jsx",
+    "extensions": [
+      ".jsx"
+    ],
+    "wasmFile": "tree-sitter-javascript.wasm",
+    "definitions": [
+      {
+        "nodeType": "function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "generator_function_declaration",
+        "kind": "function",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "method_definition",
+        "kind": "method",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "class_declaration",
+        "kind": "class",
+        "nameField": "name"
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "function",
+        "nameField": "name",
+        "value": {
+          "field": "value",
+          "types": [
+            "arrow_function",
+            "function_expression",
+            "generator_function"
+          ]
+        }
+      },
+      {
+        "nodeType": "variable_declarator",
+        "kind": "variable",
+        "nameField": "name",
+        "nameNodeTypes": [
+          "identifier"
+        ],
+        "scopeRestricted": true
+      },
+      {
+        "nodeType": "field_definition",
+        "kind": "field",
+        "nameField": "property",
+        "scopeRestricted": true
+      }
+    ],
+    "callTypes": [
+      "call_expression"
+    ],
+    "callFunctionField": "function",
+    "importTypes": [
+      "import_statement"
+    ],
+    "bareFunctionScopeTypes": [
+      "function_expression",
+      "arrow_function",
+      "generator_function"
+    ]
+  }
+]

@@ -1,0 +1,164 @@
+{
+  "definitions": [
+    {
+      "key": "0:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Base",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 13,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "1:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Foo",
+      "container": [],
+      "startLine": 2,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "2:2",
+      "parentKey": "1:0",
+      "kind": "field",
+      "name": "x",
+      "container": [
+        "Foo"
+      ],
+      "startLine": 3,
+      "endLine": 3,
+      "startColumn": 2,
+      "endColumn": 7,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "3:2",
+      "parentKey": "1:0",
+      "kind": "field",
+      "name": "y",
+      "container": [
+        "Foo"
+      ],
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 2,
+      "endColumn": 14,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "decorators": []
+    },
+    {
+      "key": "4:2",
+      "parentKey": "1:0",
+      "kind": "method",
+      "name": "constructor",
+      "container": [
+        "Foo"
+      ],
+      "startLine": 5,
+      "endLine": 5,
+      "startColumn": 2,
+      "endColumn": 27,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "5:2",
+      "parentKey": "1:0",
+      "kind": "method",
+      "name": "load",
+      "container": [
+        "Foo"
+      ],
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 2,
+      "endColumn": 39,
+      "isExported": false,
+      "isAsync": true,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "7:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Expr",
+      "container": [],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 0,
+      "endColumn": 32,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "8:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Qualified",
+      "container": [],
+      "startLine": 9,
+      "endLine": 9,
+      "startColumn": 0,
+      "endColumn": 34,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "9:4",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "topVar",
+      "container": [],
+      "startLine": 10,
+      "endLine": 10,
+      "startColumn": 4,
+      "endColumn": 14,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "5:2",
+      "calleeName": "fetch",
+      "line": 6,
+      "column": 24,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [],
+  "heritage": [
+    {
+      "sourceKey": "1:0",
+      "targetName": "Base",
+      "relation": "extends"
+    }
+  ]
+}

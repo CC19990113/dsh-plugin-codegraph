@@ -1,0 +1,222 @@
+{
+  "definitions": [
+    {
+      "key": "0:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "foo",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 6,
+      "endColumn": 28,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "1:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "empty",
+      "container": [],
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 6,
+      "endColumn": 25,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "5:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "zero",
+      "container": [],
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 6,
+      "endColumn": 22,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "6:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "two",
+      "container": [],
+      "startLine": 7,
+      "endLine": 7,
+      "startColumn": 6,
+      "endColumn": 33,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "7:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "dyn",
+      "container": [],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 6,
+      "endColumn": 31,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "9:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "thing",
+      "container": [],
+      "startLine": 10,
+      "endLine": 10,
+      "startColumn": 0,
+      "endColumn": 19,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "10:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "bar",
+      "container": [],
+      "startLine": 11,
+      "endLine": 11,
+      "startColumn": 0,
+      "endColumn": 17,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "11:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "whole",
+      "container": [],
+      "startLine": 12,
+      "endLine": 12,
+      "startColumn": 0,
+      "endColumn": 19,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "17:4",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "x",
+      "container": [],
+      "startLine": 18,
+      "endLine": 18,
+      "startColumn": 4,
+      "endColumn": 9,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "0:6",
+      "calleeName": "require",
+      "line": 1,
+      "column": 12,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "1:6",
+      "calleeName": "require",
+      "line": 2,
+      "column": 14,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": null,
+      "calleeName": "require",
+      "line": 3,
+      "column": 0,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": null,
+      "calleeName": "require",
+      "line": 4,
+      "column": 14,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": null,
+      "calleeName": "log",
+      "line": 5,
+      "column": 0,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": null,
+      "calleeName": "require",
+      "line": 5,
+      "column": 12,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "5:6",
+      "calleeName": "require",
+      "line": 6,
+      "column": 13,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "6:6",
+      "calleeName": "require",
+      "line": 7,
+      "column": 12,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "7:6",
+      "calleeName": "require",
+      "line": 8,
+      "column": 12,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [
+    {
+      "localName": "foo",
+      "importedName": "*",
+      "specifier": "./foo"
+    },
+    {
+      "localName": "empty",
+      "importedName": "*",
+      "specifier": ""
+    },
+    {
+      "localName": "",
+      "importedName": "*",
+      "specifier": "./sideeffect"
+    }
+  ],
+  "heritage": []
+}

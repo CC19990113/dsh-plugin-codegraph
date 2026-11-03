@@ -1,0 +1,151 @@
+{
+  "definitions": [
+    {
+      "key": "0:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Foo",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 12,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "1:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Ext",
+      "container": [],
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 0,
+      "endColumn": 25,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "2:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Multi",
+      "container": [],
+      "startLine": 3,
+      "endLine": 3,
+      "startColumn": 0,
+      "endColumn": 53,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "3:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Mixin",
+      "container": [],
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 0,
+      "endColumn": 34,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "4:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Generic",
+      "container": [],
+      "startLine": 5,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 37,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "5:0",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "C",
+      "container": [],
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 0,
+      "endColumn": 27,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "6:0",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "IThing",
+      "container": [],
+      "startLine": 7,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 19,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "3:0",
+      "calleeName": "mixin",
+      "line": 4,
+      "column": 20,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [],
+  "heritage": [
+    {
+      "sourceKey": "1:0",
+      "targetName": "Base",
+      "relation": "extends"
+    },
+    {
+      "sourceKey": "2:0",
+      "targetName": "Base",
+      "relation": "extends"
+    },
+    {
+      "sourceKey": "2:0",
+      "targetName": "IThing",
+      "relation": "implements"
+    },
+    {
+      "sourceKey": "2:0",
+      "targetName": "IOther",
+      "relation": "implements"
+    },
+    {
+      "sourceKey": "5:0",
+      "targetName": "A",
+      "relation": "extends"
+    },
+    {
+      "sourceKey": "5:0",
+      "targetName": "B",
+      "relation": "extends"
+    }
+  ]
+}

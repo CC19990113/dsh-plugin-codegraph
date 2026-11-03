@@ -1,0 +1,22 @@
+{
+  "definitions": [
+    {
+      "key": "0:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "App",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 7,
+      "endColumn": 46,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [],
+  "imports": [],
+  "heritage": []
+}

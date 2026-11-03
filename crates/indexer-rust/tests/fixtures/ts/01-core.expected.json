@@ -1,0 +1,147 @@
+{
+  "definitions": [
+    {
+      "key": "0:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "foo",
+      "container": [],
+      "startLine": 1,
+      "endLine": 3,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "3:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "MathHelper",
+      "container": [],
+      "startLine": 4,
+      "endLine": 8,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "4:2",
+      "parentKey": "3:0",
+      "kind": "method",
+      "name": "calc",
+      "container": [
+        "MathHelper"
+      ],
+      "startLine": 5,
+      "endLine": 7,
+      "startColumn": 2,
+      "endColumn": 3,
+      "isExported": false,
+      "isAsync": true,
+      "isStatic": true,
+      "decorators": []
+    },
+    {
+      "key": "8:13",
+      "parentKey": null,
+      "kind": "function",
+      "name": "arrow",
+      "container": [],
+      "startLine": 9,
+      "endLine": 9,
+      "startColumn": 13,
+      "endColumn": 42,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "9:15",
+      "parentKey": null,
+      "kind": "function",
+      "name": "baz",
+      "container": [],
+      "startLine": 10,
+      "endLine": 10,
+      "startColumn": 15,
+      "endColumn": 32,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "12:0",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "Thing",
+      "container": [],
+      "startLine": 13,
+      "endLine": 13,
+      "startColumn": 0,
+      "endColumn": 29,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "13:0",
+      "parentKey": null,
+      "kind": "type_alias",
+      "name": "Alias",
+      "container": [],
+      "startLine": 14,
+      "endLine": 14,
+      "startColumn": 0,
+      "endColumn": 19,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "0:7",
+      "calleeName": "bar",
+      "line": 2,
+      "column": 9,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "4:2",
+      "calleeName": "foo",
+      "line": 6,
+      "column": 11,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "8:13",
+      "calleeName": "foo",
+      "line": 9,
+      "column": 36,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [
+    {
+      "localName": "bar",
+      "importedName": "bar",
+      "specifier": "./bar"
+    },
+    {
+      "localName": "Def",
+      "importedName": "default",
+      "specifier": "./def"
+    }
+  ],
+  "heritage": []
+}

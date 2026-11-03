@@ -37,6 +37,7 @@ import { CodegraphIndexerId, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codeg
 import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
+import type { EngineMode } from './walk.ts'
 import { writeParseCache } from './cache.ts'
 import type { ParseCacheFileSystem } from './cache.ts'
 import { resolveWorkspace } from './resolve.ts'
@@ -59,7 +60,12 @@ export { SCHEMA_VERSION, writeGraph } from './schema.ts'
 export { EXTRACTION_CACHE_RELATIVE_PATH, EXTRACTION_CACHE_VERSION, readParseCache, writeParseCache } from './cache.ts'
 export type { CachedFile, CacheTarget, CacheTargetInfo, ParseCacheFileSystem } from './cache.ts'
 export { isExcluded, walkAndExtract } from './walk.ts'
-export type { WalkConfig, WalkResult } from './walk.ts'
+export type { EngineMode, WalkConfig, WalkResult } from './walk.ts'
+// The native engine is part of this package's story even though it is optional at runtime: a
+// deployment that wants to know *why* the faster path is not running can call `loadRustEngine()`
+// itself and read the answer, instead of inferring it from timings.
+export { extractWithRust, loadRustEngine, RUST_BATCH_SIZE, RUST_LANGUAGES } from './rust-engine.ts'
+export type { LoadRustEngineOptions, RustEngine, RustExtractInput } from './rust-engine.ts'
 export { createWatcher } from './watcher.ts'
 export type {
   DegradeReason,
@@ -177,6 +183,17 @@ export interface Config {
    */
   cacheVerify?: 'stat' | 'hash'
   /**
+   * Which extractor parses a file (default `'auto'`): this package's own `extractFile` (`'js'`), the
+   * native Rust addon from `crates/indexer-rust` (`'rust'`), or whichever is available (`'auto'`).
+   *
+   * `'rust'` and `'auto'` hand every TypeScript/JavaScript/JSX/TSX file to the addon in batches and
+   * fall back to `extractFile` for anything it does not answer for — a language it does not handle, a
+   * file it declines, or a deployment with no built artifact at all. Both paths produce the same
+   * extraction, pinned by `rust-parity.spec.ts`, so this setting only trades speed against how the
+   * work is scheduled. `'js'` is exactly the behaviour this package had before the addon existed.
+   */
+  engine?: EngineMode
+  /**
    * Watch the workspace for file changes and refresh the index automatically after a successful
    * `index()` call establishes a baseline (default true). Set `watch: false` to keep indexing purely
    * explicit instead.
@@ -219,6 +236,7 @@ export const Config: z<Config> = z.object({
   concurrency: z.number().default(DEFAULT_CONCURRENCY),
   reuseParsedCache: z.boolean().default(true),
   cacheVerify: z.union([z.const('stat'), z.const('hash')]).default('stat'),
+  engine: z.union([z.const('auto'), z.const('js'), z.const('rust')]).default('auto'),
   watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
@@ -540,6 +558,7 @@ async function runIndex(
     languages: config.languages,
     reuseParsedCache: config.reuseParsedCache,
     cacheVerify: config.cacheVerify,
+    engine: config.engine,
   }, fs, signal)
   signal?.throwIfAborted()
 

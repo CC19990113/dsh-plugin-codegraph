@@ -1,0 +1,31 @@
+[package]
+name = "dsh-plugin-codegraph-indexer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+publish = false
+description = "Native tree-sitter extraction engine for dsh-plugin-codegraph (TypeScript/TSX/JavaScript/JSX)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = "3.16"
+napi-derive = "3.7"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tree-sitter = "0.27"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# napi hands panics back to JS as rejected promises; keeping unwind is what makes
+# the `catch_unwind` in `lib.rs` able to turn a Rust panic into an error instead of
+# aborting the host process.
+panic = "unwind"
+lto = "thin"
+codegen-units = 1

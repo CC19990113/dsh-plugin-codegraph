@@ -1,0 +1,65 @@
+{
+  "definitions": [
+    {
+      "key": "2:0",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "Item",
+      "container": [],
+      "startLine": 3,
+      "endLine": 3,
+      "startColumn": 0,
+      "endColumn": 29,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "4:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "List",
+      "container": [],
+      "startLine": 5,
+      "endLine": 8,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "4:7",
+      "calleeName": "useMemo",
+      "line": 6,
+      "column": 14,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "4:7",
+      "calleeName": "map",
+      "line": 6,
+      "column": 28,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": "4:7",
+      "calleeName": "map",
+      "line": 7,
+      "column": 14,
+      "isMemberCall": true
+    }
+  ],
+  "imports": [
+    {
+      "localName": "useMemo",
+      "importedName": "useMemo",
+      "specifier": "react"
+    }
+  ],
+  "heritage": []
+}

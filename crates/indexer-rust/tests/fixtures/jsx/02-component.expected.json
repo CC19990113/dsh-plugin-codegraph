@@ -1,0 +1,65 @@
+{
+  "definitions": [
+    {
+      "key": "2:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "Counter",
+      "container": [],
+      "startLine": 3,
+      "endLine": 11,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "12:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "List",
+      "container": [],
+      "startLine": 13,
+      "endLine": 15,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "2:7",
+      "calleeName": "useState",
+      "line": 4,
+      "column": 20,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "2:7",
+      "calleeName": "setN",
+      "line": 8,
+      "column": 29,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "12:7",
+      "calleeName": "map",
+      "line": 14,
+      "column": 14,
+      "isMemberCall": true
+    }
+  ],
+  "imports": [
+    {
+      "localName": "useState",
+      "importedName": "useState",
+      "specifier": "react"
+    }
+  ],
+  "heritage": []
+}

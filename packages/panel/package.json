@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph-panel",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Settings-page panel for dsh-plugin-codegraph: a \u4ee3\u7801\u56fe\u8c31 tab that shows one workspace's index status and can rebuild it. Browser half only \u2014 every number comes from the host's /dsh-plugin-codegraph/api/* routes.",
   "keywords": [
     "dsh",

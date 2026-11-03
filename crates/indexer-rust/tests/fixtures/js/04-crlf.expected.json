@@ -1,0 +1,91 @@
+{
+  "definitions": [
+    {
+      "key": "0:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "crlfOne",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 0,
+      "endColumn": 38,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "1:6",
+      "parentKey": null,
+      "kind": "function",
+      "name": "crlfArrow",
+      "container": [],
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 6,
+      "endColumn": 32,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "2:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "CrlfClass",
+      "container": [],
+      "startLine": 3,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "3:2",
+      "parentKey": "2:0",
+      "kind": "method",
+      "name": "method",
+      "container": [
+        "CrlfClass"
+      ],
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 2,
+      "endColumn": 31,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "0:0",
+      "calleeName": "helper",
+      "line": 1,
+      "column": 28,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "1:6",
+      "calleeName": "helper",
+      "line": 2,
+      "column": 23,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "3:2",
+      "calleeName": "crlfOne",
+      "line": 4,
+      "column": 20,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [],
+  "heritage": []
+}

@@ -16,11 +16,15 @@ import { readParseCache } from './cache.ts'
 import type { CachedFile, ParseCacheFileSystem } from './cache.ts'
 import { createParser } from './grammar.ts'
 import { extractFile } from './extract.ts'
+import type { FileExtraction } from './extract.ts'
 import { loadGitignore, matchesGitignore } from './gitignore.ts'
 import type { GitignoreRule } from './gitignore.ts'
 import { languageFor } from './languages.ts'
+import type { LanguageSpec } from './languages.ts'
 import { isMinifiedName, looksMinified, measureText } from './minified.ts'
 import type { ExtractedFile } from './resolve.ts'
+import { extractWithRust, loadRustEngine } from './rust-engine.ts'
+import type { RustExtractInput } from './rust-engine.ts'
 
 /**
  * Whether one directory entry is excluded from both the index and (for `watcher.ts`) the watch tree —
@@ -42,6 +46,17 @@ export function isExcluded(
   return excluded.has(name) || matchesGitignore(gitignoreRules, relativePath, isDirectory)
 }
 
+/**
+ * Which extractor parses a candidate file.
+ *
+ * `'js'` is this package's own `extractFile` for everything — the pre-engine behaviour, kept as an
+ * exact escape hatch. `'rust'` prefers the native addon. `'auto'` is `'rust'` when the artifact loads
+ * and `'js'` otherwise, which is what a deployment wants: the faster path when it exists, never a
+ * failure when it does not. In both non-`'js'` modes a language the addon does not handle — and any
+ * single file it declines — is still parsed by `extractFile`.
+ */
+export type EngineMode = 'auto' | 'js' | 'rust'
+
 /** The walk's tunable bounds, mirroring this package's `Config`. */
 export interface WalkConfig {
   /** Directory segment names never descended into. */
@@ -54,6 +69,13 @@ export interface WalkConfig {
   readonly concurrency: number
   /** Restrict extraction to these seam language labels when set; every loaded grammar otherwise. */
   readonly languages?: readonly string[]
+  /**
+   * Which extractor parses a candidate — see {@link EngineMode}. Absent means `'auto'`. The choice
+   * never changes the files that are indexed or the answer's shape: both extractors produce the same
+   * {@link FileExtraction}, which `rust-parity.spec.ts` pins, so this only trades speed against
+   * leaving the process's own parser out of the run.
+   */
+  readonly engine?: EngineMode
   /**
    * Leave generated (bundled or minified) artifacts out of the index instead of parsing them. See
    * `./minified.ts` for the two signals; a workspace that commits its build output is the case this
@@ -152,11 +174,30 @@ async function discover(
   return { candidates, overflow }
 }
 
+/**
+ * One candidate that survived every per-file decision (size, minified shape, cache) and whose text is
+ * therefore in memory, waiting for an extractor. Holding the text here is what lets the walk hand a
+ * whole batch of files to the native engine in one call instead of parsing each one in turn.
+ */
+interface PendingFile {
+  readonly path: string
+  readonly language: string
+  /** The `LANGUAGE_TABLE` entry the extraction rules come from. */
+  readonly spec: LanguageSpec
+  readonly text: string
+  readonly size: number
+  readonly modifiedAt: number
+  readonly lineCount: number
+}
+
 /** What the walk decided to do with one candidate. */
 type CandidateOutcome =
-  | { readonly outcome: 'extracted'; readonly file: ExtractedFile; readonly reused: boolean }
+  // The only way a candidate arrives already extracted is the parse cache, which is why this variant
+  // carries no "was it reused" flag: it always was, and everything else waits as `pending`.
+  | { readonly outcome: 'cached'; readonly file: ExtractedFile }
   | { readonly outcome: 'minified' }
   | { readonly outcome: 'skipped' }
+  | { readonly outcome: 'pending'; readonly file: PendingFile }
 
 /**
  * The walk's view of a file whose extraction came from the cache: the same record a fresh parse
@@ -185,15 +226,22 @@ function reusedFile(path: string, cached: CachedFile, stats: { readonly mtimeMs:
 }
 
 /**
- * Parse one candidate, or reuse the extraction a previous run cached for it.
- * @param candidate - the file to parse.
+ * Read one candidate's text and apply every decision that does not need an extractor, or reuse the
+ * extraction a previous run cached for it.
+ *
+ * No parsing happens here on purpose: a fresh file is reported as {@link PendingFile} so that
+ * `walkAndExtract` can batch all of them into the native engine at once. That split is why the cache
+ * checks, the size bound, and the minified decision must stay in this function — they are the per-file
+ * policy the batch above them knows nothing about.
+ * @param candidate - the file to read.
  * @param config - the walk's bounds.
  * @param cache - the previous run's extractions, keyed by project-relative path.
- * @param signal - aborts the parse.
- * @returns the extracted file (and whether it came from the cache), `'minified'` when it was skipped
- *   as generated output, or `'skipped'` when it is over {@link WalkConfig.maxFileBytes}.
+ * @param signal - aborts the read.
+ * @returns the record a previous run cached for this file, `'minified'` when it was skipped as
+ *   generated output, `'skipped'` when it is over {@link WalkConfig.maxFileBytes}, or the pending file
+ *   an extractor still has to handle.
  */
-async function parseCandidate(
+async function prepareCandidate(
   candidate: Candidate,
   config: WalkConfig,
   cache: ReadonlyMap<string, CachedFile>,
@@ -214,45 +262,127 @@ async function parseCandidate(
   if (cached !== undefined) {
     if (config.cacheVerify === 'stat') {
       if (cached.modifiedAt === stats.mtimeMs && cached.size === stats.size) {
-        return { outcome: 'extracted', file: reusedFile(candidate.path, cached, stats), reused: true }
+        return { outcome: 'cached', file: reusedFile(candidate.path, cached, stats) }
       }
     } else {
       // Content is the only thing this mode trusts, so the read it needs to verify is also the read
       // the parse below would need — a miss here costs nothing extra.
       text = await readFile(candidate.absolute, 'utf8')
       if (createHash('sha256').update(text).digest('hex') === cached.contentHash) {
-        return { outcome: 'extracted', file: reusedFile(candidate.path, cached, stats), reused: true }
+        return { outcome: 'cached', file: reusedFile(candidate.path, cached, stats) }
       }
     }
   }
 
   text ??= await readFile(candidate.absolute, 'utf8')
+  signal?.throwIfAborted()
   const shape = measureText(text)
   if (config.skipMinified && looksMinified(candidate.path, shape)) return { outcome: 'minified' }
-  const parser = await createParser(spec)
+  // Everything above is filesystem policy; everything below is extraction, and extraction is the one
+  // step that can run on the native engine — so this is exactly where the candidate waits for one.
+  return {
+    outcome: 'pending',
+    file: {
+      path: candidate.path,
+      language: spec.language,
+      spec,
+      text,
+      size: stats.size,
+      modifiedAt: stats.mtimeMs,
+      lineCount: shape.lineCount,
+    },
+  }
+}
+
+/**
+ * Parse one pending file with this package's own extractor.
+ * @param file - the file, whose text is already in memory.
+ * @param signal - aborts the parse.
+ * @returns what the parser found.
+ */
+async function extractWithJs(file: PendingFile, signal?: AbortSignal): Promise<FileExtraction> {
+  const parser = await createParser(file.spec)
   try {
     signal?.throwIfAborted()
-    const tree = parser.parse(text)
+    const tree = parser.parse(file.text)
     /* v8 ignore next 2 -- createParser() always assigns a language before returning; parse() returns
      * null only when the parser has none. */
-    if (tree === null) return { outcome: 'skipped' }
-    const extraction = extractFile(tree, spec)
-    return {
-      outcome: 'extracted',
-      reused: false,
-      file: {
-        path: candidate.path,
-        language: spec.language,
-        size: stats.size,
-        modifiedAt: stats.mtimeMs,
-        contentHash: createHash('sha256').update(text).digest('hex'),
-        lineCount: shape.lineCount,
-        extraction,
-      },
-    }
+    if (tree === null) return { definitions: [], calls: [], imports: [], heritage: [] }
+    return extractFile(tree, file.spec)
   } finally {
     parser.delete()
   }
+}
+
+/**
+ * The file record an extraction belongs to: the metadata `prepareCandidate` measured, plus a content
+ * hash of the text it read.
+ * @param file - the pending file this extraction came from.
+ * @param extraction - what an extractor found in it.
+ * @returns the file as the resolver, the parse cache, and the graph writer all expect it.
+ */
+function extractedFile(file: PendingFile, extraction: FileExtraction): ExtractedFile {
+  return {
+    path: file.path,
+    language: file.language,
+    size: file.size,
+    modifiedAt: file.modifiedAt,
+    contentHash: createHash('sha256').update(file.text).digest('hex'),
+    lineCount: file.lineCount,
+    extraction,
+  }
+}
+
+/**
+ * Extract every pending file, native engine first and `extractFile` for whatever it did not answer
+ * for, returning the results in the order they were given.
+ *
+ * The native call is one batch per {@link RUST_BATCH_SIZE} files (see `rust-engine.ts`); a file it
+ * did not answer for is parsed here instead. That fallback is per path, not per batch: one broken file
+ * costs one `extractFile` call, not the whole workspace's fast path.
+ * @param pending - the files waiting for an extractor, in discovery order.
+ * @param config - the walk's bounds, for the engine choice and the concurrency of the JS fallback.
+ * @param signal - aborts the extraction.
+ * @returns one record per pending file, in the same order.
+ */
+async function extractPending(
+  pending: readonly PendingFile[],
+  config: WalkConfig,
+  signal?: AbortSignal,
+): Promise<ExtractedFile[]> {
+  if (pending.length === 0) return []
+  // `'js'` never even loads the addon: the mode exists to run exactly the pre-engine code path.
+  const engine = config.engine === 'js' ? undefined : loadRustEngine()
+  // Every pending file is offered to the engine, including the languages it does not handle: it drops
+  // those itself (`RUST_LANGUAGES`), so the walk never keeps a second copy of that list in sync.
+  const rusted = engine === undefined
+    ? new Map<string, FileExtraction>()
+    : extractWithRust(pending.map(toRustInput), engine) ?? new Map<string, FileExtraction>()
+  const extracted = new Array<ExtractedFile>(pending.length)
+  const fallback: { readonly index: number; readonly file: PendingFile }[] = []
+  for (const [index, file] of pending.entries()) {
+    const extraction = rusted.get(file.path)
+    // A hit is the addon's extraction; a miss is this one path falling back, for any of the reasons
+    // `rust-engine.ts` documents — never a reason to distrust the batch.
+    if (extraction === undefined) fallback.push({ index, file })
+    else extracted[index] = extractedFile(file, extraction)
+  }
+  const parsed = await mapWithConcurrency(fallback, config.concurrency, async entry => ({
+    index: entry.index,
+    file: extractedFile(entry.file, await extractWithJs(entry.file, signal)),
+  }))
+  for (const result of parsed) extracted[result.index] = result.file
+  return extracted
+}
+
+/**
+ * One pending file as the native engine takes it: only the three fields it reads, so the walk's own
+ * bookkeeping (stat data, spec, line count) never crosses the boundary.
+ * @param file - the pending file.
+ * @returns the addon's input shape.
+ */
+function toRustInput(file: PendingFile): RustExtractInput {
+  return { path: file.path, language: file.language, text: file.text }
 }
 
 /** Run `tasks` with at most `concurrency` in flight at once, preserving input order in the result. */
@@ -288,6 +418,11 @@ async function mapWithConcurrency<T, R>(
  * is the identity every cache entry is recorded under — and the only seam-mediated work here is the
  * parse cache's read. A capability is not a bound, so it does not belong in the config that mirrors
  * this package's `Config`.
+ *
+ * Every candidate is read and decided first, then the files needing extraction go to the native
+ * engine in batches with `extractFile` as the fallback — see {@link WalkConfig.engine}. The two phases
+ * exist so one addon call can cover a whole workspace; neither changes what a per-file decision
+ * (size, minified, cache) does.
  * @param projectRoot - absolute path of the workspace to index.
  * @param config - the walk's bounds.
  * @param fs - the filesystem seam the parse cache is read through.
@@ -303,18 +438,33 @@ export async function walkAndExtract(
 ): Promise<WalkResult> {
   const { candidates, overflow } = await discover(projectRoot, config, signal)
   const cache = config.reuseParsedCache ? await readParseCache(fs, projectRoot) : new Map<string, CachedFile>()
-  const parsed = await mapWithConcurrency(candidates, config.concurrency, candidate => parseCandidate(candidate, config, cache, signal))
-  const files: ExtractedFile[] = []
+  const prepared = await mapWithConcurrency(candidates, config.concurrency, candidate => prepareCandidate(candidate, config, cache, signal))
+  const pending: PendingFile[] = []
   let filesSkipped = overflow
   let filesMinified = 0
-  let filesReused = 0
-  for (const result of parsed) {
+  for (const result of prepared) {
     if (result.outcome === 'skipped') filesSkipped++
     else if (result.outcome === 'minified') filesMinified++
-    else {
-      files.push(result.file)
-      if (result.reused) filesReused++
+    else if (result.outcome === 'pending') pending.push(result.file)
+  }
+  const extracted = await extractPending(pending, config, signal)
+  // One pass in discovery order: a cache hit is already a record, a pending file takes the next record
+  // `extractPending` produced. Which engine extracted a file therefore never shows in the ordering.
+  const files: ExtractedFile[] = []
+  let filesReused = 0
+  let next = 0
+  for (const result of prepared) {
+    if (result.outcome === 'skipped' || result.outcome === 'minified') continue
+    if (result.outcome === 'pending') {
+      const file = extracted[next]
+      next++
+      /* v8 ignore next 2 -- extractPending() returns exactly one record per pending file, in order. */
+      if (file === undefined) continue
+      files.push(file)
+      continue
     }
+    files.push(result.file)
+    filesReused++
   }
   return { files, filesSkipped, filesMinified, filesReused }
 }

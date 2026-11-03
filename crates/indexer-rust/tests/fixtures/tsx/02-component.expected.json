@@ -1,0 +1,78 @@
+{
+  "definitions": [
+    {
+      "key": "3:7",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "Props",
+      "container": [],
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 7,
+      "endColumn": 56,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "5:13",
+      "parentKey": null,
+      "kind": "function",
+      "name": "Counter",
+      "container": [],
+      "startLine": 6,
+      "endLine": 14,
+      "startColumn": 13,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "15:15",
+      "parentKey": null,
+      "kind": "function",
+      "name": "App",
+      "container": [],
+      "startLine": 16,
+      "endLine": 18,
+      "startColumn": 15,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "5:13",
+      "calleeName": "useState",
+      "line": 7,
+      "column": 28,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "5:13",
+      "calleeName": "setValue",
+      "line": 11,
+      "column": 29,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [
+    {
+      "localName": "useState",
+      "importedName": "useState",
+      "specifier": "react"
+    },
+    {
+      "localName": "FC",
+      "importedName": "FC",
+      "specifier": "react"
+    }
+  ],
+  "heritage": []
+}

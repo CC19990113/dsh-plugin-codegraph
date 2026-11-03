@@ -1,0 +1,2 @@
+# Fixtures exist to pin exact bytes (line endings included: 04-crlf.js is the point).
+crates/indexer-rust/tests/fixtures/** -text

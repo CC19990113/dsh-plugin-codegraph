@@ -1,0 +1,269 @@
+{
+  "definitions": [
+    {
+      "key": "7:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "value",
+      "container": [],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 6,
+      "endColumn": 15,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "8:4",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "uninitialized",
+      "container": [],
+      "startLine": 9,
+      "endLine": 9,
+      "startColumn": 4,
+      "endColumn": 25,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "11:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "outer",
+      "container": [],
+      "startLine": 12,
+      "endLine": 15,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "21:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "y",
+      "container": [],
+      "startLine": 22,
+      "endLine": 25,
+      "startColumn": 6,
+      "endColumn": 4,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "26:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "Fields",
+      "container": [],
+      "startLine": 27,
+      "endLine": 32,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "27:2",
+      "parentKey": "26:0",
+      "kind": "field",
+      "name": "x",
+      "container": [
+        "Fields"
+      ],
+      "startLine": 28,
+      "endLine": 28,
+      "startColumn": 2,
+      "endColumn": 7,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "28:2",
+      "parentKey": "26:0",
+      "kind": "field",
+      "name": "y",
+      "container": [
+        "Fields"
+      ],
+      "startLine": 29,
+      "endLine": 29,
+      "startColumn": 2,
+      "endColumn": 14,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "decorators": []
+    },
+    {
+      "key": "29:2",
+      "parentKey": "26:0",
+      "kind": "field",
+      "name": "#priv",
+      "container": [
+        "Fields"
+      ],
+      "startLine": 30,
+      "endLine": 30,
+      "startColumn": 2,
+      "endColumn": 11,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "30:2",
+      "parentKey": "26:0",
+      "kind": "method",
+      "name": "ordinary",
+      "container": [
+        "Fields"
+      ],
+      "startLine": 31,
+      "endLine": 31,
+      "startColumn": 2,
+      "endColumn": 15,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "33:0",
+      "parentKey": null,
+      "kind": "enum",
+      "name": "Color",
+      "container": [],
+      "startLine": 34,
+      "endLine": 34,
+      "startColumn": 0,
+      "endColumn": 24,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "33:13",
+      "parentKey": "33:0",
+      "kind": "enum_member",
+      "name": "Red",
+      "container": [
+        "Color"
+      ],
+      "startLine": 34,
+      "endLine": 34,
+      "startColumn": 13,
+      "endColumn": 16,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "33:18",
+      "parentKey": "33:0",
+      "kind": "enum_member",
+      "name": "Blue",
+      "container": [
+        "Color"
+      ],
+      "startLine": 34,
+      "endLine": 34,
+      "startColumn": 18,
+      "endColumn": 22,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "34:0",
+      "parentKey": null,
+      "kind": "enum",
+      "name": "Valued",
+      "container": [],
+      "startLine": 35,
+      "endLine": 35,
+      "startColumn": 0,
+      "endColumn": 25,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "34:14",
+      "parentKey": "34:0",
+      "kind": "enum_member",
+      "name": "Green",
+      "container": [
+        "Valued"
+      ],
+      "startLine": 35,
+      "endLine": 35,
+      "startColumn": 14,
+      "endColumn": 23,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": null,
+      "calleeName": "parse",
+      "line": 6,
+      "column": 0,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": null,
+      "calleeName": "forEach",
+      "line": 17,
+      "column": 0,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": null,
+      "calleeName": "compute",
+      "line": 18,
+      "column": 16,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [
+    {
+      "localName": "renamed",
+      "importedName": "bar",
+      "specifier": "./bar"
+    },
+    {
+      "localName": "ns",
+      "importedName": "*",
+      "specifier": "./ns"
+    },
+    {
+      "localName": "Def",
+      "importedName": "default",
+      "specifier": ""
+    }
+  ],
+  "heritage": []
+}

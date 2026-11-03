@@ -663,6 +663,39 @@ describe('codegraph-tree-sitter plugin', () => {
     await expect(ctx.plugin(CodegraphTreeSitter, { cacheVerify: 'sha' })).rejects.toThrow()
   })
 
+  it('rejects an unknown engine mode at load', async () => {
+    const ctx = new Context()
+    await ctx.plugin(Codegraph)
+    new FakeFs(ctx)
+    await expect(ctx.plugin(CodegraphTreeSitter, { engine: 'wasm' })).rejects.toThrow()
+  })
+
+  it('defaults the engine to auto, which indexes the same workspace as js', async () => {
+    expect(CodegraphTreeSitter.Config({}).engine).toBe('auto')
+    const root = await writeProject({
+      'src/a.ts': "import { b } from './b'\nexport function a() { return b() }\n",
+      'src/b.ts': 'export function b() { return 1 }\n',
+      'src/c.py': 'def c():\n    return 1\n',
+    })
+    // No cache on either run: with reuse off, every file goes through an extractor both times, so any
+    // difference in the written graph has to come from the extractor the engine setting selected.
+    const jsReport = await (await seam({ engine: 'js', reuseParsedCache: false })).codegraph.index(root)
+    const autoReport = await (await seam({ engine: 'auto', reuseParsedCache: false })).codegraph.index(root)
+    expect(autoReport).toMatchObject({
+      projectRoot: root,
+      filesIndexed: jsReport.filesIndexed,
+      filesSkipped: jsReport.filesSkipped,
+      filesMinified: jsReport.filesMinified,
+      filesReused: jsReport.filesReused,
+      nodeCount: jsReport.nodeCount,
+      edgeCount: jsReport.edgeCount,
+      unresolvedCount: jsReport.unresolvedCount,
+      unresolvedLikelyInternalCount: jsReport.unresolvedLikelyInternalCount,
+      languages: jsReport.languages,
+    })
+    expect(jsReport.nodeCount).toBeGreaterThan(0)
+  })
+
   describe('automatic indexing on session start', () => {
     it('starts one background index for a new session in an unindexed workspace', async () => {
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })

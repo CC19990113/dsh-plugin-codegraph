@@ -1,0 +1,273 @@
+{
+  "definitions": [
+    {
+      "key": "3:7",
+      "parentKey": null,
+      "kind": "interface",
+      "name": "User",
+      "container": [],
+      "startLine": 4,
+      "endLine": 4,
+      "startColumn": 7,
+      "endColumn": 50,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "5:7",
+      "parentKey": null,
+      "kind": "type_alias",
+      "name": "UserId",
+      "container": [],
+      "startLine": 6,
+      "endLine": 6,
+      "startColumn": 7,
+      "endColumn": 27,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "7:0",
+      "parentKey": null,
+      "kind": "enum",
+      "name": "Role",
+      "container": [],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 0,
+      "endColumn": 44,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "7:12",
+      "parentKey": "7:0",
+      "kind": "enum_member",
+      "name": "Admin",
+      "container": [
+        "Role"
+      ],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 12,
+      "endColumn": 27,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "7:29",
+      "parentKey": "7:0",
+      "kind": "enum_member",
+      "name": "User",
+      "container": [
+        "Role"
+      ],
+      "startLine": 8,
+      "endLine": 8,
+      "startColumn": 29,
+      "endColumn": 42,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "10:7",
+      "parentKey": null,
+      "kind": "class",
+      "name": "UserService",
+      "container": [],
+      "startLine": 11,
+      "endLine": 29,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "11:2",
+      "parentKey": "10:7",
+      "kind": "field",
+      "name": "instance",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 12,
+      "endLine": 12,
+      "startColumn": 2,
+      "endColumn": 38,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "decorators": []
+    },
+    {
+      "key": "12:2",
+      "parentKey": "10:7",
+      "kind": "field",
+      "name": "baseUrl",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 13,
+      "endLine": 13,
+      "startColumn": 2,
+      "endColumn": 33,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "13:2",
+      "parentKey": "10:7",
+      "kind": "field",
+      "name": "#cache",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 14,
+      "endLine": 14,
+      "startColumn": 2,
+      "endColumn": 34,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "15:2",
+      "parentKey": "10:7",
+      "kind": "method",
+      "name": "constructor",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 16,
+      "endLine": 16,
+      "startColumn": 2,
+      "endColumn": 51,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "17:2",
+      "parentKey": "10:7",
+      "kind": "method",
+      "name": "fetchUser",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 18,
+      "endLine": 24,
+      "startColumn": 2,
+      "endColumn": 3,
+      "isExported": false,
+      "isAsync": true,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "25:2",
+      "parentKey": "10:7",
+      "kind": "method",
+      "name": "create",
+      "container": [
+        "UserService"
+      ],
+      "startLine": 26,
+      "endLine": 28,
+      "startColumn": 2,
+      "endColumn": 3,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": true,
+      "decorators": []
+    },
+    {
+      "key": "30:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "makeService",
+      "container": [],
+      "startLine": 31,
+      "endLine": 33,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "34:15",
+      "parentKey": null,
+      "kind": "class",
+      "name": "AppModule",
+      "container": [],
+      "startLine": 35,
+      "endLine": 35,
+      "startColumn": 15,
+      "endColumn": 33,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": null,
+      "calleeName": "Injectable",
+      "line": 10,
+      "column": 1,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "17:2",
+      "calleeName": "get",
+      "line": 19,
+      "column": 19,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": "17:2",
+      "calleeName": "set",
+      "line": 22,
+      "column": 4,
+      "isMemberCall": true
+    },
+    {
+      "callerKey": "30:7",
+      "calleeName": "create",
+      "line": 32,
+      "column": 9,
+      "isMemberCall": true
+    }
+  ],
+  "imports": [
+    {
+      "localName": "Injectable",
+      "importedName": "Injectable",
+      "specifier": "@angular/core"
+    },
+    {
+      "localName": "Observable",
+      "importedName": "Observable",
+      "specifier": "rxjs"
+    }
+  ],
+  "heritage": []
+}

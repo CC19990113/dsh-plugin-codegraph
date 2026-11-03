@@ -132,13 +132,26 @@ The CLI is the origin of the on-disk format this plugin reads and writes, and it
 
 What this plugin adds is not a better graph — it is the same graph, delivered where DSH can act on it: no second process, no MCP plumbing, a state line the model reads for free, a human command, and a UI.
 
-## Roadmap: a Rust core
+## The Rust engine
 
-The indexer is the one place this plugin is visibly slow on a first run, and the reason is structural: parsing runs on the host's main thread through `web-tree-sitter`, one file at a time. On a 337-file workspace a cold walk is 920 ms, and parsing plus extraction is essentially all of it — measured serially, 425 ms of `parse` and 491 ms of `extractFile`.
+Parsing was the one place this plugin was visibly slow, and the reason was structural: `parse` plus `extractFile` ran on the host's main thread through `web-tree-sitter`, one file at a time. A native addon now does that work instead — `tree-sitter` compiled into Rust, one worker per core through rayon — and it is on for **TypeScript, TSX, JavaScript and JSX** already.
 
-The plan is to move extraction into a Rust core — `tree-sitter`'s native crate behind a `napi-rs` addon, with a worker pool parsing files in parallel — keeping every behaviour above (same cache keys, same resolution rules, same schema v4 output) so nothing user-visible changes except the clock. A sibling indexer here went from 17.6 s single-threaded in JS to 4.1 s on 8 threads in Rust (4.3×) on a different, heavier workload; that is the right order of magnitude for this one, not a promise.
+| | JS + WASM | Rust addon |
+|---|---|---|
+| parse + extract (336 files, same input) | 727 ms | **110 ms** |
+| whole walk, 337-file workspace (median of 4) | 807–886 ms | **277–336 ms** (2.6–2.9×) |
 
-**Not in the current release.** Until it lands, the parse cache is what makes repeats cheap, and the first run is what it is.
+The whole-walk number is lower than the engine number because the walk is not only extraction: reading files, hashing, caching decisions and the final write are unchanged, and three files in that workspace would need the JS engine anyway (below). On a workspace with no such files the gap widens.
+
+Three details worth knowing:
+
+- **It is optional, and it degrades quietly.** The addon ships as `.node` platform artifacts; if it is missing, unbuilt, or throws, every file falls back to the JS extractor. `engine: 'js'` forces that path, `'auto'` (default) uses the addon where it can.
+- **The rule table is not duplicated.** The addon receives `LANGUAGE_TABLE` as JSON and builds its matchers from it, so the two engines cannot drift on what a rule says — only on how well they implement it, which is what the parity tests measure.
+- **Files whose parse tree has errors are left to the JS engine.** The two grammars (WASM 0.20 vs crate 0.23/0.25) recover from malformed input differently — on a real workspace that showed up as one phantom definition and a line off by one — so the addon refuses those files and `walk` extracts them the old way. Correct over fast.
+
+`packages/tree-sitter/tests/rust-parity.spec.ts` asserts the two engines produce **byte-identical** extractions on every fixture, and on a real workspace when `CODEGRAPH_PARITY_WORKSPACE` is set.
+
+**Coverage and next.** Four languages today. Python, Go, Java, C/C++, Rust, C# and the rest still go through the JS extractor, which keeps working unchanged; each new language needs its own Rust-side special cases plus a parity run before it ships. Multi-platform binaries (Linux, Windows, both architectures) are not published yet — building the addon is documented in [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md).
 
 ## Call resolution never guesses
 
@@ -184,6 +197,7 @@ The bundle mounts all four plugins in one layer. Retune any of them from the pro
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
     skipMinified: true # the default; set false to index committed bundles anyway
+    engine: auto # auto | js | rust — prefer the native addon where it applies
     watch: true # the default; shown for clarity — set false to keep indexing purely explicit
 
 - id: codegraph-tool

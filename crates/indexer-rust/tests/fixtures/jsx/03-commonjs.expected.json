@@ -1,0 +1,73 @@
+{
+  "definitions": [
+    {
+      "key": "0:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "React",
+      "container": [],
+      "startLine": 1,
+      "endLine": 1,
+      "startColumn": 6,
+      "endColumn": 30,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "2:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "Widget",
+      "container": [],
+      "startLine": 3,
+      "endLine": 5,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "6:0",
+      "parentKey": null,
+      "kind": "function",
+      "name": "helper",
+      "container": [],
+      "startLine": 7,
+      "endLine": 7,
+      "startColumn": 0,
+      "endColumn": 37,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "0:6",
+      "calleeName": "require",
+      "line": 1,
+      "column": 14,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "6:0",
+      "calleeName": "Widget",
+      "line": 7,
+      "column": 27,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [
+    {
+      "localName": "React",
+      "importedName": "*",
+      "specifier": "react"
+    }
+  ],
+  "heritage": []
+}

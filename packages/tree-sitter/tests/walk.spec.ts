@@ -1,12 +1,13 @@
 import { chmod, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { writeParseCache } from '../src/cache.ts'
 import type { ParseCacheFileSystem } from '../src/cache.ts'
 import { walkAndExtract } from '../src/walk.ts'
 import type { WalkResult } from '../src/walk.ts'
+import { installRustEngineForTests } from '../src/rust-engine.ts'
 import { writeProject } from './fixture.ts'
 
 /**
@@ -163,6 +164,44 @@ describe('walkAndExtract', () => {
     const root = await writeProject({ 'src/a.ts': 'export function a() { return 1 }\n' })
     const { filesMinified } = await walkAndExtract(root, BASE, fs)
     expect(filesMinified).toBe(0)
+  })
+})
+
+describe('walkAndExtract engine modes', () => {
+  it('produces exactly the same result on `js` as on the default `auto`', async () => {
+    const root = await writeProject({
+      'src/a.ts': "import { b } from './b'\nexport function a() { return b() }\n",
+      'src/b.ts': 'export function b() { return 1 }\n',
+      'src/c.py': 'def c():\n    return 1\n',
+    })
+    const js = await walkAndExtract(root, { ...BASE, engine: 'js' }, fs)
+    const auto = await walkAndExtract(root, { ...BASE, engine: 'auto' }, fs)
+    // The engine choice is invisible in the result — same files, same order, same extractions.
+    expect(auto).toStrictEqual(js)
+  })
+
+  it('never consults the native engine on `js`', async () => {
+    const root = await writeProject({ 'a.ts': 'export function a() { return 1 }\n' })
+    const called = vi.fn(() => JSON.stringify({ results: [], supported: [] }))
+    installRustEngineForTests({ extractWorkspace: called })
+    try {
+      const { files } = await walkAndExtract(root, { ...BASE, engine: 'js' }, fs)
+      expect(called).not.toHaveBeenCalled()
+      expect(files[0]?.extraction.definitions.map(definition => definition.name)).toEqual(['a'])
+    } finally {
+      installRustEngineForTests(undefined)
+    }
+  })
+
+  it('always parses a language the native engine does not handle with extractFile', async () => {
+    const root = await writeProject({ 'a.py': 'def a():\n    return 1\n' })
+    installRustEngineForTests({ extractWorkspace: () => JSON.stringify({ results: [], supported: [] }) })
+    try {
+      const { files } = await walkAndExtract(root, { ...BASE, engine: 'rust' }, fs)
+      expect(files[0]?.extraction.definitions.map(definition => definition.name)).toEqual(['a'])
+    } finally {
+      installRustEngineForTests(undefined)
+    }
   })
 })
 

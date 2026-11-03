@@ -132,14 +132,26 @@ codegraph查一次就能全部答上来。本插件把两半都带齐了:一半�
 
 本插件加的不是"更好的图"——是同一份图,送到 DSH 能直接用它的地方:没有第二个进程、没有 MCP 管道、模型每轮免费读到状态、人有命令、有界面。
 
-## 路线：Rust 内核
+## Rust 引擎
 
-索引器是这个插件唯一明显慢的地方,而慢的原因是结构性的:解析跑在宿主主线程上、走 `web-tree-sitter`、一次一个文件。337 个文件的工作区冷跑一次 walk 要 920ms,而解析加抽取基本就是全部——串行实测 `parse` 425ms、`extractFile` 491ms。
+解析曾经是这个插件唯一明显慢的地方,原因在结构上:`parse` 加 `extractFile` 跑在宿主主线程、走 `web-tree-sitter`、一次一个文件。现在这一步交给原生 addon——`tree-sitter` 编进 Rust、rayon 一个核一个 worker——并且**已经对 TypeScript / TSX / JavaScript / JSX 生效**。
 
-计划是把抽取搬进 Rust 内核——`tree-sitter` 的原生 crate 套一层 `napi-rs`,worker 池并行解析——上面所有行为(同样的缓存键、同样的解析规则、同样的 schema v4 输出)都不变,用户能感觉到的只有时间。本机另一个索引器项目实测过 JS 单核 17.6s → Rust 8 线程 4.1s(4.3 倍),那是不同的工作负载;这个量级对这边有参考意义,但不是承诺。
+| | JS + WASM | Rust addon |
+|---|---|---|
+| parse + extract(336 文件,同输入) | 727ms | **110ms** |
+| 整轮 walk(337 文件工作区,4 次中位) | 807–886ms | **277–336ms**(2.6–2.9×) |
 
-**当前版本还没有。** 在那之前,重复索引靠解析缓存变便宜,首次索引该多久还是多久。
+整轮数字比引擎数字低,是因为 walk 不只做抽取:读文件、算哈希、缓存判定、最终写库都没变,而且那个工作区里有 3 个文件无论如何都得走 JS(见下)。没有这类文件的工作区,差距会更大。
 
+三个要知道的点:
+
+- **可选,而且会安静地降级。** addon 以 `.node` 平台产物分发;缺失、没构建、或者抛错时,每个文件都回退到 JS 抽取器。`engine: 'js'` 强制走老路,`'auto'`(默认)能用 addon 就用。
+- **规则表不做第二份。** addon 收到的是 `LANGUAGE_TABLE` 的 JSON,靠它建匹配器,所以两个引擎在"规则怎么说"上不可能漂移——能差的只有"实现得多准",而这正是对拍测试在量的东西。
+- **解析树有错的文件留给 JS 引擎。** 两份语法(WASM 0.20 vs crate 0.23/0.25)对畸形输入的恢复方式不同——真实工作区上表现为一条假定义和一处行号差 1——所以 addon 拒收这类文件,由 `walk` 按老办法抽取。宁可慢,不要错。
+
+`packages/tree-sitter/tests/rust-parity.spec.ts` 断言两个引擎在每个 fixture 上产出**逐字节相同**的抽取结果;设置 `CODEGRAPH_PARITY_WORKSPACE` 时还会对真实工作区做同样的断言。
+
+**覆盖与下一步。** 目前四种语言。Python、Go、Java、C/C++、Rust、C# 等仍然走 JS 抽取器,行为完全不变;每加一种语言都需要补 Rust 侧的特判并跑一遍对拍。多平台二进制(Linux、Windows、两种架构)还没发布——怎么构建 addon 写在 [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md)。
 ## 宁可漏,不可错
 
 每个调用点按固定顺序解析:先看 import 能不能指向某个已索引的文件;不行就看**调用方这个文件自己**是不是恰好只有一个同名定义——词法作用域先于全仓库说话,两个测试文件各有一个 `helper`、两个组件各有一个 `render`,都不会被当成歧义;再不行才看全仓库是不是只有一个同名定义;还不行,**就不产出这条边**,把它记进未解析计数。
@@ -184,6 +196,7 @@ dsh plugin --profile <name> add dsh-plugin-codegraph
     exclude: ['node_modules', 'dist', 'vendor']
     respectGitignore: true
     skipMinified: true # 这是默认值,写出来只是为了清楚——想让压缩产物也进图就设 false
+    engine: auto # auto | js | rust —— auto 表示能上原生 addon 就用
     watch: true # 这是默认值,写出来只是为了清楚——想关掉设 false
 
 - id: codegraph-tool

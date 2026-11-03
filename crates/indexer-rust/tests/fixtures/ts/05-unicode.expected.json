@@ -1,0 +1,121 @@
+{
+  "definitions": [
+    {
+      "key": "1:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "变量",
+      "container": [],
+      "startLine": 2,
+      "endLine": 2,
+      "startColumn": 6,
+      "endColumn": 17,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "2:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "smile",
+      "container": [],
+      "startLine": 3,
+      "endLine": 3,
+      "startColumn": 6,
+      "endColumn": 21,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "4:7",
+      "parentKey": null,
+      "kind": "function",
+      "name": "处理",
+      "container": [],
+      "startLine": 5,
+      "endLine": 7,
+      "startColumn": 7,
+      "endColumn": 1,
+      "isExported": true,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "8:6",
+      "parentKey": null,
+      "kind": "variable",
+      "name": "greeting",
+      "container": [],
+      "startLine": 9,
+      "endLine": 9,
+      "startColumn": 6,
+      "endColumn": 24,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "10:0",
+      "parentKey": null,
+      "kind": "class",
+      "name": "服务",
+      "container": [],
+      "startLine": 11,
+      "endLine": 15,
+      "startColumn": 0,
+      "endColumn": 1,
+      "isExported": false,
+      "isAsync": false,
+      "isStatic": false,
+      "decorators": []
+    },
+    {
+      "key": "11:2",
+      "parentKey": "10:0",
+      "kind": "method",
+      "name": "执行",
+      "container": [
+        "服务"
+      ],
+      "startLine": 12,
+      "endLine": 14,
+      "startColumn": 2,
+      "endColumn": 3,
+      "isExported": false,
+      "isAsync": true,
+      "isStatic": false,
+      "decorators": []
+    }
+  ],
+  "calls": [
+    {
+      "callerKey": "1:6",
+      "calleeName": "foo",
+      "line": 2,
+      "column": 11,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "4:7",
+      "calleeName": "转换",
+      "line": 6,
+      "column": 9,
+      "isMemberCall": false
+    },
+    {
+      "callerKey": "11:2",
+      "calleeName": "处理",
+      "line": 13,
+      "column": 10,
+      "isMemberCall": false
+    }
+  ],
+  "imports": [],
+  "heritage": []
+}
