@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -14,7 +14,19 @@ import Codegraph, { CodegraphIndexerId, CodegraphNodeId, CodegraphStoreId } from
 import type { CodegraphIndexReport, CodegraphNode, CodegraphRequest, CodegraphStoreProvider } from 'dsh-plugin-codegraph-service'
 import * as ToolCodegraph from '../src/index.ts'
 import { callTitle, projectRoot } from '../src/index.ts'
+import {
+  COMMAND_DEFINITION_ID,
+  COMMAND_DESCRIPTION,
+  COMMAND_INPUT_HINT,
+  COMMAND_NAME,
+  COMMAND_USAGE,
+  registerCommands,
+} from '../src/command.ts'
+import type { CommandDefinition, CommandResult } from '../src/command.ts'
 import { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms } from '../src/compose.ts'
+import { PANEL_ROUTE_PREFIX, registerPanelRoutes } from '../src/panel.ts'
+import type { PanelConfig, PanelRequest, PanelRoute } from '../src/panel.ts'
+import { expandTerms, ZH_SYNONYMS } from '../src/zh-synonyms.ts'
 import { toAffected, toHop, toRelation, toSymbol } from '../src/projection.ts'
 import { renderCodegraph } from '../src/render.ts'
 import type { CodegraphToolValue } from '../src/schema.ts'
@@ -100,6 +112,58 @@ describe('task decomposition and merging', () => {
 
   it('returns at most the requested number of terms, longest first', () => {
     expect(taskTerms('alpha bb gamma delta', 2)).toEqual(['alpha', 'gamma'])
+  })
+
+  it('reads a Chinese task as the English identifiers a graph is indexed under', () => {
+    expect(taskTerms('修改报表页的分页与筛选参数', 6)).toEqual([
+      '修改报表页的分页与筛选参数', 'report', 'page', 'filter', 'param', 'pageSize',
+    ])
+  })
+
+  it('spends a tight budget on one reading of every word before a second of any', () => {
+    // `分页` alone offers four readings, and a depth-first order would spend the whole budget on them,
+    // leaving the task's filters unsearched.
+    expect(taskTerms('修改报表页的分页与筛选参数', 4)).toEqual([
+      '修改报表页的分页与筛选参数', 'report', 'page', 'filter',
+    ])
+  })
+
+  it('keeps a two-character Chinese word, which is already a whole word', () => {
+    expect(taskTerms('报表', 6)).toEqual(['报表', 'report'])
+  })
+
+  it('leaves an English task byte for byte as it was', () => {
+    const task = 'how does the useUrlState hook sync with url_state'
+    expect(taskTerms(task, 10, { 报表: ['kpi'] })).toEqual(taskTerms(task, 10))
+    expect(taskTerms(task, 10)).toEqual(['useUrlState', 'url_state', 'hook', 'sync'])
+  })
+
+  it('merges deployment vocabulary over the built-in table', () => {
+    expect(taskTerms('报表 漏斗', 10, { 报表: ['kpi'], 漏斗: ['funnel'] }))
+      .toEqual(['报表', '漏斗', 'report', 'kpi', 'funnel'])
+  })
+
+  it('adds no candidate for a Chinese word it does not know', () => {
+    expect(taskTerms('涂鸦墙', 6)).toEqual(['涂鸦墙'])
+    expect(taskTerms('涂鸦墙', 6, { 报表: ['kpi'] })).toEqual(['涂鸦墙'])
+  })
+
+  it('returns no terms for an empty or blank task', () => {
+    expect(taskTerms('', 6)).toEqual([])
+    expect(taskTerms('  \n\t ', 6, { 报表: ['kpi'] })).toEqual([])
+  })
+
+  it('expands without truncating, leaving the budget to the caller', () => {
+    expect(expandTerms(['分页'], { 分页: ['current'] }))
+      .toEqual(['分页', 'page', 'pageSize', 'pagination', 'current'])
+  })
+
+  it('covers the high-frequency development words', () => {
+    for (const word of ['报表', '分页', '筛选', '列表', '详情', '弹窗', '表单', '导入', '导出', '新增',
+      '删除', '编辑', '权限', '配置', '缓存', '任务', '日志', '接口', '账户', '图表', '统计', '时间',
+      '状态', '错误', '加载', '刷新', '排序']) {
+      expect(ZH_SYNONYMS.get(word), word).toBeDefined()
+    }
   })
 
   it('ranks a declaration found by several terms above one found by a single term', () => {
@@ -617,6 +681,17 @@ describe('the tool plugin', () => {
     const limits = seen.filter(request => request.operation === 'search').map(request => request.limit)
     expect(limits).toEqual([7, 9, 1])
     expect(seen.find(request => request.operation === 'impact')?.depth).toBe(3)
+  })
+
+  it('searches the English identifiers a Chinese task stands for', async () => {
+    const root = await workspace({ 'app.ts': 'function main() {}\n' })
+    const ctx = await mount(root, { contextSynonyms: { 漏斗: ['funnel'] } })
+    const owner = agent(ctx, root)
+    const result = await call(ctx, owner, { operation: 'context', task: '报表的漏斗' }, 'zh')
+    expect(result.isError).toBe(false)
+    // The built-in `报表` reading and the deployment's own `漏斗` reading reach the store together.
+    expect(seen.filter(request => request.operation === 'search').map(request => request.query))
+      .toEqual(['报表的漏斗', 'report', 'funnel'])
   })
 
   it.each([
@@ -1155,5 +1230,627 @@ describe('rendering permutations of an otherwise identical answer', () => {
       files: [{ path: 'a.ts', symbols: [], code: 'x', truncated: true }],
     })
     expect(text).toContain('(source truncated)')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Settings-panel routes and the /codegraph command.
+//
+// Both surfaces attach through conditional injection, so these tests drive them through a minimal
+// stand-in host instead of a full Cordis composition: `inject` runs the callback synchronously with
+// the fake child, `effect` runs its body and keeps the disposer. That is exactly the contract the
+// production code relies on, and it lets every handler be called directly with a fake request and
+// response.
+// ---------------------------------------------------------------------------
+
+/** The summary shape `readIndexStatus` accepts. */
+const PANEL_STATUS = {
+  indexedAt: Date.UTC(2026, 10, 3, 1, 57),
+  filesIndexed: 12,
+  filesMinified: 3,
+  nodeCount: 40,
+  edgeCount: 30,
+  unresolvedCount: 5,
+  unresolvedLikelyInternalCount: 2,
+}
+
+/**
+ * A fake host context: `inject` executes its callback synchronously with a child that carries the
+ * same services, and `effect` runs its body so the registration's disposer can be exercised.
+ */
+function stubHost(services: Record<string, unknown>, options: { injectThrows?: boolean } = {}): {
+  ctx: Context
+  disposers: (() => void)[]
+  injections: string[][]
+} {
+  const disposers: (() => void)[] = []
+  const injections: string[][] = []
+  const child = {
+    effect(execute: () => () => void) {
+      const disposer = execute()
+      disposers.push(disposer)
+      return disposer
+    },
+    ...services,
+  }
+  const ctx = {
+    inject(deps: string[], callback: (value: unknown) => void) {
+      injections.push(deps)
+      if (options.injectThrows === true) throw new Error('service injection failed')
+      callback(child)
+    },
+    ...services,
+  } as unknown as Context
+  return { ctx, disposers, injections }
+}
+
+/** A fake web server that records the routes it is given. */
+function fakeWebServer(): { routes: PanelRoute[]; register(route: PanelRoute): () => void } {
+  const routes: PanelRoute[] = []
+  return {
+    routes,
+    register(route: PanelRoute) {
+      routes.push(route)
+      return () => {
+        const index = routes.indexOf(route)
+        if (index >= 0) routes.splice(index, 1)
+      }
+    },
+  }
+}
+
+/** A fake request; an absent body ends the async iterable immediately. */
+function panelRequest(url: string, method = 'GET', body?: string | Buffer): PanelRequest {
+  return {
+    url,
+    method,
+    async *[Symbol.asyncIterator]() {
+      if (body !== undefined) yield body
+    },
+  }
+}
+
+/** Call the one registered route and collect the answer it wrote. */
+async function invokePanel(route: PanelRoute | undefined, req: PanelRequest): Promise<{
+  statusCode: number
+  headers: Record<string, string>
+  body: string
+}> {
+  if (route === undefined) throw new Error('the panel route was not registered')
+  const answer = {
+    statusCode: 0,
+    headers: {} as Record<string, string>,
+    body: '',
+    setHeader(name: string, value: string) {
+      answer.headers[name] = value
+    },
+    end(body?: string) {
+      answer.body = body ?? ''
+    },
+  }
+  await route.handler(req, answer)
+  return answer
+}
+
+/** The parsed JSON body of one answer. */
+function panelBody(answer: { body: string }): Record<string, unknown> {
+  return JSON.parse(answer.body) as Record<string, unknown>
+}
+
+/** Register the panel routes over a fake host and hand back the recorded registration. */
+function panelSubject(codegraph: Record<string, unknown>, config: PanelConfig = { panel: true }): {
+  host: ReturnType<typeof stubHost>
+  webServer: ReturnType<typeof fakeWebServer>
+  route: PanelRoute | undefined
+} {
+  const webServer = fakeWebServer()
+  const host = stubHost({ webServer, codegraph })
+  registerPanelRoutes(host.ctx, config)
+  return { host, webServer, route: webServer.routes[0] }
+}
+
+/** The URL the browser client requests for one workspace's state. */
+function stateUrl(root: string): string {
+  return `${PANEL_ROUTE_PREFIX}/state?root=${encodeURIComponent(root)}`
+}
+
+describe('the settings-panel routes', () => {
+  it('registers one prefix route under the panel prefix and drops it on disposal', () => {
+    const webServer = fakeWebServer()
+    const host = stubHost({ webServer, codegraph: {} })
+    registerPanelRoutes(host.ctx, { panel: true })
+    expect(host.injections).toEqual([['webServer']])
+    expect(webServer.routes).toHaveLength(1)
+    expect(webServer.routes[0]).toMatchObject({ kind: 'prefix', path: PANEL_ROUTE_PREFIX })
+    host.disposers.forEach(dispose => dispose())
+    expect(webServer.routes).toEqual([])
+  })
+
+  it('registers nothing when the panel is turned off in config', () => {
+    const webServer = fakeWebServer()
+    const host = stubHost({ webServer, codegraph: {} })
+    registerPanelRoutes(host.ctx, { panel: false })
+    expect(host.injections).toEqual([])
+    expect(webServer.routes).toEqual([])
+  })
+
+  it('stays out of the way when the service cannot be injected', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const host = stubHost({}, { injectThrows: true })
+      expect(() => registerPanelRoutes(host.ctx, { panel: true })).not.toThrow()
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('answers a workspace whose summary the indexer wrote', async () => {
+    const root = await workspace({ '.codegraph/status.json': JSON.stringify(PANEL_STATUS) })
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(root)))
+    expect(answer.statusCode).toBe(200)
+    expect(answer.headers['content-type']).toBe('application/json; charset=utf-8')
+    expect(answer.headers['cache-control']).toBe('no-store')
+    expect(panelBody(answer)).toEqual({ ok: true, status: PANEL_STATUS })
+  })
+
+  it('tolerates a trailing slash on the route', async () => {
+    const root = await workspace({ '.codegraph/status.json': JSON.stringify(PANEL_STATUS) })
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(`${PANEL_ROUTE_PREFIX}/state/?root=${encodeURIComponent(root)}`))
+    expect(answer.statusCode).toBe(200)
+  })
+
+  it.each<[string, string]>([
+    ['no root parameter', `${PANEL_ROUTE_PREFIX}/state`],
+    ['a blank root', `${PANEL_ROUTE_PREFIX}/state?root=%20%20`],
+    ['a relative root', `${PANEL_ROUTE_PREFIX}/state?root=${encodeURIComponent('relative/path')}`],
+    ['a NUL byte in the root', `${PANEL_ROUTE_PREFIX}/state?root=${encodeURIComponent('/tmp/a\0b')}`],
+  ])('answers 400 for %s', async (_label, url) => {
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(url))
+    expect(answer.statusCode).toBe(400)
+    expect(panelBody(answer)).toEqual({ ok: false, message: 'root 必须是一个存在的绝对路径' })
+  })
+
+  it('answers 400 for an absolute path that does not exist', async () => {
+    const root = await workspace()
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(join(root, 'missing'))))
+    expect(answer.statusCode).toBe(400)
+  })
+
+  it('answers 400 for a path that is a file rather than a directory', async () => {
+    const root = await workspace({ 'a.ts': 'export {}\n' })
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(join(root, 'a.ts'))))
+    expect(answer.statusCode).toBe(400)
+  })
+
+  it('tells the user how to create a missing index', async () => {
+    const root = await workspace()
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(root)))
+    expect(answer.statusCode).toBe(404)
+    expect(panelBody(answer)).toEqual({ ok: false, message: '这个工作区还没有索引，先跑一次 codegraph_index' })
+  })
+
+  it('distinguishes an index built before the summary sidecar existed', async () => {
+    const root = await workspace({ '.codegraph/codegraph.db': '' })
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(root)))
+    expect(answer.statusCode).toBe(404)
+    expect(panelBody(answer)).toEqual({
+      ok: false,
+      message: '这个工作区的索引由旧版本构建，没有状态摘要；先跑一次 codegraph_index 重建',
+    })
+  })
+
+  it('answers 400 for a summary file it cannot parse', async () => {
+    const root = await workspace({ '.codegraph/status.json': '{ not json' })
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(stateUrl(root)))
+    expect(answer.statusCode).toBe(400)
+    expect(panelBody(answer)).toEqual({ ok: false, message: '索引状态文件无法解析，先跑一次 codegraph_index 重建' })
+  })
+
+  it('answers 404 for an unknown path and defaults a bare request to GET /', async () => {
+    const { route } = panelSubject({})
+    const unknown = await invokePanel(route, panelRequest(`${PANEL_ROUTE_PREFIX}/nope`))
+    expect(unknown.statusCode).toBe(404)
+    expect(panelBody(unknown)).toEqual({ ok: false, message: '未知的面板接口' })
+    const bare: PanelRequest = { async *[Symbol.asyncIterator]() {} }
+    const defaulted = await invokePanel(route, bare)
+    expect(defaulted.statusCode).toBe(404)
+    expect(panelBody(defaulted)).toEqual({ ok: false, message: '未知的面板接口' })
+  })
+
+  it('turns an unparseable request target into a JSON failure', async () => {
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest('http://[invalid'))
+    expect(answer.statusCode).toBe(500)
+    expect(panelBody(answer)).toMatchObject({ ok: false })
+    expect(String(panelBody(answer).message)).toContain('Invalid URL')
+  })
+
+  it('answers 404 for a method the route does not take', async () => {
+    const root = await workspace()
+    const { route } = panelSubject({})
+    const wrongStateMethod = await invokePanel(
+      route,
+      panelRequest(`${PANEL_ROUTE_PREFIX}/state?root=${encodeURIComponent(root)}`, 'POST'),
+    )
+    expect(wrongStateMethod.statusCode).toBe(404)
+    const wrongReindexMethod = await invokePanel(route, panelRequest(`${PANEL_ROUTE_PREFIX}/reindex`, 'GET'))
+    expect(wrongReindexMethod.statusCode).toBe(404)
+  })
+
+  it('rebuilds a workspace and reports what the run wrote', async () => {
+    const root = await workspace()
+    const indexed: string[] = []
+    const { route } = panelSubject({
+      async index(projectRoot: string) {
+        indexed.push(projectRoot)
+        return { filesIndexed: 2, nodeCount: 5 }
+      },
+    })
+    const answer = await invokePanel(
+      route,
+      panelRequest(`${PANEL_ROUTE_PREFIX}/reindex`, 'POST', JSON.stringify({ root })),
+    )
+    expect(indexed).toEqual([root])
+    expect(answer.statusCode).toBe(200)
+    expect(panelBody(answer)).toEqual({ ok: true, message: '已重建：2 文件 / 5 符号' })
+  })
+
+  it('refuses a second rebuild of the same workspace while the first is in flight', async () => {
+    const root = await workspace()
+    let release!: () => void
+    let started!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const began = new Promise<void>(resolve => { started = resolve })
+    let runs = 0
+    const { route } = panelSubject({
+      async index() {
+        runs += 1
+        started()
+        await gate
+        return { filesIndexed: 1, nodeCount: 1 }
+      },
+    })
+    const url = `${PANEL_ROUTE_PREFIX}/reindex`
+    const first = invokePanel(route, panelRequest(url, 'POST', JSON.stringify({ root })))
+    await began
+    const second = await invokePanel(route, panelRequest(url, 'POST', JSON.stringify({ root })))
+    expect(second.statusCode).toBe(409)
+    expect(panelBody(second)).toEqual({ ok: false, message: '这个工作区正在重建' })
+    release()
+    expect((await first).statusCode).toBe(200)
+    // The in-flight entry is dropped on completion, so the next request is accepted again.
+    const third = await invokePanel(route, panelRequest(url, 'POST', JSON.stringify({ root })))
+    expect(third.statusCode).toBe(200)
+    expect(runs).toBe(2)
+  })
+
+  it('reports a failed rebuild without locking the workspace', async () => {
+    const root = await workspace()
+    let attempts = 0
+    const { route } = panelSubject({
+      async index() {
+        attempts += 1
+        if (attempts === 1) throw new Error('disk full')
+        return { filesIndexed: 0, nodeCount: 0 }
+      },
+    })
+    const url = `${PANEL_ROUTE_PREFIX}/reindex`
+    const failed = await invokePanel(route, panelRequest(url, 'POST', JSON.stringify({ root })))
+    expect(failed.statusCode).toBe(500)
+    expect(panelBody(failed)).toEqual({ ok: false, message: 'Error: disk full' })
+    const retried = await invokePanel(route, panelRequest(url, 'POST', JSON.stringify({ root })))
+    expect(retried.statusCode).toBe(200)
+  })
+
+  it.each<[string, string | Buffer, string]>([
+    ['a body that is not JSON', Buffer.from('not json'), '请求体不是合法 JSON'],
+    ['an empty body', '', '请求体不是合法 JSON'],
+    ['a body that is not an object', '"root"', 'root 必须是一个存在的绝对路径'],
+    ['a null body', 'null', 'root 必须是一个存在的绝对路径'],
+    ['a body whose root is not a string', JSON.stringify({ root: 7 }), 'root 必须是一个存在的绝对路径'],
+    ['a body whose root is relative', JSON.stringify({ root: 'relative/path' }), 'root 必须是一个存在的绝对路径'],
+  ])('answers 400 for %s', async (_label, body, message) => {
+    const { route } = panelSubject({})
+    const answer = await invokePanel(route, panelRequest(`${PANEL_ROUTE_PREFIX}/reindex`, 'POST', body))
+    expect(answer.statusCode).toBe(400)
+    expect(panelBody(answer)).toEqual({ ok: false, message })
+  })
+
+  it('refuses a request body larger than the contract allows', async () => {
+    const { route } = panelSubject({})
+    const body = JSON.stringify({ root: '/tmp' }) + 'x'.repeat(64 * 1024)
+    const answer = await invokePanel(route, panelRequest(`${PANEL_ROUTE_PREFIX}/reindex`, 'POST', body))
+    expect(answer.statusCode).toBe(400)
+    expect(panelBody(answer)).toEqual({ ok: false, message: '请求体过大' })
+  })
+
+  it('registers both optional surfaces in a real Cordis composition and drops them on disposal', async () => {
+    const root = await workspace()
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(LocalFileSystem, { cwd: root })
+    await ctx.plugin(Codegraph)
+    const routes: PanelRoute[] = []
+    ctx.provide('webServer', {
+      register(route: PanelRoute) {
+        routes.push(route)
+        return () => {
+          const index = routes.indexOf(route)
+          if (index >= 0) routes.splice(index, 1)
+        }
+      },
+    })
+    const definitions: CommandDefinition[] = []
+    ctx.provide('commands', {
+      register(definition: CommandDefinition) {
+        definitions.push(definition)
+        return () => {
+          const index = definitions.indexOf(definition)
+          if (index >= 0) definitions.splice(index, 1)
+        }
+      },
+    })
+    await ctx.plugin(ToolCodegraph, {})
+    await vi.waitFor(() => {
+      expect(routes.map(route => route.path)).toEqual([PANEL_ROUTE_PREFIX])
+      expect(definitions.map(definition => definition.name)).toEqual([COMMAND_NAME])
+    })
+    await ctx.fiber.dispose()
+    context = undefined
+    expect(routes).toEqual([])
+    expect(definitions).toEqual([])
+  })
+})
+
+/** A fake command registry that records the definitions it is given. */
+function fakeCommands(): { definitions: CommandDefinition[]; register(definition: CommandDefinition): () => void } {
+  const definitions: CommandDefinition[] = []
+  return {
+    definitions,
+    register(definition: CommandDefinition) {
+      definitions.push(definition)
+      return () => {
+        const index = definitions.indexOf(definition)
+        if (index >= 0) definitions.splice(index, 1)
+      }
+    },
+  }
+}
+
+/** Register the command over a fake host and expose the recorded definition. */
+function commandSubject(codegraph: Record<string, unknown>): {
+  host: ReturnType<typeof stubHost>
+  commands: ReturnType<typeof fakeCommands>
+  definition(): CommandDefinition
+} {
+  const commands = fakeCommands()
+  const host = stubHost({ commands, codegraph })
+  registerCommands(host.ctx)
+  return {
+    host,
+    commands,
+    definition() {
+      const found = commands.definitions[0]
+      if (found === undefined) throw new Error('the command was not registered')
+      return found
+    },
+  }
+}
+
+/** The agent face the command reads its workspace from. */
+function commandOwner(cwd: string): { session: { header: { cwd: string } } } {
+  return { session: { header: { cwd } } }
+}
+
+/** Call one command handler the way the registry does. */
+async function runCommand(
+  definition: CommandDefinition,
+  rawInput: string,
+  options: {
+    agent?: { session: { header: { cwd: string } } }
+    signal?: AbortSignal
+  } = {},
+): Promise<CommandResult> {
+  return definition.handler({
+    rawInput,
+    ...options.agent === undefined ? {} : { agent: options.agent },
+    ...options.signal === undefined ? {} : { signal: options.signal },
+  })
+}
+
+describe('the /codegraph command', () => {
+  it('registers one command with its discovery copy and drops it on disposal', () => {
+    const subject = commandSubject({})
+    expect(subject.host.injections).toEqual([['commands']])
+    const definition = subject.definition()
+    expect(definition.definitionId).toBe(COMMAND_DEFINITION_ID)
+    expect(definition.name).toBe(COMMAND_NAME)
+    expect(definition.description).toBe(COMMAND_DESCRIPTION)
+    expect(definition.input).toEqual({ hint: COMMAND_INPUT_HINT })
+    expect(typeof definition.handler).toBe('function')
+    subject.host.disposers.forEach(dispose => dispose())
+    expect(subject.commands.definitions).toEqual([])
+  })
+
+  it('stays out of the way when the service cannot be injected', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const host = stubHost({}, { injectThrows: true })
+      expect(() => registerCommands(host.ctx)).not.toThrow()
+      expect(warn).toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('reports the workspace index as one line', async () => {
+    const root = await workspace()
+    const calls: unknown[] = []
+    const subject = commandSubject({
+      async available(projectRoot: string) {
+        calls.push(['available', projectRoot])
+        return true
+      },
+      async query(request: unknown) {
+        calls.push(['query', request])
+        return {
+          kind: 'status', projectRoot: root, fileCount: 3, nodeCount: 9, edgeCount: 4, languages: [],
+          formatVersion: 4, indexedAt: Date.UTC(2026, 10, 3, 1, 57), staleFileCount: 0, staleFileCountTruncated: false,
+        }
+      },
+    })
+    const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'success', text: '已索引：3 文件 / 9 声明 / 4 关系（2026-11-03T01:57Z）' })
+    expect(calls).toEqual([['available', root], ['query', { operation: 'status', projectRoot: root }]])
+  })
+
+  it('treats a bare invocation as status', async () => {
+    const root = await workspace()
+    const calls: string[] = []
+    const subject = commandSubject({
+      async available() {
+        calls.push('available')
+        return true
+      },
+      async query() {
+        calls.push('query')
+        return {
+          kind: 'status', projectRoot: root, fileCount: 1, nodeCount: 1, edgeCount: 0, languages: [],
+          formatVersion: 4, indexedAt: null, staleFileCount: 0, staleFileCountTruncated: false,
+        }
+      },
+    })
+    const result = await runCommand(subject.definition(), '   ', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'success', text: '已索引：1 文件 / 1 声明 / 0 关系（尚未记录索引时间）' })
+    expect(calls).toEqual(['available', 'query'])
+  })
+
+  it('points an unindexed workspace at index instead of failing', async () => {
+    const root = await workspace()
+    let queried = false
+    const subject = commandSubject({
+      async available() {
+        return false
+      },
+      async query() {
+        queried = true
+        return undefined
+      },
+    })
+    const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'success', text: `这个工作区还没有索引：${root}。先跑 /${COMMAND_NAME} index` })
+    expect(queried).toBe(false)
+  })
+
+  it('surfaces a failed status query as the command error text', async () => {
+    const root = await workspace()
+    const subject = commandSubject({
+      async available() {
+        return true
+      },
+      async query() {
+        throw new Error('seam down')
+      },
+    })
+    const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'error', text: 'Error: seam down' })
+  })
+
+  it('rebuilds the workspace and forwards cancellation to the indexer', async () => {
+    const root = await workspace()
+    const controller = new AbortController()
+    const calls: unknown[] = []
+    const subject = commandSubject({
+      async index(projectRoot: string, signal: AbortSignal | undefined) {
+        calls.push([projectRoot, signal])
+        return { filesIndexed: 2, nodeCount: 5 }
+      },
+    })
+    const result = await runCommand(subject.definition(), 'index', {
+      agent: commandOwner(root),
+      signal: controller.signal,
+    })
+    expect(result).toEqual({ kind: 'success', text: '已重建：2 文件 / 5 符号' })
+    expect(calls).toEqual([[root, controller.signal]])
+  })
+
+  it('reports a failed rebuild as the command error text', async () => {
+    const root = await workspace()
+    const subject = commandSubject({
+      async index() {
+        throw new Error('disk full')
+      },
+    })
+    const result = await runCommand(subject.definition(), 'index', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'error', text: 'Error: disk full' })
+  })
+
+  it('lists at most a screenful of indexed files matching a pattern', async () => {
+    const root = await workspace()
+    const requests: unknown[] = []
+    const subject = commandSubject({
+      async query(request: unknown) {
+        requests.push(request)
+        return {
+          kind: 'files', total: 5, truncated: false,
+          files: [
+            { path: 'src/a.ts', language: 'typescript', size: 10, nodeCount: 2, modifiedAt: 1, indexedAt: 2 },
+            { path: 'src/b.ts', language: 'typescript', size: 5, nodeCount: 1, modifiedAt: 1, indexedAt: 2 },
+          ],
+        }
+      },
+    })
+    const result = await runCommand(subject.definition(), 'files *.ts', { agent: commandOwner(root) })
+    expect(result).toEqual({
+      kind: 'success',
+      text: '匹配 *.ts 的已索引文件（显示 2 / 5）：\nsrc/a.ts  typescript  2 声明\nsrc/b.ts  typescript  1 声明',
+    })
+    expect(requests).toEqual([{ operation: 'files', projectRoot: root, pattern: '*.ts', limit: 10 }])
+  })
+
+  it('says so when nothing matches the pattern', async () => {
+    const root = await workspace()
+    const subject = commandSubject({
+      async query() {
+        return { kind: 'files', total: 0, truncated: false, files: [] }
+      },
+    })
+    const result = await runCommand(subject.definition(), 'files *.rs', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'success', text: '没有匹配 *.rs 的已索引文件' })
+  })
+
+  it('asks for a pattern when files is called without one', async () => {
+    const root = await workspace()
+    const subject = commandSubject({})
+    const result = await runCommand(subject.definition(), 'files', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'error', text: `files 需要一个 pattern。${COMMAND_USAGE}` })
+  })
+
+  it('rejects an unknown subcommand with the usage line', async () => {
+    const root = await workspace()
+    const subject = commandSubject({})
+    const result = await runCommand(subject.definition(), 'nope', { agent: commandOwner(root) })
+    expect(result).toEqual({ kind: 'error', text: `未知的子命令 "nope"。${COMMAND_USAGE}` })
+  })
+
+  it('refuses to guess a workspace when the session has none', async () => {
+    const subject = commandSubject({})
+    const result = await runCommand(subject.definition(), 'status')
+    expect(result).toEqual({
+      kind: 'error',
+      text: '这个命令需要会话工作区：请在一个绑定了工作区的会话里运行',
+    })
   })
 })

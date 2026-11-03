@@ -1,0 +1,48 @@
+{
+  "name": "dsh-plugin-codegraph-panel",
+  "version": "0.3.0",
+  "description": "Settings-page panel for dsh-plugin-codegraph: a 代码图谱 tab that shows one workspace's index status and can rebuild it. Browser half only — every number comes from the host's /dsh-plugin-codegraph/api/* routes.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "codegraph",
+    "code-graph",
+    "settings",
+    "panel",
+    "web-ui"
+  ],
+  "license": "MIT",
+  "author": "CC ZHAO",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git",
+    "directory": "packages/panel"
+  },
+  "homepage": "https://github.com/CC19990113/dsh-plugin-codegraph#readme",
+  "bugs": "https://github.com/CC19990113/dsh-plugin-codegraph/issues",
+  "type": "module",
+  "main": "lib/client.js",
+  "exports": {
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js"
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "dsh": {
+    "client": {
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  }
+}

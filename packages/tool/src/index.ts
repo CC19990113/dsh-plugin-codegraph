@@ -10,7 +10,9 @@
  * The tools own every default the seam refuses to guess — result limits, traversal depth, source
  * caps — so the seam's requests stay fully specified and a deployment can retune the model's answer
  * size without touching a store. They runtime-inject only `tools`, `codegraph`, `fs`, and
- * `systemPrompt`, and import no store.
+ * `systemPrompt`, and import no store. The Settings panel's HTTP routes (`./panel.ts`) and the human
+ * `/codegraph` command (`./command.ts`) attach through conditional injection instead, so a host
+ * without a web server or a command registry still gets the whole tool family.
  *
  * Namespace plugin (named exports, no default export).
  * @module dsh-plugin-codegraph-tool
@@ -25,8 +27,10 @@ import type { CodegraphIndexReport, CodegraphNode, CodegraphRelation } from 'dsh
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+import { registerCommands } from './command.ts'
 import { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms } from './compose.ts'
 import type { FileGroup } from './compose.ts'
+import { registerPanelRoutes } from './panel.ts'
 import { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 import type { ProjectionLimits, SymbolView } from './projection.ts'
 import { renderCodegraph } from './render.ts'
@@ -47,7 +51,20 @@ export {
   type CodegraphToolValue,
   type CodegraphValueFor,
 } from './schema.ts'
+export { COMMAND_DEFINITION_ID, COMMAND_DESCRIPTION, COMMAND_INPUT_HINT, COMMAND_NAME, COMMAND_USAGE, registerCommands } from './command.ts'
+export type { CommandDefinition, CommandDefinitionId, CommandInvocation, CommandRegistry, CommandResult } from './command.ts'
 export { declarationsOnly, groupByFile, mergeByHits, mergeRelations, taskTerms } from './compose.ts'
+export { PANEL_ROUTE_PREFIX, registerPanelRoutes } from './panel.ts'
+export type {
+  PanelConfig,
+  PanelErrorResponse,
+  PanelReindexResponse,
+  PanelRequest,
+  PanelResponse,
+  PanelRoute,
+  PanelStateResponse,
+  PanelWebServer,
+} from './panel.ts'
 export { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 export { renderCodegraph } from './render.ts'
 export { readSlice } from './source.ts'
@@ -100,6 +117,12 @@ export interface Config {
   maxSignatureChars?: number
   /** Search terms extracted from a `context` task description (default 6). */
   maxContextTerms?: number
+  /**
+   * Chinese task words the built-in table does not cover, mapped to the English identifiers to search
+   * for instead. Readings are added after the built-in ones, so a custom entry can only widen what a
+   * task matches (default empty).
+   */
+  contextSynonyms?: Record<string, readonly string[]>
   /** Tool-call timeout budget in ms for the query-side `codegraph` tool (default 30000). */
   timeoutMs?: number
   /** Tool-call timeout budget in ms for the `codegraph_index` tool (default 300000). */
@@ -112,6 +135,13 @@ export interface Config {
   backgroundIndex?: 'auto' | boolean
   /** Files the last index must have covered before `'auto'` uses a job (default 1000). */
   backgroundIndexThreshold?: number
+  /**
+   * Whether to register the Settings panel's HTTP routes and the `/codegraph` command (default true).
+   * Both are optional host surfaces: a composition without a web server or a command registry skips
+   * them whatever this says, and turning this off is for deployments that want the model-facing tools
+   * only.
+   */
+  panel?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -126,10 +156,14 @@ export const Config: z<Config> = z.object({
   maxDocstringChars: z.number().default(400),
   maxSignatureChars: z.number().default(200),
   maxContextTerms: z.number().default(6),
+  // `dict` types its *input* as mutable arrays while the `Config` field it backs accepts read-only
+  // ones; the two differ in a modifier only, so the runtime shape — and the validation — is unchanged.
+  contextSynonyms: z.dict(z.array(z.string())).default({}) as z<Record<string, readonly string[]>>,
   timeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_CODEGRAPH_TOOL_TIMEOUT_MS),
   indexTimeoutMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_CODEGRAPH_INDEX_TIMEOUT_MS),
   backgroundIndex: z.union([z.const('auto'), z.boolean()]).default('auto'),
   backgroundIndexThreshold: z.number().default(DEFAULT_BACKGROUND_INDEX_THRESHOLD),
+  panel: z.boolean().default(true),
 })
 
 type ResolvedConfig = Required<Config>
@@ -249,6 +283,12 @@ export function apply(ctx: Context, config: Config): void {
       rawInput: args,
     }),
   }))
+
+  // Two optional host surfaces. Each registers through `ctx.inject([...])` inside its own module, so
+  // a profile that runs no web server or no command registry simply never runs those callbacks — the
+  // tools above stay registered either way.
+  registerPanelRoutes(ctx, resolved)
+  registerCommands(ctx)
 }
 
 /**
@@ -667,7 +707,7 @@ async function run(
     }
     case 'context': {
       const task = required(args, 'task')
-      const terms = taskTerms(task, config.maxContextTerms)
+      const terms = taskTerms(task, config.maxContextTerms, config.contextSynonyms)
       const batches = await Promise.all(terms.map(async term => (await ctx.codegraph.query({
         operation: 'search',
         projectRoot: root,

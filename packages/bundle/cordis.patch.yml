@@ -25,6 +25,13 @@
       name: 'dsh-plugin-codegraph-tree-sitter'
 
     # Consumer: the model-facing `codegraph` and `codegraph_index` tools plus
-    # their system-prompt section.
+    # their system-prompt section, the `/codegraph` command, and the small HTTP
+    # surface the settings panel reads.
     - id: codegraph-tool
       name: 'dsh-plugin-codegraph-tool'
+
+    # Client bundle: one settings tab that shows the workspace's index state and
+    # offers a rebuild button. Mounted as a row here so `dsh plugin add` brings
+    # the UI along with the tools.
+    - id: codegraph-panel
+      name: 'dsh-plugin-codegraph-panel'

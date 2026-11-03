@@ -46,6 +46,10 @@ The tool also reports its own state into the system prompt. Every prompt assembl
 
 **A large workspace indexes in the background.** `codegraph_index` estimates the job from the previous run's summary: at or past `backgroundIndexThreshold` files it hands the run to the host's job registry and returns a job id immediately, instead of holding a tool call open for minutes. `job_output <id>` reads the report; `job_kill <id>` stops it. Small workspaces keep the synchronous path, so the common case never pays for a job round-trip. Set `backgroundIndex: true` or `false` to override the estimate.
 
+**A new session starts with an index.** When an agent is created for a workspace that has no index yet, the plugin starts one in the background through the host's job registry, so the first structural question already has a graph to answer from instead of spending three round trips on `status` → `codegraph_index` → retry. A workspace that already has an index is left alone (the watcher maintains it), and a host without a job registry skips the auto-build rather than blocking session creation.
+
+**Chinese task descriptions get English candidates.** `context` ranks by identifier overlap, and a task written in Chinese names no identifiers — measured on a React admin workspace, 「修改报表页的分页与筛选参数」 returned nothing at all. A built-in table now maps frequent Chinese development words to identifier candidates (报表 → `report`, 分页 → `page`/`pageSize`/`pagination`, 筛选 → `filter`/`search`, …) and appends them after the literal terms; the same task now leads with `report`, `page`, `filter`, `param`. `contextSynonyms` extends the table per deployment.
+
 ### `codegraph_index` — build or refresh the graph
 
 Separate from `codegraph` rather than an eleventh operation, because indexing a large workspace takes minutes while a query takes milliseconds, and a tool's timeout budget is fixed per registration. Folding them together would force one budget that is either too tight for a real build or too loose to catch a hung query.
@@ -85,6 +89,13 @@ Every call site resolves in a fixed order: an import that lands on an indexed fi
 The same-file tier applies to bare calls only. A member call (`x.map()`) names a property of a receiver this resolver cannot type, so letting a same-named local declaration win it would be a guess, not a scope resolution.
 
 That last rule is deliberate. The model acts on `callers` output, so a confidently wrong caller sends it to edit the wrong file, while a missing caller merely sends it back to text search. The index report's `unresolved_count` is not, by itself, that gap's size — a type-free resolver was never going to settle a member call (`x.map()`) or a name already imported from elsewhere, and those dominate the total in a typical workspace. `unresolved_likely_internal_count` is the subset worth judging completeness by: bare, undeclared names that were structurally plausible workspace calls.
+
+## Command and panel
+
+Two human-facing surfaces over the same index, for when you would rather not ask the model:
+
+- **`/codegraph [status|index|files <pattern>]`** — report the current workspace's index, rebuild it, or list indexed files. `status` is the default.
+- **Settings → 代码图谱** — a panel showing the workspace's index state (files, declarations, relationships, unresolved counts, when it was built, how many generated artifacts were skipped), with a path box and a rebuild button. Its data comes from the plugin's own `/dsh-plugin-codegraph/api/state` and `/api/reindex` endpoints, which read nothing but `<root>/.codegraph/status.json` and never expose arbitrary files.
 
 ## Install
 
@@ -144,7 +155,7 @@ The split is not ceremony. The seam carries no source text and performs no files
 - **Exclusion unions the built-in default directories with the project's own `.gitignore`.** Build output that lands outside `node_modules`/`dist`/`build`/`coverage` (a `lib` a TypeScript project compiles to, say) is almost always gitignored too, and indexing it alongside its own source would hand call resolution two same-named declarations of one symbol to pick between arbitrarily. Only a practical subset of gitignore syntax is understood — no `**`, character classes, or per-directory `.gitignore` files. Turn it off with `respectGitignore: false`.
 - **Committed build output is left out by shape, not by `.gitignore`.** Some deployments commit `dist/` so a server can serve it straight from the repository, which makes it neither gitignored nor named in `exclude`. Those files are still bundler output: a workspace sampled here had 25 such files that contributed 90% of the declarations, 86% of the edges, and 92% of the unresolved call sites in a graph that otherwise described 335 source files — and their mangled one-letter names collided with real symbols, making the unique-name rule refuse calls it could have settled. `skipMinified` (default on) skips a file whose path carries a `.min.` segment, or whose average line length is past 500 characters — roughly 7× the widest average found in hand-written source — and reports the count as `files_minified`. It is a heuristic, not a build-system integration: naming the artifact directory in `exclude` is still the exact fix, and `skipMinified: false` indexes such files anyway.
 - **The unresolved tail can be large**, and most of it is not a gap. `unresolved_count` includes every member call and already-imported name a type-free resolver could never have settled; `unresolved_likely_internal_count` is the narrower number that reflects re-exports and dynamic dispatch the graph actually missed.
-- **`context` ranks by identifier-term overlap**, so a task phrased without naming any symbol ranks poorly. There is no semantic matching.
+- **`context` ranks by identifier-term overlap**, so a task phrased without naming any symbol ranks poorly. The Chinese synonym table covers common development vocabulary, not arbitrary prose, and there is no semantic matching — a task whose subject appears nowhere in the table still ranks poorly.
 - `dsh` itself is in developer preview and iterating fast; expect compatibility-breaking changes.
 
 ## Credits

@@ -41,6 +41,9 @@ importers:
 
   packages/bundle:
     dependencies:
+      dsh-plugin-codegraph-panel:
+        specifier: workspace:^
+        version: link:../panel
       dsh-plugin-codegraph-service:
         specifier: workspace:^
         version: link:../service
@@ -53,6 +56,12 @@ importers:
       dsh-plugin-codegraph-tree-sitter:
         specifier: workspace:^
         version: link:../tree-sitter
+
+  packages/panel:
+    dependencies:
+      react:
+        specifier: '>=18'
+        version: 19.3.1
 
   packages/service:
     devDependencies:
@@ -768,6 +777,10 @@ packages:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
+  react@19.3.1:
+    resolution: {integrity: sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==}
+    engines: {node: '>=0.10.0'}
+
   rolldown@1.2.4:
     resolution: {integrity: sha512-rSr7irW0K7QRWzjdJXqZowkcRdDtjRduh43rBltnVKd0VFq839l1lJoDvGJb6gl7+4rTTCrPWu+YfujUL8Ug7w==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -820,6 +833,7 @@ packages:
   tsconfck@3.1.6:
     resolution: {integrity: sha512-ks6Vjr/jEw0P1gmOVwutM3B7fWxoWBL2KRDb1JfqGVawBmO5UsvmWOQFGHBPl5yxYz4eERr19E6L7NMv+Fej4w==}
     engines: {node: ^18 || >=20}
+    deprecated: unmaintained
     hasBin: true
     peerDependencies:
       typescript: ^5.0.0
@@ -1434,6 +1448,8 @@ snapshots:
       nanoid: 3.3.18
       picocolors: 1.1.1
       source-map-js: 1.2.2
+
+  react@19.3.1: {}
 
   rolldown@1.2.4:
     dependencies:

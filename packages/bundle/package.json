@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Structural code intelligence for DeepSeek Harness \u2014 gives the agent codegraph and codegraph_index tools to find where a symbol is declared, what calls it, what a change reaches, and how one symbol reaches another, from a tree-sitter index it builds itself",
   "keywords": [
     "dsh",
@@ -42,6 +42,7 @@
     }
   },
   "dependencies": {
+    "dsh-plugin-codegraph-panel": "workspace:^",
     "dsh-plugin-codegraph-service": "workspace:^",
     "dsh-plugin-codegraph-sqlite": "workspace:^",
     "dsh-plugin-codegraph-tool": "workspace:^",

@@ -6,6 +6,7 @@
  */
 
 import type { CodegraphNode, CodegraphRelation } from 'dsh-plugin-codegraph-service'
+import { expandTerms } from './zh-synonyms.ts'
 
 /** Words a task description contributes no search signal through. */
 const STOPWORDS = new Set([
@@ -15,28 +16,42 @@ const STOPWORDS = new Set([
   'works', 'add', 'fix', 'bug', 'code', 'file', 'files', 'need', 'make', 'use', 'used', 'using',
 ])
 
+/** Whether a word carries Han characters, which are written without the spaces that delimit words. */
+const HAN = /\p{Script=Han}/u
+
 /**
  * Split a task description into the terms worth searching for.
  *
  * A task is prose, but a graph is indexed by identifiers, so the terms that carry signal are the
  * identifier-shaped words: `camelCase` and `snake_case` names survive whole because splitting them
  * would search for their fragments instead of the symbol the author meant.
+ *
+ * A Chinese task has the opposite problem. It contains no identifier-shaped words at all — it arrives
+ * as one unbroken run of Han characters that matches nothing in an English-named index. The English
+ * identifiers such a word stands for are appended to the end of the list, which is why the truncation
+ * happens after expansion rather than before.
  * @param task - the free-text task description.
  * @param maxTerms - largest number of terms to return.
+ * @param contextSynonyms - deployment vocabulary merged over the built-in Chinese table.
  * @returns the search terms, longest first so the most specific one is searched before the budget
- * runs out.
+ * runs out, followed by the English candidates the task's Chinese words were read as.
  */
-export function taskTerms(task: string, maxTerms: number): string[] {
+export function taskTerms(
+  task: string,
+  maxTerms: number,
+  contextSynonyms: Readonly<Record<string, readonly string[]>> = {},
+): string[] {
   const words = task.split(/[^\p{L}\p{N}_$]+/u).filter(word => word.length > 0)
   const kept = new Map<string, string>()
   for (const word of words) {
-    if (word.length < 3) continue
+    // Two Han characters are already a whole word — `报表` is "report" — while a two-letter Latin word
+    // is a fragment, and searching for one returns more noise than signal.
+    if (word.length < 3 && !HAN.test(word)) continue
     if (STOPWORDS.has(word.toLowerCase())) continue
     const key = word.toLowerCase()
     if (!kept.has(key)) kept.set(key, word)
   }
-  return [...kept.values()]
-    .sort((left, right) => right.length - left.length)
+  return expandTerms([...kept.values()].sort((left, right) => right.length - left.length), contextSynonyms)
     .slice(0, maxTerms)
 }
 

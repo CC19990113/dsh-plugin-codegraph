@@ -15,17 +15,25 @@
  * backend serves from another execution world is watched where it actually lives, and a backend that
  * cannot watch at all degrades to explicit indexing instead of failing the plugin.
  *
+ * A workspace with no index yet is also indexed automatically the first time a session is created in
+ * it (`agent/created`), through the host's background-job registry when the composition has one. The
+ * graph is most useful on the first `codegraph` query, and a session that starts in an unindexed
+ * workspace is exactly the moment a caller would otherwise have to ask for a build by hand. This
+ * never runs synchronously inside the event dispatch: creating an agent must not wait on a
+ * multi-minute parse, and an index is an optimization, never a precondition for starting work.
+ *
  * Namespace plugin (named exports, no default export). Grammars load lazily, one per language, on
  * first sight of a matching file, and stay cached for the process — never eagerly for every grammar
  * this package ships with.
  * @module dsh-plugin-codegraph-tree-sitter
  */
 
+import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CodegraphIndexerId } from 'dsh-plugin-codegraph-service'
+import { CodegraphIndexerId, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
 import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE } from './languages.ts'
 import { walkAndExtract } from './walk.ts'
@@ -175,6 +183,16 @@ export interface Config {
    * covering only part of the tree.
    */
   maxWatchedDirectories?: number
+  /**
+   * Build a first index automatically, in the background, when a session is created in a workspace
+   * that has none (default true). A workspace is only ever auto-indexed once per process and never
+   * when its status sidecar already exists, so this cannot rebuild a graph that is already there.
+   * Set false to keep every build explicitly requested.
+   *
+   * Requires the host's `jobs` service: the build is never run synchronously inside session creation,
+   * so a composition without background jobs simply schedules nothing.
+   */
+  autoIndexOnSession?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -191,6 +209,7 @@ export const Config: z<Config> = z.object({
   watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
+  autoIndexOnSession: z.boolean().default(true),
 })
 
 type ResolvedConfig = Required<Config>
@@ -220,6 +239,16 @@ export function apply(ctx: Context, config: Config): void {
   // cross-plugin relation here for an invariant to describe — just process-local bookkeeping this
   // effect's cleanup below tears down on unload.
   const watchers = new Map<string, Watcher>()
+
+  // Roots this plugin instance has already started an automatic index for. The set is only a guard
+  // against a burst of agents opened on one workspace each scheduling the same rebuild; what a
+  // previous *process* indexed is recorded by the status sidecar `autoIndexOnSession` reads instead.
+  const autoIndexed = new Set<string>()
+
+  // `agent/created` is typed by `@deepseek-ai/dsh-agent`'s module augmentation. Reading the event
+  // through a local structural face keeps this package's host dependencies unchanged: it needs one
+  // event name and one payload shape, not the whole agent package.
+  const agentEvents = ctx as unknown as AgentLifecycleContext
 
   /** Start (or leave running) file watching for `projectRoot`, once it has a baseline to refresh. */
   function ensureWatching(projectRoot: string): void {
@@ -278,8 +307,181 @@ export function apply(ctx: Context, config: Config): void {
       for (const watcher of watchers.values()) watcher.stop()
       watchers.clear()
     }
+    if (resolved.autoIndexOnSession) {
+      // Registered inside this effect so the listener follows the plugin's lifetime: unloading the
+      // plugin must stop new sessions from scheduling work this instance can no longer run.
+      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, autoIndexed, payload))
+    }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
+}
+
+/** Stable job kind of an automatic session-start index, used for retention and diagnostics. */
+const AUTO_INDEX_JOB_KIND = 'codegraph-index'
+
+/**
+ * The agent side of an `agent/created` payload, declared structurally rather than imported from
+ * `@deepseek-ai/dsh-agent`: this package supports a wider host range than one `dsh-agent` release, so
+ * it names only the fields it reads. `session.header.cwd` is the workspace a session was opened in —
+ * the root this indexer is asked to index by hand otherwise.
+ */
+interface AgentCreatedPayload {
+  /** The agent just registered; absent only on a malformed dispatch. */
+  readonly agent?: {
+    /** The agent's session id, which owns any background job it starts. */
+    readonly id: string
+    /** The agent's live session, whose header carries the workspace. */
+    readonly session?: {
+      /** Durable session metadata, always present on a real session. */
+      readonly header?: {
+        /** Absolute workspace path, absent when the session was created without one. */
+        readonly cwd?: string
+      }
+    }
+  }
+}
+
+/**
+ * The slice of `ctx`'s event surface this plugin listens on, declared structurally for the same
+ * reason as {@link AgentCreatedPayload}: importing `@deepseek-ai/dsh-agent` for its event typing would
+ * add a host dependency this indexer does not otherwise need.
+ */
+interface AgentLifecycleContext {
+  /**
+   * Subscribe to one agent-created notification.
+   * @param name - the event name, `agent/created`.
+   * @param listener - receives the dispatch payload.
+   * @returns the disposer that unsubscribes.
+   */
+  on(name: 'agent/created', listener: (payload: AgentCreatedPayload) => void): () => boolean
+}
+
+/**
+ * The slice of the host's background-job registry this plugin calls, declared structurally because
+ * `@deepseek-ai/dsh-jobs` is deliberately not a dependency: the service may be absent, which is what
+ * the optional lookup in {@link autoIndexOnSession} tolerates.
+ */
+interface AutoIndexJobRegistry {
+  /**
+   * Register a job and return its id immediately.
+   * @param spec - the job's owner, kind, label, and producer body.
+   * @returns the new job's id.
+   */
+  start(spec: AutoIndexJobSpec): string
+}
+
+/** One automatic indexing job's registration. */
+interface AutoIndexJobSpec {
+  /** Session id of the agent that owns the job; its disposal cancels the work. */
+  readonly owner: string
+  /** Stable kind, used for retention and diagnostics (`codegraph-index`). */
+  readonly kind: string
+  /** Human-readable label shown in job listings and completion notices. */
+  readonly label: string
+  /** The producer body, invoked once while the registration is being built. */
+  readonly run: (handle: AutoIndexJobHandle) => AutoIndexJobHooks
+}
+
+/** What an automatic indexing producer may write while its job runs. */
+interface AutoIndexJobHandle {
+  /**
+   * Append one chunk of output to the job's log.
+   * @param text - the text to append, verbatim.
+   */
+  append(text: string): void
+}
+
+/** What an automatic indexing producer hands back so the registry can stop and await it. */
+interface AutoIndexJobHooks {
+  /**
+   * Stop the work.
+   * @param reason - why the job was stopped, when the caller has a reason.
+   */
+  cancel(reason?: string): void
+  /** Settles once the producer is done, carrying the job's terminal outcome. */
+  readonly done: Promise<AutoIndexJobOutcome>
+}
+
+/** The terminal report an automatic indexing producer settles with. */
+interface AutoIndexJobOutcome {
+  /** Terminal status the registry records. */
+  readonly status: 'completed' | 'failed'
+  /** Failure detail, when the job failed. */
+  readonly detail?: string
+}
+
+/**
+ * Index a new session's workspace in the background, when nothing has indexed it yet.
+ *
+ * Runs synchronously inside `agent/created` dispatch, so it must never block or throw: it only decides
+ * whether a build is warranted and hands one to the host's job registry. A synchronous build here
+ * would stall agent creation for the length of a parse, which is why a composition without background
+ * jobs does nothing instead.
+ * @param ctx - the plugin context, consulted for the optional job registry.
+ * @param autoIndexed - roots this process has already started an automatic index for.
+ * @param payload - the `agent/created` dispatch payload.
+ */
+function autoIndexOnSession(ctx: Context, autoIndexed: Set<string>, payload: AgentCreatedPayload): void {
+  try {
+    const agent = payload.agent
+    const root = agent?.session?.header?.cwd
+    // No workspace means no root to claim: an agent created without a `cwd` has nothing to index.
+    if (agent === undefined || !root) return
+    // Once per root per process. A second agent opened on the same workspace must not queue a second
+    // full rebuild of a graph the first one is already building.
+    if (autoIndexed.has(root)) return
+    // An existing status sidecar means a previous run already indexed this workspace. Checked before
+    // the job lookup so a composition without background jobs never pays for a filesystem probe.
+    if (existsSync(join(root, INDEX_STATUS_RELATIVE_PATH))) return
+    // `ctx.get` rather than an `inject` entry: `jobs` is a host composition choice, and requiring it in
+    // `inject` would hide this whole indexer from a profile that runs no background jobs.
+    const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
+    if (jobs === undefined) return
+    jobs.start({
+      // The registry keys a job by its owning session id, not the agent object.
+      owner: agent.id,
+      kind: AUTO_INDEX_JOB_KIND,
+      label: `codegraph auto index ${root}`,
+      run: handle => runAutoIndexJob(ctx, root, handle),
+    })
+    // Marked only after the registry accepted the job, so a transient refusal leaves the workspace
+    // eligible for the next session that opens in it.
+    autoIndexed.add(root)
+  } catch (error) {
+    // The host treats a throwing listener as vetoing publication. Losing an index is a degradation,
+    // never a reason to stop a session from starting.
+    console.error(`codegraph-tree-sitter: automatic indexing for a new session failed: ${String(error)}`)
+  }
+}
+
+/**
+ * The producer body of one automatic indexing job.
+ *
+ * Both halves of the host's job contract are mandatory: `cancel` aborts the run, and `done` settles
+ * even on failure — a rejected `done` breaks the registry's bookkeeping and leaves the job looking
+ * stuck forever.
+ * @param ctx - the plugin context.
+ * @param root - the workspace to index.
+ * @param handle - the job's producer face, for the job's live log.
+ * @returns the job's cancellation hook and settlement promise.
+ */
+function runAutoIndexJob(ctx: Context, root: string, handle: AutoIndexJobHandle): AutoIndexJobHooks {
+  const controller = new AbortController()
+  const done = (async (): Promise<AutoIndexJobOutcome> => {
+    try {
+      const report = await ctx.codegraph.index(root, controller.signal)
+      handle.append(
+        `Indexed ${root}: ${report.filesIndexed} files, ${report.nodeCount} symbols, ` +
+        `${report.edgeCount} relationships.\n`,
+      )
+      return { status: 'completed' }
+    } catch (error) {
+      const message = String(error)
+      handle.append(`codegraph auto index failed for ${root}: ${message}\n`)
+      return { status: 'failed', detail: message }
+    }
+  })()
+  return { cancel: () => controller.abort(), done }
 }
 
 /**
