@@ -306,6 +306,11 @@ export function apply(ctx: Context, config: Config): void {
   // queueing the same rebuild repeatedly; the freshness decision itself reads the status sidecar.
   const lastAutoRun = new Map<string, number>()
 
+  // Roots whose background run is still executing. Kept apart from `lastAutoRun`, which is a time
+  // window: a first build can outlive the window, and two builds on one root would only race the same
+  // index files.
+  const autoIndexInFlight = new Set<string>()
+
   // `agent/created` is typed by `@deepseek-ai/dsh-agent`'s module augmentation. Reading the event
   // through a local structural face keeps this package's host dependencies unchanged: it needs one
   // event name and one payload shape, not the whole agent package.
@@ -371,14 +376,11 @@ export function apply(ctx: Context, config: Config): void {
     if (resolved.autoIndexOnSession) {
       // Registered inside this effect so the listener follows the plugin's lifetime: unloading the
       // plugin must stop new sessions from scheduling work this instance can no longer run.
-      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, payload, ensureWatching))
+      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, autoIndexInFlight, payload, ensureWatching))
     }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
 }
-
-/** Stable job kind of an automatic session-start index, used for retention and diagnostics. */
-const AUTO_INDEX_JOB_KIND = 'codegraph-index'
 
 /**
  * The agent side of an `agent/created` payload, declared structurally rather than imported from
@@ -418,60 +420,6 @@ interface AgentLifecycleContext {
 }
 
 /**
- * The slice of the host's background-job registry this plugin calls, declared structurally because
- * `@deepseek-ai/dsh-jobs` is deliberately not a dependency: the service may be absent, which is what
- * the optional lookup in {@link autoIndexOnSession} tolerates.
- */
-interface AutoIndexJobRegistry {
-  /**
-   * Register a job and return its id immediately.
-   * @param spec - the job's owner, kind, label, and producer body.
-   * @returns the new job's id.
-   */
-  start(spec: AutoIndexJobSpec): string
-}
-
-/** One automatic indexing job's registration. */
-interface AutoIndexJobSpec {
-  /** Session id of the agent that owns the job; its disposal cancels the work. */
-  readonly owner: string
-  /** Stable kind, used for retention and diagnostics (`codegraph-index`). */
-  readonly kind: string
-  /** Human-readable label shown in job listings and completion notices. */
-  readonly label: string
-  /** The producer body, invoked once while the registration is being built. */
-  readonly run: (handle: AutoIndexJobHandle) => AutoIndexJobHooks
-}
-
-/** What an automatic indexing producer may write while its job runs. */
-interface AutoIndexJobHandle {
-  /**
-   * Append one chunk of output to the job's log.
-   * @param text - the text to append, verbatim.
-   */
-  append(text: string): void
-}
-
-/** What an automatic indexing producer hands back so the registry can stop and await it. */
-interface AutoIndexJobHooks {
-  /**
-   * Stop the work.
-   * @param reason - why the job was stopped, when the caller has a reason.
-   */
-  cancel(reason?: string): void
-  /** Settles once the producer is done, carrying the job's terminal outcome. */
-  readonly done: Promise<AutoIndexJobOutcome>
-}
-
-/** The terminal report an automatic indexing producer settles with. */
-interface AutoIndexJobOutcome {
-  /** Terminal status the registry records. */
-  readonly status: 'completed' | 'failed'
-  /** One line explaining the outcome, when it needs one (a failure, or a skip). */
-  readonly detail?: string
-}
-
-/**
  * Whether a directory is the harness's own home rather than a project checkout.
  *
  * `sessions/` and `profiles/` together are what makes it one: either alone is a plausible folder
@@ -490,22 +438,32 @@ function isHarnessHome(root: string): boolean {
  * is there has gone stale.
  *
  * Runs synchronously inside `agent/created` dispatch, so it must never block or throw: it only decides
- * whether a build is warranted and hands one to the host's job registry. A synchronous build here
- * would stall agent creation for the length of a parse, which is why a composition without background
- * jobs does nothing instead.
+ * whether a build is warranted and starts one in the background. A synchronous build here would stall
+ * agent creation for the length of a parse.
+ *
+ * The run deliberately does **not** go through the host's job registry. A registered job reports its
+ * settlement back to the owning agent: the host injects a completion notice into the next step and,
+ * under its default `wakeup` delivery, opens a turn on an idle one. An automatic index nobody asked
+ * for must not appear in the transcript or start a reply of its own, so this runs as a plain
+ * background promise. The explicit `codegraph_index` tool still registers a job — there a caller is
+ * waiting for the id.
  *
  * Refreshing a stale index is what restarts the file watcher after a host restart: watching only
  * begins once a successful index has established a baseline, so a workspace whose index is minutes
  * old would otherwise stay frozen at whatever the last process left behind.
- * @param ctx - the plugin context, consulted for the optional job registry.
+ * @param ctx - the plugin context.
  * @param config - the resolved plugin configuration, for the staleness threshold.
  * @param lastAutoRun - when this instance last started an automatic index for each root.
+ * @param autoIndexInFlight - roots whose background run is still executing, so a slow build cannot be
+ * started twice by sessions that open past the freshness window.
  * @param payload - the `agent/created` dispatch payload.
+ * @param ensureWatching - starts file watching for a workspace that is already current.
  */
 function autoIndexOnSession(
   ctx: Context,
   config: ResolvedConfig,
   lastAutoRun: Map<string, number>,
+  autoIndexInFlight: Set<string>,
   payload: AgentCreatedPayload,
   ensureWatching: (root: string) => void,
 ): void {
@@ -524,9 +482,11 @@ function autoIndexOnSession(
     // A burst of sessions opened on one workspace must not queue the same rebuild repeatedly.
     const previous = lastAutoRun.get(root)
     if (previous !== undefined && now - previous < config.autoRefreshAfterMs) return
+    // A build already running for this root is the one the window would have deduplicated had it been
+    // slow enough to straddle it; starting a second would only race the same index files.
+    if (autoIndexInFlight.has(root)) return
     // A fresh sidecar means a recent run is already describing this workspace; an absent, unreadable
-    // or old one means the graph is missing or behind. Checked before the job lookup so a composition
-    // without background jobs never pays for the probe.
+    // or old one means the graph is missing or behind.
     const indexedAt = readStatusIndexedAt(root)
     if (indexedAt !== undefined && now - indexedAt < config.autoRefreshAfterMs) {
       // The graph is current, so no build is warranted — but watching is process-local state and
@@ -536,24 +496,43 @@ function autoIndexOnSession(
       ensureWatching(root)
       return
     }
-    // `ctx.get` rather than an `inject` entry: `jobs` is a host composition choice, and requiring it in
-    // `inject` would hide this whole indexer from a profile that runs no background jobs.
-    const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
-    if (jobs === undefined) return
-    jobs.start({
-      // The registry keys a job by its owning session id, not the agent object.
-      owner: agent.id,
-      kind: AUTO_INDEX_JOB_KIND,
-      label: `codegraph auto index ${root}`,
-      run: handle => runAutoIndexJob(ctx, root, config, handle),
-    })
-    // Marked only after the registry accepted the job, so a transient refusal leaves the workspace
-    // eligible for the next session that opens in it.
     lastAutoRun.set(root, now)
+    autoIndexInFlight.add(root)
+    // Never rejects: a lost index is a degradation, not an error the session can act on.
+    void runAutomaticIndex(ctx, root, config).finally(() => autoIndexInFlight.delete(root))
   } catch (error) {
     // The host treats a throwing listener as vetoing publication. Losing an index is a degradation,
     // never a reason to stop a session from starting.
     console.error(`codegraph-tree-sitter: automatic indexing for a new session failed: ${String(error)}`)
+  }
+}
+
+/**
+ * Run one automatic index to completion, reporting a failure instead of propagating it.
+ *
+ * The size guard stays: parsing a workspace past `autoIndexMaxFiles` would exhaust the WASM heap and
+ * take the desktop down with it, and an automatic index is a convenience. Skipping it is a decision,
+ * not a failure, so it is logged once and the session continues untouched.
+ * @param ctx - the plugin context.
+ * @param root - absolute workspace path.
+ * @param config - the resolved plugin configuration.
+ */
+async function runAutomaticIndex(ctx: Context, root: string, config: ResolvedConfig): Promise<void> {
+  const controller = new AbortController()
+  try {
+    const oversized = await exceedsAutoIndexLimit(root, config, controller.signal)
+    if (oversized !== undefined) {
+      console.error(
+        `codegraph-tree-sitter: skipped automatic indexing of ${root}: it holds at least ${String(oversized)} ` +
+          `candidate source files, past the ${String(config.autoIndexMaxFiles)}-file session-start limit. ` +
+          'Run codegraph_index yourself if you want a graph for it.',
+      )
+      return
+    }
+    // A successful index is what starts file watching, inside `indexer.index`.
+    await ctx.codegraph.index(root, controller.signal)
+  } catch (error) {
+    console.error(`codegraph-tree-sitter: automatic index for ${root} failed: ${String(error)}`)
   }
 }
 
@@ -620,55 +599,6 @@ function readStatusIndexedAt(root: string): number | undefined {
   } catch {
     return undefined
   }
-}
-
-/**
- * The producer body of one automatic indexing job.
- *
- * Both halves of the host's job contract are mandatory: `cancel` aborts the run, and `done` settles
- * even on failure — a rejected `done` breaks the registry's bookkeeping and leaves the job looking
- * stuck forever.
- * @param ctx - the plugin context.
- * @param root - the workspace to index.
- * @param handle - the job's producer face, for the job's live log.
- * @returns the job's cancellation hook and settlement promise.
- */
-function runAutoIndexJob(
-  ctx: Context,
-  root: string,
-  config: ResolvedConfig,
-  handle: AutoIndexJobHandle,
-): AutoIndexJobHooks {
-  const controller = new AbortController()
-  const done = (async (): Promise<AutoIndexJobOutcome> => {
-    try {
-      const oversized = await exceedsAutoIndexLimit(root, config, controller.signal)
-      if (oversized !== undefined) {
-        // Declining here is the whole point of the check: parsing this workspace would exhaust the
-        // WASM heap and take the desktop down with it, and an automatic index is a convenience.
-        handle.append(
-          `Skipped automatic indexing of ${root}: it holds at least ${String(oversized)} candidate ` +
-            `source files, past the ${String(config.autoIndexMaxFiles)}-file session-start limit. ` +
-            `Run codegraph_index yourself if you want a graph for it.\n`,
-        )
-        // `completed`, not `failed`: nothing went wrong. The guard decided this workspace is not a
-        // candidate for an automatic run, and a user reading the job list must be able to tell that
-        // apart from a build that actually broke.
-        return { status: 'completed', detail: 'skipped: workspace too large for automatic indexing' }
-      }
-      const report = await ctx.codegraph.index(root, controller.signal)
-      handle.append(
-        `Indexed ${root}: ${report.filesIndexed} files, ${report.nodeCount} symbols, ` +
-        `${report.edgeCount} relationships.\n`,
-      )
-      return { status: 'completed' }
-    } catch (error) {
-      const message = String(error)
-      handle.append(`codegraph auto index failed for ${root}: ${message}\n`)
-      return { status: 'failed', detail: message }
-    }
-  })()
-  return { cancel: () => controller.abort(), done }
 }
 
 /**

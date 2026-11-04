@@ -39,6 +39,7 @@ import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue, Cod
 import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
 import { agentIdOf, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+import { createStructureHintState, noteStructureToolUse, registerStructureHint } from './structure-hint.ts'
 import { commandRunHint } from './command-log.ts'
 import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
 import type { UpdateChecker } from './version-check.ts'
@@ -162,6 +163,13 @@ export interface Config {
    * registry GET, so the cost of a shorter interval is latency nobody waits on, not tokens.
    */
   updateCheckIntervalMs?: number
+  /**
+   * Append one reminder to the model request whose user input reads as a structural code question,
+   * when that conversation has not queried the graph yet (default true). The system prompt already
+   * says the graph is more precise than text search; this is the moment-of-use nudge for a model that
+   * would otherwise grep a repository. Once per conversation, never after the tool itself ran.
+   */
+  structureHint?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -186,6 +194,7 @@ export const Config: z<Config> = z.object({
   panel: z.boolean().default(true),
   updateCheck: z.boolean().default(true),
   updateCheckIntervalMs: z.number().default(DEFAULT_UPDATE_CHECK_INTERVAL_MS),
+  structureHint: z.boolean().default(true),
 })
 
 type ResolvedConfig = Required<Config>
@@ -268,6 +277,11 @@ export function apply(ctx: Context, config: Config): void {
       })
     : undefined
 
+  // Shared between the tools and the pre-step hook: a conversation that already queried the graph
+  // must not be told the graph exists. Kept even when the hint is off, so turning the reminder back
+  // on mid-process cannot re-nag a conversation that has been using the tool all along.
+  const structureHintState = createStructureHintState()
+
   // A function, not a string: the host re-evaluates it on every assembly, which is what lets the model
   // learn the workspace's index size and freshness for free instead of spending a `status` round-trip.
   ctx.systemPrompt.section({
@@ -295,6 +309,7 @@ export function apply(ctx: Context, config: Config): void {
     timeoutMs: resolved.timeoutMs,
     async execute(args, exec) {
       updateChecker?.noteToolUse(agentIdOf(exec))
+      noteStructureToolUse(structureHintState, exec)
       return run(ctx, resolved, args, exec)
     },
     presentCall: args => ({
@@ -317,6 +332,7 @@ export function apply(ctx: Context, config: Config): void {
     timeoutMs: resolved.indexTimeoutMs,
     async execute(args, exec) {
       updateChecker?.noteToolUse(agentIdOf(exec))
+      noteStructureToolUse(structureHintState, exec)
       return runIndex(ctx, resolved, args, exec)
     },
     presentCall: args => ({
@@ -338,6 +354,11 @@ export function apply(ctx: Context, config: Config): void {
   // inserts its `[model changed: …]` notice. Registering it here (rather than at module scope) keeps
   // the listener tied to this plugin instance's lifetime.
   if (updateChecker !== undefined) registerUpdateNotice(ctx, updateChecker)
+
+  // The structural reminder rides the same waterfall: `agent/pre-step` is the one surface between the
+  // user's input and the next model request, which is where "this is a question about where code lives,
+  // and a grep cannot tell a declaration from a comment" belongs.
+  if (resolved.structureHint) registerStructureHint(ctx, structureHintState)
 }
 
 /**

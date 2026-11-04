@@ -257,6 +257,9 @@ async function bootWithIndexer(projectRoot: string): Promise<Context> {
     "- name: 'dsh-plugin-codegraph-tree-sitter'",
     '  config:',
     '    watch: false', // this test exercises Loader composition, not live watching
+    // The test drives `codegraph_index` by hand; a session-start build racing it for the same index
+    // files is not what this composition is being asked about.
+    '    autoIndexOnSession: false',
     "- name: 'dsh-plugin-codegraph-tool'",
     '',
   ].join('\n'))

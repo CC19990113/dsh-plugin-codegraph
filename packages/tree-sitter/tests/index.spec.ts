@@ -186,52 +186,6 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 10_0
   throw new Error('timed out waiting for a condition the test expects to become true')
 }
 
-/** One job the fake registry was asked to start, with the log its producer body writes. */
-interface RecordedJob {
-  readonly spec: {
-    readonly owner: string
-    readonly kind: string
-    readonly label: string
-    readonly run: (handle: { append(text: string): void }) => {
-      cancel(reason?: string): void
-      done: Promise<{ status: string; detail?: string }>
-    }
-  }
-  readonly output: string[]
-}
-
-/**
- * A stand-in for `@deepseek-ai/dsh-jobs`'s registry. It records a registration but never runs the
- * producer itself — a test drives the recorded `run` through {@link driveJob}, so both halves of the
- * contract can be asserted: what the plugin registered, and what its job body then wrote and settled
- * with.
- * @param options - `refuse` makes `start` throw, standing in for the host's "no job controller for
- *   this agent" and "owner already at its cap" refusals.
- * @returns the recorded jobs, and the registry stand-in to provide as the `jobs` service.
- */
-function fakeJobs(options: { refuse?: true } = {}): {
-  started: RecordedJob[]
-  jobs: { start(spec: RecordedJob['spec']): string }
-} {
-  const started: RecordedJob[] = []
-  const jobs = {
-    start(spec: RecordedJob['spec']): string {
-      if (options.refuse === true) throw new Error('background jobs unavailable: no job controller serves this agent')
-      started.push({ spec, output: [] })
-      return `job-${started.length}`
-    },
-  }
-  return { started, jobs }
-}
-
-/**
- * Invoke one recorded job's producer face, the way the registry does while building the job record.
- * @param job - the recorded job to drive.
- * @returns the producer's hooks; the caller awaits `done` for the terminal outcome.
- */
-function driveJob(job: RecordedJob): ReturnType<RecordedJob['spec']['run']> {
-  return job.spec.run({ append: (text) => { job.output.push(text) } })
-}
 
 /** Distinguishes the session ids of agents registered within one test file. */
 let agentSequence = 0
@@ -697,44 +651,46 @@ describe('codegraph-tree-sitter plugin', () => {
   })
 
   describe('automatic indexing on session start', () => {
-    it('starts one background index for a new session in an unindexed workspace', async () => {
+    it('indexes a new session\'s workspace in the background', async () => {
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
-      const id = registerAgent(ctx, root)
+      registerAgent(ctx, root)
 
-      // The registration itself is the contract: the owning session id, the stable kind, and the
-      // label a job listing shows. A wrong owner never cancels with its agent, hence the exact match.
-      expect(registry.started).toHaveLength(1)
-      const job = registry.started[0]!
-      expect(job.spec.owner).toBe(id)
-      expect(job.spec.kind).toBe('codegraph-index')
-      expect(job.spec.label).toBe(`codegraph auto index ${root}`)
-
-      // Driving the recorded producer is what proves the body indexes for real and reports through
-      // the job rather than the event dispatch.
-      const hooks = driveJob(job)
-      await expect(hooks.done).resolves.toEqual({ status: 'completed' })
-      expect(job.output.join('')).toContain(`Indexed ${root}: 1 files,`)
+      // Session creation returns before the parse finishes; the graph lands on its own.
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
       expect(functionNames(join(root, DATABASE_RELATIVE_PATH))).toEqual(['a'])
     })
 
-    it('never queues a job for the harness home directory', async () => {
+    it('never registers a host job, so no completion notice can reach the transcript', async () => {
+      // 本次改动的核心契约：注册成 job 后宿主会在结算时注入完成通知，并默认唤醒空闲 agent 开一轮。
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const start = vi.fn(() => {
+        throw new Error('automatic index must not register a host job')
+      })
+      const ctx = await autoIndexSeam({ jobs: { start } })
+
+      registerAgent(ctx, root)
+
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
+      expect(start).not.toHaveBeenCalled()
+    })
+
+    it('never touches the harness home directory', async () => {
       // `sessions/` plus `profiles/` is what makes a directory DSH's own state rather than a
-      // checkout. Indexing it can only hit the size guard, so the job must not be started at all —
-      // a workspace that was never a candidate should never appear as a failure.
+      // checkout. Indexing it can only hit the size guard, so no run may start at all — a workspace
+      // that was never a candidate should never appear as a failure.
       const root = await writeProject({
         'sessions/--tmp--/session/x.jsonl': '\n',
         'profiles/desktop/package.json': '{}',
         'a.ts': 'export const a = 1\n',
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
+      await new Promise(resolve => setTimeout(resolve, 150))
 
-      expect(registry.started).toHaveLength(0)
+      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
     })
 
     it('declines a workspace past the session-start file limit instead of killing the heap', async () => {
@@ -746,22 +702,18 @@ describe('codegraph-tree-sitter plugin', () => {
         Array.from({ length: 6 }, (_, index) => [`f${String(index)}.ts`, `export const v${String(index)} = ${String(index)}\n`]),
       )
       const root = await writeProject(files)
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 }, jobs: registry.jobs })
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 } })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        registerAgent(ctx, root)
 
-      registerAgent(ctx, root)
-
-      // The job still starts — the check runs inside its producer, off the event dispatch — and it
-      // settles as failed with the reason, rather than skipping silently.
-      expect(registry.started).toHaveLength(1)
-      const job = registry.started[0]!
-      const outcome = await driveJob(job).done
-      // Declining is a decision, not a crash: the job settles as completed and says what it skipped.
-      expect(outcome.status).toBe('completed')
-      expect(outcome.detail).toContain('skipped')
-      expect(job.output.join('')).toContain('past the 3-file session-start limit')
-      // Nothing was written: declining means no graph, not a partial one.
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+        await waitFor(() => errorSpy.mock.calls.some(args => String(args[0]).includes('session-start limit')))
+        // Declining is a decision, not a crash: nothing is written, and the run says why.
+        expect(errorSpy.mock.calls.some(args => String(args[0]).includes('past the 3-file session-start limit'))).toBe(true)
+        expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+      }
     })
 
     it('keeps walking after a subdirectory that stays under the limit', async () => {
@@ -772,36 +724,32 @@ describe('codegraph-tree-sitter plugin', () => {
         'src/a.ts': 'export const a = 1\n',
         'src/b.ts': 'export const b = 2\n',
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 10 }, jobs: registry.jobs })
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 10 } })
 
       registerAgent(ctx, root)
 
-      const job = registry.started[0]!
-      await expect(driveJob(job).done).resolves.toEqual({ status: 'completed' })
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
     })
 
     it('counts files that live only in subdirectories', async () => {
       // Same nesting shape, but past the limit: the recursive call is what has to report the
-      // overflow, and declining still means no graph and a failed outcome rather than silence.
+      // overflow, and declining still means no graph rather than a partial one.
       const root = await writeProject({
         'src/deep/b0.ts': 'export const b0 = 0\n',
         'src/deep/b1.ts': 'export const b1 = 1\n',
         'src/deep/b2.ts': 'export const b2 = 2\n',
         'src/deep/b3.ts': 'export const b3 = 3\n',
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 }, jobs: registry.jobs })
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 3 } })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        registerAgent(ctx, root)
 
-      registerAgent(ctx, root)
-
-      const job = registry.started[0]!
-      const outcome = await driveJob(job).done
-      // Declining is a decision, not a crash: the job settles as completed and says what it skipped.
-      expect(outcome.status).toBe('completed')
-      expect(outcome.detail).toContain('skipped')
-      expect(job.output.join('')).toContain('past the 3-file session-start limit')
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+        await waitFor(() => errorSpy.mock.calls.some(args => String(args[0]).includes('session-start limit')))
+        expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+      }
     })
 
     it('leaves a workspace whose index is fresh alone', async () => {
@@ -811,12 +759,12 @@ describe('codegraph-tree-sitter plugin', () => {
         // what "already current" means here — not merely "a graph exists".
         '.codegraph/status.json': JSON.stringify({ indexedAt: Date.now() }),
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
+      await new Promise(resolve => setTimeout(resolve, 150))
 
-      expect(registry.started).toHaveLength(0)
+      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
     })
 
     it('refreshes an index that has gone stale, which is also what restarts watching', async () => {
@@ -824,17 +772,15 @@ describe('codegraph-tree-sitter plugin', () => {
         'a.ts': 'export function a() {}\n',
         '.codegraph/status.json': JSON.stringify({ indexedAt: 0 }),
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
 
       // A rebuild on session start is what re-establishes the watcher's baseline: watching only
       // begins after a successful index, so a stale workspace would otherwise stay frozen at whatever
       // the previous host process left behind.
-      expect(registry.started).toHaveLength(1)
-      const hooks = driveJob(registry.started[0]!)
-      await expect(hooks.done).resolves.toEqual({ status: 'completed' })
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
+      expect(functionNames(join(root, DATABASE_RELATIVE_PATH))).toEqual(['a'])
     })
 
     it('treats an unreadable sidecar as stale, so a damaged record is rebuilt rather than trusted', async () => {
@@ -842,12 +788,11 @@ describe('codegraph-tree-sitter plugin', () => {
         'a.ts': 'export function a() {}\n',
         '.codegraph/status.json': '{not json',
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
 
-      expect(registry.started).toHaveLength(1)
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
     })
 
     it('treats a sidecar that parses to a non-object as stale', async () => {
@@ -855,14 +800,13 @@ describe('codegraph-tree-sitter plugin', () => {
         'a.ts': 'export function a() {}\n',
         '.codegraph/status.json': 'null',
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
 
       // `null` parses fine but describes nothing; a reader that only guards `typeof === 'object'`
       // would dereference it next.
-      expect(registry.started).toHaveLength(1)
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
     })
 
     it('treats a sidecar without a numeric timestamp as stale', async () => {
@@ -870,111 +814,66 @@ describe('codegraph-tree-sitter plugin', () => {
         'a.ts': 'export function a() {}\n',
         '.codegraph/status.json': JSON.stringify({ indexedAt: 'yesterday' }),
       })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
-
-      registerAgent(ctx, root)
-
-      expect(registry.started).toHaveLength(1)
-    })
-
-    it('schedules nothing when the composition has no jobs service', async () => {
-      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
       const ctx = await autoIndexSeam()
 
       registerAgent(ctx, root)
 
-      // No registry means no background build *and* no synchronous fallback: indexing inside agent
-      // creation would stall the session for the length of the parse.
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
     })
 
     it('starts at most one automatic index per workspace', async () => {
+      // Two sessions opened on one workspace must not race the same index files: the second one is
+      // deduplicated by the freshness window while the first run is still in flight.
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
-
-      registerAgent(ctx, root)
-      // A second agent opened on the same workspace must not queue a second full rebuild of the
-      // graph the first job is already building.
-      registerAgent(ctx, root)
-
-      expect(registry.started).toHaveLength(1)
-    })
-
-    it('skips a session with no workspace, and payloads with no usable agent', async () => {
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
-
-      // A real agent whose session was created without a `cwd`, then the payload shapes a malformed
-      // dispatch could carry: no agent at all, and an agent whose session is missing.
-      registerAgent(ctx)
-      emitAgentCreated(ctx, {})
-      emitAgentCreated(ctx, { agent: { id: 'agent-without-session' } })
-
-      expect(registry.started).toHaveLength(0)
-    })
-
-    it('registers no listener when autoIndexOnSession is false', async () => {
-      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ config: { autoIndexOnSession: false }, jobs: registry.jobs })
-
-      registerAgent(ctx, root)
-
-      expect(registry.started).toHaveLength(0)
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
-    })
-
-    it('does not let a job-registry refusal escape the event bus', async () => {
-      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const registry = fakeJobs({ refuse: true })
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam()
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
-        // A throwing creation listener vetoes publication in the host, so the refusal has to be
-        // logged and swallowed here, never rethrown into the dispatch.
-        expect(() => registerAgent(ctx, root)).not.toThrow()
-        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('automatic indexing'))
-        expect(registry.started).toHaveLength(0)
+        registerAgent(ctx, root)
+        registerAgent(ctx, root)
+
+        await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
+        await new Promise(resolve => setTimeout(resolve, 100))
+        expect(errorSpy).not.toHaveBeenCalled()
       } finally {
         errorSpy.mockRestore()
       }
     })
 
-    it('reports a failed run through the job without rejecting its promise', async () => {
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
-      // An absolute path that does not exist: a valid session workspace, but no indexer claims it.
-      const missingRoot = join(tmpdir(), 'codegraph-auto-index-missing')
+    it('skips a session with no workspace, and payloads with no usable agent', async () => {
+      const ctx = await autoIndexSeam()
 
-      registerAgent(ctx, missingRoot)
-      const job = registry.started[0]!
-      const hooks = driveJob(job)
-      const outcome = await hooks.done
-
-      // `done` resolves with a failed outcome instead of rejecting: a rejected producer promise
-      // breaks the host's bookkeeping and leaves the job looking permanently stuck.
-      expect(outcome.status).toBe('failed')
-      expect(job.output.join('')).toContain(`codegraph auto index failed for ${missingRoot}`)
+      // A real agent whose session was created without a `cwd`, then the payload shapes a malformed
+      // dispatch could carry: no agent at all, and an agent whose session is missing.
+      expect(() => {
+        registerAgent(ctx)
+        emitAgentCreated(ctx, {})
+        emitAgentCreated(ctx, { agent: { id: 'agent-without-session' } })
+      }).not.toThrow()
     })
 
-    it('aborts a running build when its job is cancelled', async () => {
+    it('registers no listener when autoIndexOnSession is false', async () => {
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const registry = fakeJobs()
-      const ctx = await autoIndexSeam({ jobs: registry.jobs })
+      const ctx = await autoIndexSeam({ config: { autoIndexOnSession: false } })
 
       registerAgent(ctx, root)
-      const job = registry.started[0]!
-      const hooks = driveJob(job)
-      // Cancelled before the walk's first await can complete, so the run is aborted at its next
-      // check and settles as failed rather than writing a graph nobody asked for.
-      hooks.cancel()
-      const outcome = await hooks.done
+      await new Promise(resolve => setTimeout(resolve, 150))
 
-      expect(outcome.status).toBe('failed')
-      expect(job.output.join('')).toContain('codegraph auto index failed for')
       expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+    })
+
+    it('logs a failed run instead of throwing it into the event bus', async () => {
+      // An absolute path that does not exist: a valid session workspace, but no indexer claims it.
+      const missingRoot = join(tmpdir(), 'codegraph-auto-index-missing')
+      const ctx = await autoIndexSeam()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        // A throwing creation listener vetoes publication in the host, so a failed background run has
+        // to be logged and swallowed, never rethrown into the dispatch.
+        expect(() => registerAgent(ctx, missingRoot)).not.toThrow()
+        await waitFor(() => errorSpy.mock.calls.some(args => String(args[0]).includes('automatic index for')))
+      } finally {
+        errorSpy.mockRestore()
+      }
     })
   })
 })
