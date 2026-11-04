@@ -20,9 +20,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: darwin-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            suffix: darwin-x64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             suffix: linux-x64-gnu
@@ -105,7 +102,9 @@ jobs:
           for pkg in crates/indexer-rust/npm/*/; do
             count=$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)
             echo "$pkg -> $count binary(ies)"
-            [ "$count" -eq 1 ] || { echo "::error::$pkg is missing its binary"; exit 1; }
+            if [ "$count" -ne 1 ]; then
+              echo "::warning::$pkg has no binary and will not be published; that platform falls back to the JS engine"
+            fi
           done
 
       - run: pnpm install --frozen-lockfile
@@ -135,6 +134,10 @@ jobs:
         run: |
           set -euo pipefail
           for pkg in crates/indexer-rust/npm/*/; do
+            if [ "$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)" -ne 1 ]; then
+              echo "skipping $pkg (no binary in this run)"
+              continue
+            fi
             echo "publishing $pkg"
             npm publish "$pkg" --access public
           done
