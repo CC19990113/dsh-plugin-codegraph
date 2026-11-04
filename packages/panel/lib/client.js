@@ -231,16 +231,41 @@ window.__ModuleLoader__.load({
 
       const trimmed = root.trim();
 
+      // 打开就自动读一次。路径为空时请求不带 root，宿主用当前会话的工作区回答。
+      React.useEffect(function () {
+        loadStatus();
+        // 只在挂载时跑：之后的读取都由「刷新」「重建」按钮驱动
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
+      /**
+       * 服务端解析出的工作区回填到输入框。
+       *
+       * 用户打开设置页时通常只用关心「我现在这个会话」的索引状态，让他把会话自己的路径再抄一遍
+       * 是没有意义的摩擦。请求不带 root 时宿主会回答当前会话的工作区，这里把它显示出来，之后
+       * 的刷新/重建就用这个值。
+       */
+      function adoptResolvedRoot(asked, data) {
+        const resolved = data && typeof data.root === "string" ? data.root : "";
+        if (asked !== "" || resolved === "") return;
+        setRoot(resolved);
+        writeStoredRoot(resolved);
+      }
+
       /** 所有错误都走 state，不 throw —— 一个 tab 不该把设置页打白 */
       async function loadStatus() {
-        const result = await call(stateUrl(root.trim()));
+        const asked = root.trim();
+        const result = await call(asked === "" ? API + "/state" : stateUrl(asked));
         if (!result.ok) {
+          // 即便这次失败（例如还没有索引），服务端也已经解析出了工作区，回填免得用户再填一次
+          adoptResolvedRoot(asked, result.data);
           setError(result.message);
           return;
         }
         setError(null);
         setStatus(result.data && result.data.status ? result.data.status : null);
         setLoaded(true);
+        adoptResolvedRoot(asked, result.data);
       }
 
       async function onRefresh() {

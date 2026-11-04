@@ -34,10 +34,21 @@ interface FakeFetch {
 /** 造一个记录型的 React：createElement 建裸树，useState 用 hooks 数组 + 重新渲染 */
 function createHarness() {
   const hooks: unknown[] = []
+  /** Mount-time effects, collected but never run automatically — a test flushes them when it means to. */
+  const effects: Array<() => void> = []
   let cursor = 0
   const React = {
     createElement(type: string, props: any, ...children: any[]) {
       return { type, props: props ?? {}, children }
+    },
+    // The client only ever passes an empty dependency array (run once, after mount), so the stub
+    // records the effect per hook slot and leaves running it to the caller via `flushEffects`.
+    useEffect(effect: () => void) {
+      const index = cursor++
+      if (!(index in hooks)) {
+        hooks[index] = effect
+        effects.push(effect)
+      }
     },
     useState(initial: unknown) {
       const index = cursor++
@@ -57,6 +68,10 @@ function createHarness() {
         cursor = 0
         return Component({})
       }
+    },
+    /** Run every mount-time effect collected so far, in order. */
+    flushEffects() {
+      while (effects.length > 0) effects.shift()!()
     },
   }
 }
@@ -156,6 +171,8 @@ function setup(options: SetupOptions = {}) {
     params: registered && registered.params,
     Component: registered && registered.Component,
     render: registered ? harness.mount(registered.Component) : null,
+    /** Run the component's mount-time effects, as React would after committing. */
+    flushEffects: harness.flushEffects,
   }
 }
 
@@ -278,6 +295,26 @@ describe('设置页组件', () => {
     tree = app.render()
     expect(findInput(tree).props.value).toBe('/tmp/工程 a')
     expect(storage.calls.set).toContainEqual([STORAGE_KEY, '/tmp/工程 a'])
+  })
+
+  it('打开面板就自动读一次：空路径不带 root，宿主解析出的路径回填输入框', async () => {
+    const app = setup()
+    const fetchMock = makeFetch(() => jsonResponse({ ok: true, root: '/Users/me/project', status: STATUS }))
+    app.sandbox.fetch = fetchMock.fn
+
+    app.render()
+    app.flushEffects()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const tree = app.render()
+
+    // 不带 root：请求就是 `…/state`，由宿主回答当前会话的工作区，用户不用先抄一遍路径
+    expect(fetchMock.calls.map(call => call.url)).toEqual([API + '/state'])
+    // 解析结果回填，之后的刷新与重建直接用它
+    let inputValue = ''
+    walk(tree, el => {
+      if (inputValue === '' && el.type === 'input' && typeof el.props.value === 'string') inputValue = el.props.value
+    })
+    expect(inputValue).toBe('/Users/me/project')
   })
 
   it('路径为空时点「刷新」不发请求，只提示填路径', async () => {

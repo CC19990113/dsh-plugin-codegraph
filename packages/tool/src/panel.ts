@@ -119,6 +119,12 @@ export interface PanelStateResponse {
   /** This answer carries data. */
   readonly ok: true
   /**
+   * The workspace this answer describes — echoed back because the caller may not have named one.
+   * A `state` request without `root` resolves to the open session's workspace, and the client shows
+   * this value rather than leaving the box empty.
+   */
+  readonly root?: string
+  /**
    * The persisted summary, returned as-is so the client renders what the indexer wrote. The sidecar
    * carries no language breakdown, so the client omits that row rather than showing an empty label;
    * deriving one is more work than this route — a fixed relative-path file read — is meant to do.
@@ -138,6 +144,8 @@ export interface PanelReindexResponse {
 export interface PanelErrorResponse {
   /** No data accompanies this answer. */
   readonly ok: false
+  /** The workspace this answer is about, when the route could resolve one. */
+  readonly root?: string
   /** One line the panel shows verbatim. */
   readonly message: string
 }
@@ -210,7 +218,13 @@ async function handleRequest(ctx: Context, req: PanelRequest, res: PanelResponse
     const route = url.pathname.slice(PANEL_ROUTE_PREFIX.length).replace(/\/+$/u, '')
     const method = (req.method ?? 'GET').toUpperCase()
     if (route === '/state' && method === 'GET') {
-      const root = workspaceRoot(url.searchParams.get('root'))
+      const requested = url.searchParams.get('root')
+      // No `root` means "whatever session is open here": the panel is reachable from the settings
+      // page of a running session, so making the user retype its own path is friction with no
+      // purpose. An explicit value (stored from a previous visit, or typed) still wins.
+      const root = requested === null || requested.trim() === ''
+        ? currentWorkspace(ctx)
+        : workspaceRoot(requested)
       respond(res, root === undefined ? invalidRoot() : stateResult(root))
       return
     }
@@ -225,13 +239,38 @@ async function handleRequest(ctx: Context, req: PanelRequest, res: PanelResponse
 }
 
 /**
+ * The workspace the panel should describe when the caller names none.
+ *
+ * Read through the host's agent registry rather than the plugin's own state: the panel is mounted
+ * inside a running session, and the agent that session belongs to already carries its `cwd`. The
+ * last registered agent wins — agents are appended in creation order, so the newest one is the most
+ * likely "the session the user is looking at" — and a workspace that appears twice is reported once.
+ *
+ * Structural typing on purpose: this module must not depend on `@deepseek-ai/dsh-agent` just to read
+ * one string, and a composition without the service simply gets `undefined` (the client then asks
+ * for a path, which is the old behaviour).
+ * @param ctx - the plugin context.
+ * @returns the absolute workspace path, or `undefined` when no session has one.
+ */
+function currentWorkspace(ctx: Context): string | undefined {
+  const agents = (ctx as unknown as { agents?: { list?: () => readonly unknown[] } }).agents
+  const registered = agents?.list?.() ?? []
+  for (let index = registered.length - 1; index >= 0; index -= 1) {
+    const session = (registered[index] as { session?: { header?: { cwd?: unknown } } } | undefined)?.session
+    const cwd = session?.header?.cwd
+    if (typeof cwd === 'string' && cwd.trim() !== '') return cwd
+  }
+  return undefined
+}
+
+/**
  * Read the workspace's persisted indexing summary.
  * @param root - an already validated absolute workspace root.
  * @returns the status answer, or the failure that explains why there is none.
  */
 function stateResult(root: string): RouteResult {
   const status = readIndexStatus(root)
-  if (status !== undefined) return { code: 200, body: { ok: true, status } }
+  if (status !== undefined) return { code: 200, body: { ok: true, root, status } }
   if (existsSync(join(root, INDEX_STATUS_RELATIVE_PATH))) {
     // The file is there but the read or the shape check rejected it: corrupt, truncated, or written by
     // something other than an indexer. A rebuild is the only repair the panel can offer.
@@ -241,6 +280,7 @@ function stateResult(root: string): RouteResult {
     code: 404,
     body: {
       ok: false,
+      root,
       message: existsSync(join(root, GRAPH_RELATIVE_PATH))
         ? '这个工作区的索引由旧版本构建，没有状态摘要；先跑一次 codegraph_index 重建'
         : '这个工作区还没有索引，先跑一次 codegraph_index',

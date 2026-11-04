@@ -1397,6 +1397,40 @@ describe('the settings-panel routes', () => {
     }
   })
 
+  it('answers for the open session workspace when the caller names none', async () => {
+    // Opening the settings page used to demand the very path the session already knows. With no
+    // `root`, the route resolves the newest registered agent's cwd and echoes it back.
+    const root = await workspace({ '.codegraph/status.json': JSON.stringify(PANEL_STATUS) })
+    const webServer = fakeWebServer()
+    const host = stubHost({
+      webServer,
+      codegraph: {},
+      agents: {
+        list: () => [
+          { session: { header: { cwd: '/somewhere/else' } } },
+          { session: { header: { cwd: root } } },
+        ],
+      },
+    })
+    registerPanelRoutes(host.ctx, { panel: true })
+    const answer = await invokePanel(webServer.routes[0], panelRequest(`${PANEL_ROUTE_PREFIX}/state`))
+    expect(answer.statusCode).toBe(200)
+    expect(panelBody(answer)).toEqual({ ok: true, root, status: PANEL_STATUS })
+  })
+
+  it('still asks for a path when no session has a workspace', async () => {
+    const webServer = fakeWebServer()
+    // Agents that exist but carry no usable workspace: every shape the lookup has to skip.
+    const host = stubHost({
+      webServer,
+      codegraph: {},
+      agents: { list: () => [{ session: { header: {} } }, { session: {} }, {}, { session: { header: { cwd: '  ' } } }] },
+    })
+    registerPanelRoutes(host.ctx, { panel: true })
+    const answer = await invokePanel(webServer.routes[0], panelRequest(`${PANEL_ROUTE_PREFIX}/state`))
+    expect(answer.statusCode).toBe(400)
+  })
+
   it('answers a workspace whose summary the indexer wrote', async () => {
     const root = await workspace({ '.codegraph/status.json': JSON.stringify(PANEL_STATUS) })
     const { route } = panelSubject({})
@@ -1404,7 +1438,8 @@ describe('the settings-panel routes', () => {
     expect(answer.statusCode).toBe(200)
     expect(answer.headers['content-type']).toBe('application/json; charset=utf-8')
     expect(answer.headers['cache-control']).toBe('no-store')
-    expect(panelBody(answer)).toEqual({ ok: true, status: PANEL_STATUS })
+    // The answer echoes the workspace it resolved, so the panel can show it without another round-trip.
+    expect(panelBody(answer)).toEqual({ ok: true, root, status: PANEL_STATUS })
   })
 
   it('tolerates a trailing slash on the route', async () => {
@@ -1445,7 +1480,7 @@ describe('the settings-panel routes', () => {
     const { route } = panelSubject({})
     const answer = await invokePanel(route, panelRequest(stateUrl(root)))
     expect(answer.statusCode).toBe(404)
-    expect(panelBody(answer)).toEqual({ ok: false, message: '这个工作区还没有索引，先跑一次 codegraph_index' })
+    expect(panelBody(answer)).toEqual({ ok: false, root, message: '这个工作区还没有索引，先跑一次 codegraph_index' })
   })
 
   it('distinguishes an index built before the summary sidecar existed', async () => {
@@ -1455,6 +1490,7 @@ describe('the settings-panel routes', () => {
     expect(answer.statusCode).toBe(404)
     expect(panelBody(answer)).toEqual({
       ok: false,
+      root,
       message: '这个工作区的索引由旧版本构建，没有状态摘要；先跑一次 codegraph_index 重建',
     })
   })
