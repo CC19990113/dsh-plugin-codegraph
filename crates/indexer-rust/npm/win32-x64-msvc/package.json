@@ -1,0 +1,20 @@
+{
+  "name": "dsh-plugin-codegraph-indexer-win32-x64-msvc",
+  "version": "0.6.0",
+  "description": "The native codegraph extraction engine for Windows x64. Installed automatically by dsh-plugin-codegraph-tree-sitter; do not depend on it directly.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "codegraph-indexer.win32-x64.node",
+  "files": [
+    "codegraph-indexer.win32-x64.node"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "dsh-plugin-codegraph-indexer-darwin-arm64",
+  "version": "0.6.0",
+  "description": "The native codegraph extraction engine for macOS on Apple Silicon. Installed automatically by dsh-plugin-codegraph-tree-sitter; do not depend on it directly.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "codegraph-indexer.darwin-arm64.node",
+  "files": [
+    "codegraph-indexer.darwin-arm64.node"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CC19990113/dsh-plugin-codegraph.git"
+  }
+}

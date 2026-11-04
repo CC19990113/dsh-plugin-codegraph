@@ -22,7 +22,7 @@ import { createParser } from '../src/grammar.ts'
 import { extractFile } from '../src/extract.ts'
 import type { FileExtraction } from '../src/extract.ts'
 import { languageFor } from '../src/languages.ts'
-import { extractWithRust, installRustEngineForTests, loadRustEngine, RUST_BATCH_SIZE } from '../src/rust-engine.ts'
+import { candidateModulePaths, extractWithRust, modulePathsFor, installRustEngineForTests, loadRustEngine, nativePackageModulePath, nativePackageName, RUST_BATCH_SIZE } from '../src/rust-engine.ts'
 import type { RustEngine, RustExtractInput } from '../src/rust-engine.ts'
 import { walkAndExtract } from '../src/walk.ts'
 import type { WalkConfig } from '../src/walk.ts'
@@ -255,25 +255,25 @@ describe('rust-engine fallback', () => {
     return { extractWorkspace }
   }
 
-  it('answers undefined when there is no addon at all', () => {
-    expect(extractWithRust(rustInputs({ 'a.ts': 'export const a = 1\n' }), undefined)).toBeUndefined()
+  it('answers undefined when there is no addon at all', async () => {
+    expect(await extractWithRust(rustInputs({ 'a.ts': 'export const a = 1\n' }), undefined)).toBeUndefined()
   })
 
-  it('never calls the addon for a language it does not handle', () => {
+  it('never calls the addon for a language it does not handle', async () => {
     const called = vi.fn<RustEngine['extractWorkspace']>(() => '{}')
-    const rusted = extractWithRust([{ path: 'a.py', language: 'python', text: 'x = 1\n' }], fakeEngine(called))
+    const rusted = await extractWithRust([{ path: 'a.py', language: 'python', text: 'x = 1\n' }], fakeEngine(called))
     expect(rusted?.size).toBe(0)
     expect(called).not.toHaveBeenCalled()
   })
 
-  it('treats unparsable JSON, and JSON of the wrong shape, as no extraction at all', () => {
+  it('treats unparsable JSON, and JSON of the wrong shape, as no extraction at all', async () => {
     const inputs = rustInputs({ 'a.ts': 'export const a = 1\n' })
     for (const answer of ['not json', 'null', '{}', '{"results":42}']) {
-      expect(extractWithRust(inputs, fakeEngine(() => answer)), answer).toBeUndefined()
+      expect(await extractWithRust(inputs, fakeEngine(() => answer)), answer).toBeUndefined()
     }
   })
 
-  it('keeps every well-formed entry and skips the malformed ones', () => {
+  it('keeps every well-formed entry and skips the malformed ones', async () => {
     const answer = JSON.stringify({
       results: [
         null,
@@ -285,19 +285,19 @@ describe('rust-engine fallback', () => {
       ],
       supported: ['typescript'],
     })
-    const rusted = extractWithRust(rustInputs({ 'kept.ts': 'export const a = 1\n' }), fakeEngine(() => answer))
+    const rusted = await extractWithRust(rustInputs({ 'kept.ts': 'export const a = 1\n' }), fakeEngine(() => answer))
     expect([...(rusted?.keys() ?? [])]).toEqual(['kept.ts'])
     expect(rusted?.get('kept.ts')).toStrictEqual(EMPTY_EXTRACTION)
   })
 
-  it('treats a thrown addon call as no extraction at all', () => {
+  it('treats a thrown addon call as no extraction at all', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const inputs = rustInputs({ 'a.ts': 'export const a = 1\n' })
     const engine = fakeEngine(() => { throw new Error('boom') })
-    expect(extractWithRust(inputs, engine)).toBeUndefined()
+    expect(await extractWithRust(inputs, engine)).toBeUndefined()
   })
 
-  it('splits a large batch at RUST_BATCH_SIZE and merges every answer', () => {
+  it('splits a large batch at RUST_BATCH_SIZE and merges every answer', async () => {
     const sizes: number[] = []
     const engine = fakeEngine((inputs) => {
       sizes.push(inputs.length)
@@ -305,7 +305,7 @@ describe('rust-engine fallback', () => {
     })
     const files: Record<string, string> = {}
     for (let index = 0; index < RUST_BATCH_SIZE + 1; index++) files[`f${index}.ts`] = 'export const x = 1\n'
-    const rusted = extractWithRust(rustInputs(files), engine)
+    const rusted = await extractWithRust(rustInputs(files), engine)
     expect(sizes).toEqual([RUST_BATCH_SIZE, 1])
     expect(rusted?.size).toBe(RUST_BATCH_SIZE + 1)
   })
@@ -358,7 +358,7 @@ describe('walk fallback', () => {
 describe.skipIf(addon === undefined)('rust parity against extractFile', () => {
   it('matches on every fixture file', async () => {
     const inputs = rustInputs(FIXTURE).filter(input => STRICT_FILES.includes(input.path))
-    const rusted = extractWithRust(inputs, addon)
+    const rusted = await extractWithRust(inputs, addon)
     expect(rusted).toBeDefined()
     for (const input of inputs) {
       const native = rusted?.get(input.path)
@@ -396,7 +396,7 @@ describe.skipIf(addon === undefined)('rust parity against extractFile', () => {
       if (spec === undefined) throw new Error(`no grammar for ${path}`)
       inputs.push({ path, language: spec.language, text })
     }
-    const rusted = extractWithRust(inputs, addon)
+    const rusted = await extractWithRust(inputs, addon)
     expect(rusted?.size).toBe(inputs.length)
     for (const input of inputs) {
       const native = rusted?.get(input.path)
@@ -415,5 +415,40 @@ describe.skipIf(addon === undefined)('rust parity against extractFile', () => {
     // Same files, same order — a declined path falling back must not reorder or drop anything.
     expect(auto.files.map(file => file.path)).toEqual(js.files.map(file => file.path))
     expect(auto.files).toHaveLength(Object.keys(FIXTURE).length)
+  })
+})
+
+describe('optional native package resolution', () => {
+  it('names one package per published platform, and nothing for the rest', () => {
+    expect(nativePackageName('darwin', 'arm64')).toBe('dsh-plugin-codegraph-indexer-darwin-arm64')
+    expect(nativePackageName('darwin', 'x64')).toBe('dsh-plugin-codegraph-indexer-darwin-x64')
+    expect(nativePackageName('linux', 'x64')).toBe('dsh-plugin-codegraph-indexer-linux-x64-gnu')
+    expect(nativePackageName('linux', 'arm64')).toBe('dsh-plugin-codegraph-indexer-linux-arm64-gnu')
+    expect(nativePackageName('win32', 'x64')).toBe('dsh-plugin-codegraph-indexer-win32-x64-msvc')
+    // A platform this project publishes no build for must answer nothing rather than guess a name.
+    expect(nativePackageName('freebsd', 'x64')).toBeUndefined()
+  })
+
+  it('resolves through the injected resolver, and reports a miss as no addon', () => {
+    expect(nativePackageModulePath('darwin', 'arm64', () => '/scratch/addon.node')).toBe('/scratch/addon.node')
+    expect(nativePackageModulePath('darwin', 'arm64', () => { throw new Error('not installed') })).toBeUndefined()
+    // An unsupported platform never reaches the resolver at all.
+    expect(nativePackageModulePath('freebsd', 'x64', () => { throw new Error('must not be called') })).toBeUndefined()
+  })
+
+  it('offers the package path last, after both local layouts', () => {
+    const base = import.meta.url
+    // The two local layouts always come first, whether or not this machine happens to have the
+    // optional package installed (passing `undefined` falls back to the real resolution).
+    const paths = modulePathsFor(base, '/scratch/addon.node')
+    expect(paths).toHaveLength(3)
+    expect(paths[0]).toContain('packages/tree-sitter/artifacts')
+    expect(paths[1]).toContain('crates/indexer-rust/artifacts')
+    // Last, not first: a checkout's own build and a hand-copied artifact stay preferred.
+    expect(paths[2]).toBe('/scratch/addon.node')
+    // Without an optional package the answer is the two local layouts and nothing else.
+    expect(modulePathsFor(base, undefined)).toHaveLength(2)
+    // Production resolves the package itself; it must still start with the local layouts.
+    expect(candidateModulePaths(base).length).toBeGreaterThanOrEqual(2)
   })
 })

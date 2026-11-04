@@ -13,6 +13,7 @@ mod rules;
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use napi::{bindgen_prelude::AsyncTask, Env, Task};
 use napi_derive::napi;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -54,9 +55,43 @@ struct Job<'a> {
     spec: &'a LanguageSpec,
 }
 
+/// One batch, executed on the libuv thread pool instead of the JavaScript thread.
+///
+/// The body that used to run inline runs in {@link Task::compute}: napi dispatches that to a
+/// worker thread and hands the caller a promise, so a long batch no longer freezes the host's
+/// event loop. Speed was never the problem — rayon already made the parse 4x faster — but a
+/// synchronous native call blocks the loop for the whole call regardless, which is what took the
+/// desktop down when auto-indexing ran inside the renderer.
+pub struct ExtractTask {
+    inputs: Vec<ExtractInput>,
+    rules_json: String,
+}
+
+impl Task for ExtractTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        // A panic here would otherwise abort the Node process; napi cannot turn that into a
+        // rejected promise on its own, so the whole body runs inside catch_unwind.
+        match catch_unwind(AssertUnwindSafe(|| run(&self.inputs, &self.rules_json))) {
+            Ok(Ok(json)) => Ok(json),
+            Ok(Err(message)) => Err(napi::Error::new(napi::Status::GenericFailure, message)),
+            Err(panic) => Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                format!("codegraph indexer panicked: {}", panic_message(&panic)),
+            )),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 /// Extract definitions, calls, imports, and heritage for a batch of files.
 ///
-/// Returns a JSON string of `{ results: [{ path, extraction }], supported: string[] }`.
+/// Resolves to a JSON string of `{ results: [{ path, extraction }], supported: string[] }`.
 /// Inputs in a language this addon does not handle are skipped, not errored: the JS
 /// side falls back to its own extractor for them. A malformed `rulesJson` is an error,
 /// because extracting with no rules would report an empty graph as truth.
@@ -67,17 +102,8 @@ struct Job<'a> {
 /// back to the JS extractor for every missing path — otherwise a file both engines only
 /// half-parse would contribute two different sets of garbage to the graph.
 #[napi(js_name = "extractWorkspace")]
-pub fn extract_workspace(inputs: Vec<ExtractInput>, rules_json: String) -> napi::Result<String> {
-    // A panic here would otherwise abort the Node process; napi cannot turn that into a
-    // rejected promise on its own, so the whole body runs inside catch_unwind.
-    match catch_unwind(AssertUnwindSafe(|| run(&inputs, &rules_json))) {
-        Ok(Ok(json)) => Ok(json),
-        Ok(Err(message)) => Err(napi::Error::new(napi::Status::GenericFailure, message)),
-        Err(panic) => Err(napi::Error::new(
-            napi::Status::GenericFailure,
-            format!("codegraph indexer panicked: {}", panic_message(&panic)),
-        )),
-    }
+pub fn extract_workspace(inputs: Vec<ExtractInput>, rules_json: String) -> AsyncTask<ExtractTask> {
+    AsyncTask::new(ExtractTask { inputs, rules_json })
 }
 
 fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {

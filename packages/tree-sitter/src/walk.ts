@@ -357,7 +357,7 @@ async function extractPending(
   // those itself (`RUST_LANGUAGES`), so the walk never keeps a second copy of that list in sync.
   const rusted = engine === undefined
     ? new Map<string, FileExtraction>()
-    : extractWithRust(pending.map(toRustInput), engine) ?? new Map<string, FileExtraction>()
+    : await extractWithRust(pending.map(toRustInput), engine) ?? new Map<string, FileExtraction>()
   const extracted = new Array<ExtractedFile>(pending.length)
   const fallback: { readonly index: number; readonly file: PendingFile }[] = []
   for (const [index, file] of pending.entries()) {

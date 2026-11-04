@@ -24,9 +24,9 @@ export const RUST_LANGUAGES: readonly string[] = ['typescript', 'tsx', 'javascri
 
 /**
  * Files handed to one addon call. The addon parses a batch across every core it can, so a large batch
- * is what makes it fast — but the call itself blocks the event loop for its whole duration, so the
- * batch is bounded to keep one call short enough that a watcher rebuild or a host request is not
- * stalled behind it.
+ * is what makes it fast. The call runs on libuv's thread pool (see {@link RustEngine}), so a batch no
+ * longer stalls the event loop; the bound now keeps one promise's lifetime — and the file text it
+ * holds in flight — reasonable, instead of capping a blocking call.
  */
 export const RUST_BATCH_SIZE = 200
 
@@ -47,11 +47,16 @@ export interface RustExtractInput {
 export interface RustEngine {
   /**
    * Extract definitions, calls, imports, and heritage for a batch of files.
+   *
+   * Answers a promise because the addon's body runs on libuv's thread pool: a synchronous native call
+   * blocked the host's event loop for the whole batch, which is what froze the desktop when automatic
+   * indexing ran inside the renderer. Callers `await` it; an older addon that still returns a string
+   * keeps working, because `await` on a non-promise is the value itself.
    * @param inputs - the files to extract; inputs in an unsupported language are silently skipped.
    * @param rulesJson - the `LanguageSpec` table, as JSON.
-   * @returns JSON of `{ results: [{ path, extraction }], supported: string[] }`.
+   * @returns a promise of JSON `{ results: [{ path, extraction }], supported: string[] }`.
    */
-  extractWorkspace(inputs: RustExtractInput[], rulesJson: string): string
+  extractWorkspace(inputs: RustExtractInput[], rulesJson: string): Promise<string>
 }
 
 /** Options for {@link loadRustEngine}. */
@@ -66,22 +71,91 @@ export interface LoadRustEngineOptions {
 const require = createRequire(import.meta.url)
 
 /**
+ * Where the native package for this platform lives, when npm installed one.
+ *
+ * The addon ships as one optional dependency per platform (`optionalDependencies` in this package's
+ * manifest), so a `pnpm add` pulls exactly one binary — the one the running machine can `dlopen` —
+ * instead of every platform's. npm's `os`/`cpu` fields do the selection; a platform this project does
+ * not build for simply never installs one and the walk falls back to JS.
+ * @param platform - `process.platform`.
+ * @param arch - `process.arch`.
+ * @returns the package name, or `undefined` for a platform with no published build.
+ */
+export function nativePackageName(platform: string, arch: string): string | undefined {
+  const suffix = NATIVE_PACKAGES[`${platform}-${arch}`]
+  return suffix === undefined ? undefined : `dsh-plugin-codegraph-indexer-${suffix}`
+}
+
+/**
+ * The suffix each published platform package carries, keyed by `platform-arch`.
+ *
+ * A suffix is not mechanical: the Linux builds are `-gnu` because a musl one would have to be a
+ * separate artifact, while Windows spells its ABI out. Keeping the table explicit is what stops this
+ * from silently computing a package name nobody publishes.
+ */
+const NATIVE_PACKAGES: Record<string, string> = {
+  'darwin-arm64': 'darwin-arm64',
+  'darwin-x64': 'darwin-x64',
+  'linux-x64': 'linux-x64-gnu',
+  'linux-arm64': 'linux-arm64-gnu',
+  'win32-x64': 'win32-x64-msvc',
+}
+
+/**
+ * Resolve this platform's optional native package to its `.node` entry, if it is installed.
+ *
+ * `require.resolve` is the only thing that knows where a dependency actually landed — pnpm's store,
+ * npm's flat tree, a hoisted profile — so the path is asked for rather than constructed. A missing
+ * package, or one whose `main` does not resolve, is `undefined`: that is the documented "no addon"
+ * answer, not an error.
+ * @param platform - `process.platform`.
+ * @param arch - `process.arch`.
+ * @param resolve - module resolution, injectable so a test does not depend on what this machine has
+ *   installed.
+ * @returns the absolute path to the addon, or `undefined`.
+ */
+export function nativePackageModulePath(
+  platform: string,
+  arch: string,
+  resolve: (name: string) => string = require.resolve,
+): string | undefined {
+  const name = nativePackageName(platform, arch)
+  if (name === undefined) return undefined
+  try {
+    return resolve(name)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Every place the addon may live, most specific first.
  *
- * Two layouts matter: a package that ships the binary puts it in `artifacts/` beside `lib/` (the
- * published shape, and what a profile install gets when someone copies it in), while a repository
- * checkout builds it under `crates/indexer-rust/artifacts/`, three directories up from both `src/`
- * and `lib/` since those sit at the same depth. Trying both means one module works whether it was
- * installed or checked out.
+ * Three layouts matter: a package that ships the binary puts it in `artifacts/` beside `lib/` (the
+ * shape an older hand-copied install has), a repository checkout builds it under
+ * `crates/indexer-rust/artifacts/` (three directories up from both `src/` and `lib/`, which sit at the
+ * same depth), and an npm install carries it in the platform's optional dependency. Trying all three
+ * means one module works whether it was installed, copied in, or checked out.
  * @param base - the importing module's URL; parameterized so a test can point at a scratch tree.
+ * @param fromPackage - this platform's optional-dependency path, or `undefined` when there is none.
  * @returns absolute paths to try, in order.
  */
-export function candidateModulePaths(base: string = import.meta.url): string[] {
+export function modulePathsFor(base: string, fromPackage: string | undefined): string[] {
   const artifact = `codegraph-indexer.${process.platform}-${process.arch}.node`
   return [
     fileURLToPath(new URL(`../artifacts/${artifact}`, base)),
     fileURLToPath(new URL(`../../../crates/indexer-rust/artifacts/${artifact}`, base)),
+    ...fromPackage === undefined ? [] : [fromPackage],
   ]
+}
+
+/**
+ * The paths production should try, with this platform's optional package worked out for it.
+ * @param base - the importing module's URL; parameterized so a test can point at a scratch tree.
+ * @returns absolute paths to try, in order.
+ */
+export function candidateModulePaths(base: string = import.meta.url): string[] {
+  return modulePathsFor(base, nativePackageModulePath(process.platform, process.arch))
 }
 
 /** Addons already loaded, keyed by path, so a test's stand-in never shadows the real artifact. */
@@ -194,10 +268,10 @@ function rustRulesJson(): string {
  * @returns one extraction per path the addon answered for, or `undefined` when no answer can be
  *   trusted at all — no addon, a thrown call, or JSON that is not the documented shape.
  */
-export function extractWithRust(
+export async function extractWithRust(
   files: readonly RustExtractInput[],
   engine: RustEngine | undefined,
-): Map<string, FileExtraction> | undefined {
+): Promise<Map<string, FileExtraction> | undefined> {
   const supported = files.filter(file => RUST_LANGUAGES.includes(file.language))
   if (supported.length === 0) return new Map()
   if (engine === undefined) return undefined
@@ -205,7 +279,10 @@ export function extractWithRust(
   try {
     for (let start = 0; start < supported.length; start += RUST_BATCH_SIZE) {
       const batch = supported.slice(start, start + RUST_BATCH_SIZE)
-      const answer: unknown = JSON.parse(engine.extractWorkspace(batch, rustRulesJson()))
+      // Awaited one batch at a time: the addon already parses a batch across every core, so
+      // overlapping batches would only compete for the same threads while multiplying the text held
+      // in flight.
+      const answer: unknown = JSON.parse(await engine.extractWorkspace(batch, rustRulesJson()))
       if (!isRecord(answer) || !Array.isArray(answer.results)) return undefined
       for (const entry of answer.results) {
         // A malformed entry is treated as a path the addon did not answer for: the caller falls back

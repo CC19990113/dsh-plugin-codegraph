@@ -6,7 +6,69 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The native addon is the whole reason a workspace indexes in seconds instead of minutes, and until
+  # this job existed it was also the reason npm users never got it: `artifacts/` is gitignored, so the
+  # published package shipped only the JS path. One binary per platform, published as its own optional
+  # dependency, is how `pnpm add` ends up with the one the machine can actually `dlopen`.
+  build-native:
+    strategy:
+      # A missing platform must not silently produce a release that lacks that platform's binary:
+      # fail the run instead, so the release is retried rather than half-published.
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: darwin-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-x64-gnu
+          # arm64 Linux needs an arm64 runner: cross-compiling a cdylib whose tree-sitter C sources
+          # are compiled by a C toolchain of the wrong architecture is not a supported build.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: win32-x64-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `-p @napi-rs/cli` is load-bearing: the package's binary is named `napi`, and npm cannot infer
+      # it from the bare package name (`could not determine executable to run`).
+      - name: Build addon
+        working-directory: crates/indexer-rust
+        run: npx --yes -p @napi-rs/cli napi build --release --platform --target ${{ matrix.target }} --output-dir artifacts
+
+      - name: Stage the binary into its platform package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="crates/indexer-rust/npm/${{ matrix.suffix }}"
+          mkdir -p "$dir"
+          cp "crates/indexer-rust/artifacts/codegraph-indexer.${{ matrix.suffix }}.node" "$dir/"
+          ls -l "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.suffix }}
+          path: crates/indexer-rust/npm/${{ matrix.suffix }}/*.node
+          if-no-files-found: error
+
   publish:
+    needs: build-native
     runs-on: ubuntu-latest
     permissions:
       # Required for npm provenance: mints the OIDC token that lets npm attest
@@ -24,6 +86,27 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: native-artifacts
+
+      # Every platform package must carry its binary before anything is published: a platform package
+      # whose `.node` is missing installs cleanly and then falls back to JS forever, which is exactly
+      # the silent failure this release is meant to remove.
+      - name: Place the binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in native-artifacts/*/; do
+            suffix="$(basename "$dir")"
+            cp "$dir"*.node "crates/indexer-rust/npm/$suffix/"
+          done
+          for pkg in crates/indexer-rust/npm/*/; do
+            count=$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)
+            echo "$pkg -> $count binary(ies)"
+            [ "$count" -eq 1 ] || { echo "::error::$pkg is missing its binary"; exit 1; }
+          done
 
       - run: pnpm install --frozen-lockfile
 
@@ -43,6 +126,21 @@ jobs:
       # two can never drift apart.
       - name: Stage bundle README
         run: cp README.md packages/bundle/README.md
+
+      # Platform packages go first. The main package's `optionalDependencies` name them by version, so
+      # publishing it before they exist would leave npm users with a resolution failure for a dependency
+      # that is allowed to be missing — the binary would never arrive and nothing would say why.
+      - name: Publish platform packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in crates/indexer-rust/npm/*/; do
+            echo "publishing $pkg"
+            npm publish "$pkg" --access public
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
 
       # `pnpm -r publish` walks the workspace in dependency order and rewrites
       # every `workspace:^` range into the concrete published version.

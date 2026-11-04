@@ -1,0 +1,2 @@
+# The binary is produced by the release workflow, never committed.
+*.node

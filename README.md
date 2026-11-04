@@ -151,9 +151,13 @@ Three details worth knowing:
 - **The rule table is not duplicated.** The addon receives `LANGUAGE_TABLE` as JSON and builds its matchers from it, so the two engines cannot drift on what a rule says — only on how well they implement it, which is what the parity tests measure.
 - **Files whose parse tree has errors are left to the JS engine.** The two grammars (WASM 0.20 vs crate 0.23/0.25) recover from malformed input differently — on a real workspace that showed up as one phantom definition and a line off by one — so the addon refuses those files and `walk` extracts them the old way. Correct over fast.
 
+**It no longer freezes the host.** Before 0.6.0 `extractWorkspace` was a synchronous export: the napi call waited on the whole batch on the JS thread, and rayon only made that wait shorter, never optional. Auto-indexing runs inside the renderer, so that wait was the whole UI — opening a historical conversation could take the desktop down, and a sample of the main thread put 2415 of 2415 frames in `uv_fs_stat` at 47% CPU. The call is an `AsyncTask` now: the work goes to libuv's thread pool and the caller awaits a promise. Across one 1480-file, 644 ms call the event loop ticked 53 times, worst delay 12 ms.
+
+**The binaries now arrive with npm.** Five platform packages (`dsh-plugin-codegraph-indexer-*`) are published as this package's `optionalDependencies`, and npm's `os`/`cpu` fields pull exactly the one this machine can `dlopen` — no more copying a `.node` into the package by hand. When it cannot be had (a pruned install, a mirror missing the package, an unsupported platform) the JS path still answers.
+
 `packages/tree-sitter/tests/rust-parity.spec.ts` asserts the two engines produce **byte-identical** extractions on every fixture, and on a real workspace when `CODEGRAPH_PARITY_WORKSPACE` is set.
 
-**Coverage and next.** Four languages today. Python, Go, Java, C/C++, Rust, C# and the rest still go through the JS extractor, which keeps working unchanged; each new language needs its own Rust-side special cases plus a parity run before it ships. Multi-platform binaries (Linux, Windows, both architectures) are not published yet — building the addon is documented in [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md).
+**Coverage and next.** Four languages today. Python, Go, Java, C/C++, Rust, C# and the rest still go through the JS extractor, which keeps working unchanged; each new language needs its own Rust-side special cases plus a parity run before it ships. The five-platform binaries are built by the `build-native` matrix in `.github/workflows/publish.yml`; the build details — especially the `npx -p @napi-rs/cli napi` invocation and the toolchain traps — live in [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md).
 
 ## Call resolution never guesses
 

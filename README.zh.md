@@ -151,9 +151,13 @@ codegraph查一次就能全部答上来。本插件把两半都带齐了:一半�
 - **规则表不做第二份。** addon 收到的是 `LANGUAGE_TABLE` 的 JSON,靠它建匹配器,所以两个引擎在"规则怎么说"上不可能漂移——能差的只有"实现得多准",而这正是对拍测试在量的东西。
 - **解析树有错的文件留给 JS 引擎。** 两份语法(WASM 0.20 vs crate 0.23/0.25)对畸形输入的恢复方式不同——真实工作区上表现为一条假定义和一处行号差 1——所以 addon 拒收这类文件,由 `walk` 按老办法抽取。宁可慢,不要错。
 
+**它不再卡住宿主。** 0.6.0 之前 `extractWorkspace` 是同步导出:napi 调用在 JS 线程上等整批解析完,rayon 只是让它更快,没有让它不阻塞。自动索引在渲染进程里一跑,主线程就整段时间拿不回来——打开一个历史对话能把桌面拖死,实测采样 2415 个样本 100% 停在 `uv_fs_stat`、CPU 47%。现在这个调用是 `AsyncTask`,工作落到 libuv 线程池、返回 Promise:1480 个文件 644ms 的一次调用期间,事件循环照常 tick 了 53 次,最大延迟 12ms。
+
+**二进制随 npm 一起来。** 五个平台各一个包(`dsh-plugin-codegraph-indexer-*`),作为本包的 `optionalDependencies` 发布,npm 按 `os`/`cpu` 只装匹配当前机器的那一个——不再需要手工把 `.node` 复制进包目录。拿不到(裁剪安装、镜像缺包、不支持的平台)就还是回落 JS。
+
 `packages/tree-sitter/tests/rust-parity.spec.ts` 断言两个引擎在每个 fixture 上产出**逐字节相同**的抽取结果;设置 `CODEGRAPH_PARITY_WORKSPACE` 时还会对真实工作区做同样的断言。
 
-**覆盖与下一步。** 目前四种语言。Python、Go、Java、C/C++、Rust、C# 等仍然走 JS 抽取器,行为完全不变;每加一种语言都需要补 Rust 侧的特判并跑一遍对拍。多平台二进制(Linux、Windows、两种架构)还没发布——怎么构建 addon 写在 [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md)。
+**覆盖与下一步。** 目前四种语言。Python、Go、Java、C/C++、Rust、C# 等仍然走 JS 抽取器,行为完全不变;每加一种语言都需要补 Rust 侧的特判并跑一遍对拍。五平台二进制由 `.github/workflows/publish.yml` 的 `build-native` 矩阵构建,构建细节(尤其是 `npx -p @napi-rs/cli napi` 这个调用形式和 toolchain 陷阱)见 [`crates/indexer-rust/README.md`](crates/indexer-rust/README.md)。
 ## 宁可漏,不可错
 
 每个调用点按固定顺序解析:先看 import 能不能指向某个已索引的文件;不行就看**调用方这个文件自己**是不是恰好只有一个同名定义——词法作用域先于全仓库说话,两个测试文件各有一个 `helper`、两个组件各有一个 `render`,都不会被当成歧义;再不行才看全仓库是不是只有一个同名定义;还不行,**就不产出这条边**,把它记进未解析计数。
