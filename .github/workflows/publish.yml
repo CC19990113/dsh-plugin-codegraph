@@ -95,8 +95,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The artifact name carries the `native-` tag it was uploaded under; the package directory
+          # does not. Stripping it here is what keeps the two names from being confused.
           for dir in native-artifacts/*/; do
-            suffix="$(basename "$dir")"
+            name="$(basename "$dir")"
+            suffix="${name#native-}"
             cp "$dir"*.node "crates/indexer-rust/npm/$suffix/"
           done
           for pkg in crates/indexer-rust/npm/*/; do
