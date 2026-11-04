@@ -371,7 +371,7 @@ export function apply(ctx: Context, config: Config): void {
     if (resolved.autoIndexOnSession) {
       // Registered inside this effect so the listener follows the plugin's lifetime: unloading the
       // plugin must stop new sessions from scheduling work this instance can no longer run.
-      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, payload))
+      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, payload, ensureWatching))
     }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
@@ -507,6 +507,7 @@ function autoIndexOnSession(
   config: ResolvedConfig,
   lastAutoRun: Map<string, number>,
   payload: AgentCreatedPayload,
+  ensureWatching: (root: string) => void,
 ): void {
   try {
     const agent = payload.agent
@@ -527,7 +528,14 @@ function autoIndexOnSession(
     // or old one means the graph is missing or behind. Checked before the job lookup so a composition
     // without background jobs never pays for the probe.
     const indexedAt = readStatusIndexedAt(root)
-    if (indexedAt !== undefined && now - indexedAt < config.autoRefreshAfterMs) return
+    if (indexedAt !== undefined && now - indexedAt < config.autoRefreshAfterMs) {
+      // The graph is current, so no build is warranted — but watching is process-local state and
+      // this is the first time this process has seen this workspace. Without this call, a restart
+      // followed by a session in an up-to-date workspace would leave it unwatched until the sidecar
+      // aged out, and every edit until then would silently not reach the graph.
+      ensureWatching(root)
+      return
+    }
     // `ctx.get` rather than an `inject` entry: `jobs` is a host composition choice, and requiring it in
     // `inject` would hide this whole indexer from a profile that runs no background jobs.
     const jobs = ctx.get('jobs') as AutoIndexJobRegistry | undefined
