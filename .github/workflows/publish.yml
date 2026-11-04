@@ -110,7 +110,36 @@ jobs:
             fi
           done
 
-      - run: pnpm install --frozen-lockfile
+      # Platform packages go first, before the install: the main packages name them as optional
+      # dependencies, so a frozen install cannot resolve until those packages exist on the registry.
+      # A re-run after a partial publish finds them already present — that is a success, not a failure,
+      # which is why the "already published" message is tolerated here.
+      - name: Publish platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+        run: |
+          set -uo pipefail
+          for pkg in crates/indexer-rust/npm/*/; do
+            if [ "$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)" -ne 1 ]; then
+              echo "skipping $pkg (no binary in this run)"
+              continue
+            fi
+            echo "publishing $pkg"
+            if ! npm publish "$pkg" --access public 2>&1 | tee /tmp/pub.log; then
+              if grep -qE "previously published|cannot publish over" /tmp/pub.log; then
+                echo "$pkg already at this version; continuing"
+              else
+                exit 1
+              fi
+            fi
+          done
+
+      # Not frozen: the optional platform packages were only just published, so the lockfile this
+      # checkout carries predates them. CI does not commit the lockfile, and every other dependency
+      # is still pinned by it.
+      - run: pnpm install --no-frozen-lockfile
 
       # Publishing an artifact that does not typecheck or pass its own tests is
       # not recoverable: npm forbids re-using a version number.
@@ -128,25 +157,6 @@ jobs:
       # two can never drift apart.
       - name: Stage bundle README
         run: cp README.md packages/bundle/README.md
-
-      # Platform packages go first. The main package's `optionalDependencies` name them by version, so
-      # publishing it before they exist would leave npm users with a resolution failure for a dependency
-      # that is allowed to be missing — the binary would never arrive and nothing would say why.
-      - name: Publish platform packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          for pkg in crates/indexer-rust/npm/*/; do
-            if [ "$(find "$pkg" -maxdepth 1 -name '*.node' | wc -l)" -ne 1 ]; then
-              echo "skipping $pkg (no binary in this run)"
-              continue
-            fi
-            echo "publishing $pkg"
-            npm publish "$pkg" --access public
-          done
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
 
       # `pnpm -r publish` walks the workspace in dependency order and rewrites
       # every `workspace:^` range into the concrete published version.
