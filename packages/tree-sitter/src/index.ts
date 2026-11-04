@@ -28,7 +28,7 @@
  * @module dsh-plugin-codegraph-tree-sitter
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { stat } from 'node:fs/promises'
 import { join, posix } from 'node:path'
@@ -467,8 +467,22 @@ interface AutoIndexJobHooks {
 interface AutoIndexJobOutcome {
   /** Terminal status the registry records. */
   readonly status: 'completed' | 'failed'
-  /** Failure detail, when the job failed. */
+  /** One line explaining the outcome, when it needs one (a failure, or a skip). */
   readonly detail?: string
+}
+
+/**
+ * Whether a directory is the harness's own home rather than a project checkout.
+ *
+ * `sessions/` and `profiles/` together are what makes it one: either alone is a plausible folder
+ * name inside an ordinary repository, and requiring both keeps a real workspace eligible. The check
+ * exists because a DSH home is by construction tens of thousands of files — indexing it can only
+ * ever hit the session-start size guard, so queueing the job produces a failure and nothing else.
+ * @param root - the absolute workspace path.
+ * @returns true when the directory holds the harness's own state.
+ */
+function isHarnessHome(root: string): boolean {
+  return existsSync(join(root, 'sessions')) && existsSync(join(root, 'profiles'))
 }
 
 /**
@@ -499,6 +513,12 @@ function autoIndexOnSession(
     const root = agent?.session?.header?.cwd
     // No workspace means no root to claim: an agent created without a `cwd` has nothing to index.
     if (agent === undefined || !root) return
+    // DSH's own home directory is not a code repository — `sessions/`, `attachments/`, the index
+    // databases and the installed plugins below it are a program's state. It is also tens of
+    // thousands of files, so every session opened there queued a job whose only possible outcome was
+    // the size guard failing. Skipping here keeps the job list honest: what is not a candidate never
+    // becomes a failure the user cannot act on.
+    if (isHarnessHome(root)) return
     const now = Date.now()
     // A burst of sessions opened on one workspace must not queue the same rebuild repeatedly.
     const previous = lastAutoRun.get(root)
@@ -623,7 +643,10 @@ function runAutoIndexJob(
             `source files, past the ${String(config.autoIndexMaxFiles)}-file session-start limit. ` +
             `Run codegraph_index yourself if you want a graph for it.\n`,
         )
-        return { status: 'failed', detail: 'workspace too large for automatic indexing' }
+        // `completed`, not `failed`: nothing went wrong. The guard decided this workspace is not a
+        // candidate for an automatic run, and a user reading the job list must be able to tell that
+        // apart from a build that actually broke.
+        return { status: 'completed', detail: 'skipped: workspace too large for automatic indexing' }
       }
       const report = await ctx.codegraph.index(root, controller.signal)
       handle.append(
