@@ -175,7 +175,12 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
  */
 async function writeStatusFile(directory: string, status: IndexStatusFile): Promise<void> {
   const target = join(directory, basename(INDEX_STATUS_RELATIVE_PATH))
-  const temp = `${target}.tmp`
+  // Unique like the graph's own staging name, and for the same reason: two runs on one workspace are
+  // allowed to overlap (a session-start build and an explicit `codegraph_index`, or a watcher rebuild),
+  // and a shared fixed-name `.tmp` makes the loser's `rename` fail with ENOENT after the winner moved
+  // it — which turned a harmless duplicate run into a failed tool call. Last rename wins; both graphs
+  // are complete.
+  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
   await writeFile(temp, JSON.stringify(status))
   await rename(temp, target)
 }

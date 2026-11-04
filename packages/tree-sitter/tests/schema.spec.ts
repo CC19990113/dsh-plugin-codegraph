@@ -122,6 +122,29 @@ describe('writeGraph', () => {
     db.close()
   })
 
+  it('lets two runs on one workspace overlap without failing on the status sidecar', async () => {
+    // A session-start build and an explicit `codegraph_index` are allowed to race. The graph itself
+    // stages under a unique name, so the only shared file was `status.json` — and a fixed
+    // `status.json.tmp` made the loser's rename fail with ENOENT after the winner moved it, turning a
+    // harmless duplicate run into a failed tool call.
+    const path = await tempDatabasePath()
+    const write = (indexedAt: number) =>
+      writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt })
+
+    const results = await Promise.allSettled([write(NOW), write(NOW + 1)])
+
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+    const entries = await readdir(dirname(path))
+    // Nothing of either run is left staged, and exactly one sidecar remains — whichever finished last.
+    expect(entries.sort()).toEqual(['codegraph.db', 'status.json'])
+    const db = new DatabaseSync(path, { readOnly: true })
+    try {
+      expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
   it('leaves no temp file behind after a successful write or a failed one', async () => {
     const path = await tempDatabasePath()
     await writeGraph(path, { files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt: NOW })
