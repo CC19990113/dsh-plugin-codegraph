@@ -1,87 +1,65 @@
 #!/usr/bin/env node
 /**
- * Release version gate for the lockstep codegraph release.
+ * Release version gate: one version for every package a release publishes.
  *
- * One release version has to land in five different kinds of file, which makes
- * a half-finished bump easy:
+ * The shape of a release differs per repo, so nothing here is hardcoded: the
+ * published packages are discovered
  *
- *   - the six `packages/*` manifests (published together, one version)
- *   - the five platform addon manifests under `crates/indexer-rust/npm/*`
- *   - `packages/tree-sitter/package.json`'s optionalDependencies (one per addon)
- *   - `pnpm-workspace.yaml`'s minimumReleaseAgeExclude (one per addon)
- *   - `pnpm-lock.yaml`'s `packages/tree-sitter` importer, which records the pins
+ *   - JS packages      → `packages/<name>/package.json`
+ *   - platform addons  → `crates/<crate>/npm/<target>/package.json`
+ *   - addon holders    → any JS package whose `optionalDependencies` pins them
  *
- * The exclude list is one trap. pnpm 11 defaults `minimumReleaseAge` to 1440
- * minutes, so an addon published seconds ago is not resolvable; the exclude
- * list is what opens that window. If it still pins the previous version, the
- * release job dies in `pnpm install --no-frozen-lockfile` *after* the addons
- * are already published.
+ * and then one version has to agree across all of them plus the two generated
+ * files a release so easily forgets:
  *
- * The lockfile is the other trap, and the one CI hits first: `.github/workflows/
- * ci.yml` installs with `--frozen-lockfile`, so a manifest bumped without a
- * regenerated lockfile fails every run with `ERR_PNPM_OUTDATED_LOCKFILE` before
- * any test starts. An addon version can only enter the lockfile once it exists
- * on the registry, so the order for a release is: bump, publish the addons,
- * run `pnpm install`, commit the lockfile.
+ *   - `pnpm-lock.yaml`, whose `optionalDependencies` specifiers are the pins the
+ *     frozen-lockfile CI install resolves. An addon version can only enter the
+ *     lockfile once it exists on the registry, so the release order is: bump,
+ *     publish the addons, `pnpm install`, commit the lockfile.
+ *   - `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude`. pnpm 11 defaults
+ *     `minimumReleaseAge` to 1440 minutes, so an addon published seconds ago is
+ *     unresolvable until it is excluded; a stale list kills the release job
+ *     *after* the addons are already published.
  *
- * Deliberately dependency-free (node:fs / node:path only) and YAML-parser-free:
- * pnpm-workspace.yaml is scanned line by line, because the file is a short
- * fixed-shape block list and a parser dependency in a release gate is a worse
- * trade than a dozen lines of regex.
+ * A repo with no `crates/*​/npm` (a pure-TypeScript plugin) publishes only the JS
+ * packages; the addon, lockfile-pin and exclude checks then simply do not apply.
+ * That is a shape, not an exemption: if the repo has no addons, there is nothing
+ * to pin.
  *
- * The workspace root is read only to keep it "private": true — it is not a
- * published package and carries no release version, so tying it to the lockstep
- * version would be wrong.
- *
- * The exclude list must name exactly the five addon packages, all at the new
- * version. One line missing leaves a freshly published addon unresolvable; one
- * line left behind points at a version that no longer exists; one extra line
- * drags an unintended package past the age gate. All three are release bugs, so
- * the set is matched exactly rather than by prefix — if a future exclusion is
- * genuinely intended, extend the expected set here deliberately.
+ * Deliberately dependency-free and YAML-parser-free: both generated files are
+ * scanned line by line. A parser dependency inside a release gate is a worse
+ * trade than a few dozen lines of regex, and the blocks read here are short and
+ * fixed in shape.
  *
  * Usage: node scripts/check-release-versions.mjs
  * Exit 0 prints one line `ok <version>`; any mismatch prints every problem and
- * exits 1.
+ * sets exit code 1.
  */
 
-import { readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-
-/** Published together, in lockstep: one version for all six. */
-const JS_PACKAGES = [
-  'packages/bundle',
-  'packages/panel',
-  'packages/service',
-  'packages/sqlite',
-  'packages/tool',
-  'packages/tree-sitter',
-]
-
-/** The native addons, one npm package per target triple. */
-const PLATFORM_PACKAGES = [
-  'crates/indexer-rust/npm/darwin-arm64',
-  'crates/indexer-rust/npm/darwin-x64',
-  'crates/indexer-rust/npm/linux-arm64-gnu',
-  'crates/indexer-rust/npm/linux-x64-gnu',
-  'crates/indexer-rust/npm/win32-x64-msvc',
-]
-
-const ADDON_PREFIX = 'dsh-plugin-codegraph-indexer-'
-const TREE_SITTER_MANIFEST = 'packages/tree-sitter/package.json'
 const WORKSPACE_FILE = 'pnpm-workspace.yaml'
-const EXCLUDE_KEY = 'minimumReleaseAgeExclude'
 const LOCKFILE = 'pnpm-lock.yaml'
-/** The lockfile importer block that pins the platform addons. */
-const LOCKFILE_IMPORTER = 'packages/tree-sitter'
+const EXCLUDE_KEY = 'minimumReleaseAgeExclude'
 
 const problems = []
 
 function complain(message) {
   problems.push(message)
+}
+
+/** Directory names directly under `relativePath`, or [] when it does not exist. */
+function childDirs(relativePath) {
+  try {
+    return readdirSync(join(REPO_ROOT, relativePath), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+  } catch {
+    return []
+  }
 }
 
 function readManifest(relativePath) {
@@ -105,6 +83,13 @@ function readManifest(relativePath) {
   }
 }
 
+/** One layer of matching YAML quotes stripped from a scalar. */
+function unquote(value) {
+  const quoted = /^(['"])(.*)\1$/.exec(value)
+  return quoted === null ? value : quoted[2]
+}
+
+/** The `version` of one manifest, complained about when absent. */
 function versionOf(relativePath, manifest) {
   if (manifest === undefined) return undefined
   if (typeof manifest.version !== 'string' || manifest.version.trim() === '') {
@@ -114,22 +99,10 @@ function versionOf(relativePath, manifest) {
   return manifest.version
 }
 
-function parseExcludeItem(rawValue, where) {
-  let value = rawValue.replace(/\s+#.*$/, '').trim()
-  const quoted = /^(['"])(.*)\1$/.exec(value)
-  if (quoted !== null) value = quoted[2]
-  if (value === '') {
-    complain(`${where}: empty "${EXCLUDE_KEY}" entry`)
-    return undefined
-  }
-  const separator = value.lastIndexOf('@')
-  if (separator <= 0 || separator === value.length - 1) {
-    complain(`${where}: "${value}" is not shaped like "<package>@<version>"`)
-    return undefined
-  }
-  return { name: value.slice(0, separator), version: value.slice(separator + 1) }
-}
-
+/**
+ * The `minimumReleaseAgeExclude` block, parsed as `{name, version}` entries.
+ * @returns the entries, or undefined when the file or the key cannot be read.
+ */
 function readExcludeList() {
   let text
   try {
@@ -165,38 +138,32 @@ function readExcludeList() {
 
     const item = /^\s*-\s+(.*)$/.exec(line)
     if (item === null) {
-      // Indented content that is not a list item (e.g. a nested key) ends the block.
       inBlock = false
       continue
     }
 
-    const entry = parseExcludeItem(item[1], where)
-    if (entry !== undefined) entries.push(entry)
+    const value = unquote(item[1].replace(/\s+#.*$/, '').trim())
+    if (value === '') {
+      complain(`${where}: empty "${EXCLUDE_KEY}" entry`)
+      continue
+    }
+    const separator = value.lastIndexOf('@')
+    if (separator <= 0 || separator === value.length - 1) {
+      complain(`${where}: "${value}" is not shaped like "<package>@<version>"`)
+      continue
+    }
+    entries.push({ name: value.slice(0, separator), version: value.slice(separator + 1) })
   }
 
-  if (!foundKey) {
-    complain(`${WORKSPACE_FILE}: has no "${EXCLUDE_KEY}" key`)
-    return undefined
-  }
-  return entries
-}
-
-/** Strip one layer of matching YAML quotes from a scalar. */
-function unquote(value) {
-  const quoted = /^(['"])(.*)\1$/.exec(value)
-  return quoted === null ? value : quoted[2]
+  return foundKey ? entries : []
 }
 
 /**
- * The `specifier`s the lockfile records in `packages/tree-sitter`'s
- * `optionalDependencies` block, keyed by package name.
- *
- * Scanned line by line like the workspace file: the lockfile is generated, and
- * this gate only needs one indented block of it. A missing importer or block is
- * a problem rather than "no pins", because the manifest always pins the addons.
- * @returns the recorded specifiers, or undefined when the block cannot be read.
+ * The `specifier`s one lockfile importer records under `optionalDependencies`.
+ * @param importer - the importer path as the lockfile spells it, e.g. `packages/native`.
+ * @returns the map, or undefined when the lockfile or that importer cannot be read.
  */
-function readLockfileOptionalSpecifiers() {
+function readLockfileOptionalSpecifiers(importer) {
   let text
   try {
     text = readFileSync(join(REPO_ROOT, LOCKFILE), 'utf8')
@@ -217,7 +184,7 @@ function readLockfileOptionalSpecifiers() {
     const indent = /^ */.exec(line)[0].length
     // Importers are the only keys at two spaces; anything shallower ends the section.
     if (indent <= 2) {
-      inImporter = indent === 2 && line.trim() === `${LOCKFILE_IMPORTER}:`
+      inImporter = indent === 2 && line.trim() === `${importer}:`
       if (inImporter) foundImporter = true
       inOptional = false
       currentName = undefined
@@ -246,27 +213,40 @@ function readLockfileOptionalSpecifiers() {
   }
 
   if (!foundImporter) {
-    complain(`${LOCKFILE}: has no importer for "${LOCKFILE_IMPORTER}"`)
+    complain(`${LOCKFILE}: has no importer for "${importer}"`)
     return undefined
   }
   if (!foundBlock) {
-    complain(`${LOCKFILE}: importer "${LOCKFILE_IMPORTER}" has no optionalDependencies block`)
+    complain(`${LOCKFILE}: importer "${importer}" has no optionalDependencies block`)
     return undefined
   }
   return specifiers
 }
 
 function main() {
-  // --- the six JS packages: one shared version ------------------------------
-  const jsVersions = new Map()
-  for (const dir of JS_PACKAGES) {
-    const manifestPath = `${dir}/package.json`
-    const version = versionOf(manifestPath, readManifest(manifestPath))
-    if (version !== undefined) jsVersions.set(manifestPath, version)
+  // --- the published JS packages: one shared version ------------------------
+  const jsPackages = childDirs('packages')
+    .filter(name => existsSync(join(REPO_ROOT, 'packages', name, 'package.json')))
+    .map(name => ({ dir: `packages/${name}`, manifestPath: `packages/${name}/package.json` }))
+    .map(entry => ({
+      ...entry,
+      manifest: readManifest(entry.manifestPath),
+    }))
+
+  if (jsPackages.length === 0) {
+    complain('no JS package manifest was found under packages/*')
+    process.exitCode = 1
+    return
   }
 
-  // The first readable manifest sets the expected version, so a single stray
-  // manifest is reported by name instead of making every other file look wrong.
+  const jsVersions = new Map()
+  for (const entry of jsPackages) {
+    const version = versionOf(entry.manifestPath, entry.manifest)
+    if (version !== undefined) jsVersions.set(entry.manifestPath, version)
+  }
+
+  // The first readable manifest sets the expected version, so one stray file is
+  // reported by name instead of making every other file look wrong.
   const [baselinePath, expected] = jsVersions.entries().next().value ?? []
 
   if (expected === undefined) {
@@ -278,120 +258,110 @@ function main() {
       }
     }
 
-    // --- the five platform addons: same version as the JS packages ----------
-    const addonManifestPaths = new Map()
-    for (const dir of PLATFORM_PACKAGES) {
-      const manifestPath = `${dir}/package.json`
-      const manifest = readManifest(manifestPath)
-      const version = versionOf(manifestPath, manifest)
-      if (manifest === undefined) continue
+    // --- the platform addons: same version as the JS packages ---------------
+    const addons = new Map()
+    for (const crate of childDirs('crates')) {
+      const npmDir = `crates/${crate}/npm`
+      for (const target of childDirs(npmDir)) {
+        const manifestPath = `${npmDir}/${target}/package.json`
+        if (!existsSync(join(REPO_ROOT, manifestPath))) continue
+        const manifest = readManifest(manifestPath)
+        const version = versionOf(manifestPath, manifest)
+        if (manifest === undefined) continue
 
-      const name = manifest.name
-      if (typeof name !== 'string' || name === '') {
-        complain(`${manifestPath}: has no "name" string`)
-      } else if (!name.startsWith(ADDON_PREFIX)) {
-        complain(`${manifestPath}: package name "${name}" does not start with "${ADDON_PREFIX}"`)
-      } else if (addonManifestPaths.has(name)) {
-        complain(`${manifestPath}: duplicate addon package name "${name}" (also ${addonManifestPaths.get(name)})`)
-      } else {
-        addonManifestPaths.set(name, manifestPath)
-      }
+        const name = manifest.name
+        if (typeof name !== 'string' || name === '') {
+          complain(`${manifestPath}: has no "name" string`)
+        } else if (addons.has(name)) {
+          complain(`${manifestPath}: duplicate addon package name "${name}" (also ${addons.get(name)})`)
+        } else {
+          addons.set(name, { manifestPath })
+        }
 
-      if (version !== undefined && version !== expected) {
-        complain(`${manifestPath}: version "${version}" does not match "${expected}"`)
+        if (version !== undefined && version !== expected) {
+          complain(`${manifestPath}: version "${version}" does not match "${expected}"`)
+        }
       }
     }
 
-    if (addonManifestPaths.size === 0) {
-      complain('no platform addon package name could be read')
-    }
+    // --- every holder pins exactly the addons, at the release version -------
+    for (const entry of jsPackages) {
+      const optionalDependencies = entry.manifest?.optionalDependencies
+      if (optionalDependencies === null || typeof optionalDependencies !== 'object') continue
 
-    // --- tree-sitter's optionalDependencies pin every addon -----------------
-    const treeSitterPath = TREE_SITTER_MANIFEST
-    const treeSitter = readManifest(treeSitterPath)
-    if (treeSitter !== undefined) {
-      const optionalDependencies = treeSitter.optionalDependencies
-      if (
-        optionalDependencies === null ||
-        typeof optionalDependencies !== 'object' ||
-        Array.isArray(optionalDependencies)
-      ) {
-        complain(`${treeSitterPath}: has no "optionalDependencies" object`)
-      } else {
-        for (const name of addonManifestPaths.keys()) {
+      const pinnedNames = Object.keys(optionalDependencies)
+      const looksLikeHolder = pinnedNames.some(name => addons.has(name))
+      if (!looksLikeHolder && addons.size > 0) continue
+
+      if (looksLikeHolder) {
+        for (const name of addons.keys()) {
           const pinned = optionalDependencies[name]
           if (pinned === undefined) {
-            complain(`${treeSitterPath}: optionalDependencies is missing "${name}"`)
+            complain(`${entry.manifestPath}: optionalDependencies is missing "${name}"`)
           } else if (pinned !== expected) {
-            complain(
-              `${treeSitterPath}: optionalDependencies["${name}"] is "${pinned}", must be "${expected}"`,
-            )
+            complain(`${entry.manifestPath}: optionalDependencies["${name}"] is "${pinned}", must be "${expected}"`)
           }
         }
-        for (const key of Object.keys(optionalDependencies)) {
-          if (key.startsWith(ADDON_PREFIX) && !addonManifestPaths.has(key)) {
-            complain(
-              `${treeSitterPath}: optionalDependencies pins "${key}", which is not one of the platform packages`,
-            )
+        for (const name of pinnedNames) {
+          if (!addons.has(name)) {
+            complain(`${entry.manifestPath}: optionalDependencies pins "${name}", which is not one of the platform packages`)
           }
         }
-      }
-    }
 
-    // --- the lockfile records the same addon pins --------------------------
-    const locked = readLockfileOptionalSpecifiers()
-    if (locked !== undefined) {
-      for (const name of addonManifestPaths.keys()) {
-        const pinned = locked.get(name)
-        if (pinned === undefined) {
-          complain(
-            `${LOCKFILE}: importer "${LOCKFILE_IMPORTER}" does not pin "${name}" — the manifest names a version the lockfile cannot resolve (publish the addons, then run pnpm install)`,
-          )
-        } else if (pinned !== expected) {
-          complain(
-            `${LOCKFILE}: importer "${LOCKFILE_IMPORTER}" pins "${name}@${pinned}", must be "${expected}" — regenerate the lockfile with pnpm install`,
-          )
-        }
-      }
-      for (const [name, pinned] of locked) {
-        if (!addonManifestPaths.has(name)) {
-          complain(
-            `${LOCKFILE}: importer "${LOCKFILE_IMPORTER}" pins "${name}@${pinned}", which is not one of the platform packages`,
-          )
+        // --- the lockfile records the same pins ------------------------------
+        const locked = readLockfileOptionalSpecifiers(entry.dir)
+        if (locked !== undefined) {
+          for (const name of addons.keys()) {
+            const pinned = locked.get(name)
+            if (pinned === undefined) {
+              complain(
+                `${LOCKFILE}: importer "${entry.dir}" does not pin "${name}" — the manifest names a`
+                + ' version the lockfile cannot resolve (publish the addons, then run pnpm install)',
+              )
+            } else if (pinned !== expected) {
+              complain(
+                `${LOCKFILE}: importer "${entry.dir}" pins "${name}@${pinned}", must be "${expected}"`
+                + ' — regenerate the lockfile with pnpm install',
+              )
+            }
+          }
+          for (const [name, pinned] of locked) {
+            if (!addons.has(name)) {
+              complain(`${LOCKFILE}: importer "${entry.dir}" pins "${name}@${pinned}", which is not one of the platform packages`)
+            }
+          }
         }
       }
     }
 
     // --- pnpm-workspace.yaml excludes every addon at the new version --------
-    const excluded = readExcludeList()
-    if (excluded !== undefined) {
-      const excludedEntries = new Map()
-      for (const entry of excluded) {
-        if (excludedEntries.has(entry.name)) {
-          complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${entry.name}" more than once`)
-          continue
+    if (addons.size > 0) {
+      const excluded = readExcludeList()
+      if (excluded !== undefined) {
+        const excludedEntries = new Map()
+        for (const entry of excluded) {
+          if (excludedEntries.has(entry.name)) {
+            complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${entry.name}" more than once`)
+            continue
+          }
+          excludedEntries.set(entry.name, entry)
         }
-        excludedEntries.set(entry.name, entry)
-      }
 
-      for (const name of addonManifestPaths.keys()) {
-        const entry = excludedEntries.get(name)
-        if (entry === undefined) {
-          complain(
-            `${WORKSPACE_FILE}: "${EXCLUDE_KEY}" is missing "${name}@${expected}" — a freshly published addon stays unresolvable under pnpm 11's minimumReleaseAge`,
-          )
-        } else if (entry.version !== expected) {
-          complain(
-            `${WORKSPACE_FILE}: "${EXCLUDE_KEY}" pins "${name}@${entry.version}", must be "${name}@${expected}"`,
-          )
+        for (const name of addons.keys()) {
+          const entry = excludedEntries.get(name)
+          if (entry === undefined) {
+            complain(
+              `${WORKSPACE_FILE}: "${EXCLUDE_KEY}" is missing "${name}@${expected}" — a freshly published`
+              + " addon stays unresolvable under pnpm 11's minimumReleaseAge",
+            )
+          } else if (entry.version !== expected) {
+            complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" pins "${name}@${entry.version}", must be "${name}@${expected}"`)
+          }
         }
-      }
-
-      for (const [name, entry] of excludedEntries) {
-        if (!addonManifestPaths.has(name)) {
-          complain(
-            `${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${name}@${entry.version}", which is not one of the platform packages`,
-          )
+        for (const [name, entry] of excludedEntries) {
+          if (!addons.has(name)) {
+            complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${name}@${entry.version}", which is not one of the platform packages`)
+          }
         }
       }
     }
@@ -401,7 +371,8 @@ function main() {
   const rootManifest = readManifest('package.json')
   if (rootManifest !== undefined && rootManifest.private !== true) {
     complain(
-      'package.json: the workspace root must stay "private": true — it is not a published package and carries no release version',
+      'package.json: the workspace root must stay "private": true — it is not a published package'
+      + ' and carries no release version',
     )
   }
 
