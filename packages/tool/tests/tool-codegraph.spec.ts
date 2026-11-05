@@ -349,6 +349,30 @@ describe('result rendering', () => {
       .toBe('No index for `/repo`. Run codegraph_index to build one.')
   })
 
+  it('names the last failure in both status shapes, clipping a long reason', () => {
+    const failure = { failed_at: 1, message: 'UNIQUE constraint failed: nodes.id', source: 'auto' }
+    expect(renderCodegraph({ ...base, operation: 'status', indexed: false, last_failure: failure }))
+      .toBe(
+        'No index for `/repo`. Run codegraph_index to build one.\n' +
+        'The last indexing attempt (auto) failed: UNIQUE constraint failed: nodes.id. Run codegraph_index to retry.',
+      )
+    // A usable graph plus a failed refresh is its own state: the failure line is added, and the rest
+    // of the answer keeps describing the graph that exists.
+    expect(renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 1, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], last_failure: failure,
+    })).toContain('The last indexing attempt (auto) failed: UNIQUE constraint failed: nodes.id.')
+
+    // A run's message is often an entire SQLite complaint; one status line keeps the opening, which
+    // is where the diagnosis is.
+    const clipped = renderCodegraph({
+      ...base, operation: 'status', indexed: false,
+      last_failure: { failed_at: 1, message: 'x'.repeat(240), source: 'watch' },
+    })
+    expect(clipped).toContain(`${'x'.repeat(200)}…`)
+    expect(clipped).not.toContain('x'.repeat(201))
+  })
+
   it('treats a status answer with no languages array the same as an empty one', () => {
     const text = renderCodegraph({
       ...base, operation: 'status', indexed: true, file_count: 0, symbol_count: 0, edge_count: 0,
@@ -542,6 +566,44 @@ describe('the tool plugin', () => {
     return ctx
   }
 
+  /**
+   * Dispatch one `agent/created` payload, the way the host's agent registry does.
+   * @param ctx - the composition root.
+   * @param payload - the `{ agent }` payload the plugin's listeners read.
+   */
+  function emitAgentCreated(ctx: Context, payload: unknown): void {
+    ;(ctx as unknown as { emit(name: string, payload: unknown): void }).emit('agent/created', payload)
+  }
+
+  it('installs the structural reminder only while structureHint is on', async () => {
+    const root = await workspace()
+    /** A fake agent scope that records the registrations the plugin makes on it. */
+    const scopeNames = (): { names: string[]; scope: { on(name: string): () => boolean } } => {
+      const names: string[] = []
+      return {
+        names,
+        scope: {
+          on(name: string) {
+            names.push(name)
+            return () => true
+          },
+        },
+      }
+    }
+
+    const off = scopeNames()
+    const offCtx = await mount(root, { structureHint: false, updateCheck: false })
+    emitAgentCreated(offCtx, { agent: { id: 'agent-off', ctx: off.scope } })
+    expect(off.names).toEqual([])
+
+    // The control: the same dispatch on a default composition registers the reminder, so the empty
+    // list above is the switch's decision rather than a dispatch that never reached the listener.
+    const on = scopeNames()
+    const onCtx = await mount(root, { updateCheck: false })
+    emitAgentCreated(onCtx, { agent: { id: 'agent-on', ctx: on.scope } })
+    expect(on.names).toEqual(['agent/pre-step'])
+  })
+
   function agent(ctx: Context, cwd: string): Agent {
     const scope = ctx.plugin(() => {})
     const id = SessionId('codegraph-unit')
@@ -670,6 +732,22 @@ describe('the tool plugin', () => {
     const plain = await call(ctx, owner, { operation: 'node', symbol: 'main' }, 'plain')
     expect(plain.content.map(block => block.type === 'text' ? block.text : '').join(''))
       .not.toContain('function main() {}')
+  })
+
+  it('attaches the recorded failure to a status answer for a root a store does claim', async () => {
+    const root = await workspace({
+      '.codegraph/last-error.json': JSON.stringify({ failedAt: 7, message: 'watch rebuild failed', source: 'watch' }),
+    })
+    const ctx = await mount(root)
+    const result = await call(ctx, agent(ctx, root), { operation: 'status' }, 'failed-but-indexed')
+    expect(result.isError).toBe(false)
+    // A usable graph plus a failed refresh is its own state: both halves travel in one answer.
+    expect(result.isError ? undefined : result.value).toMatchObject({
+      operation: 'status',
+      project_path: root,
+      indexed: true,
+      last_failure: { failed_at: 7, message: 'watch rebuild failed', source: 'watch' },
+    })
   })
 
   it('clamps a model-supplied limit and depth into the configured range', async () => {
@@ -1014,6 +1092,57 @@ describe('status against a root no store claims', () => {
       agent: owner(ctx, root),
     })
     expect(result.isError).toBe(false)
+    const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(text).toBe(`No index for \`${root}\`. Run codegraph_index to build one.`)
+  })
+
+  it('explains a workspace with no index by the failure recorded beside it', async () => {
+    const root = await workspace({
+      '.codegraph/last-error.json': JSON.stringify({
+        failedAt: 1_793_842_027_787, message: 'UNIQUE constraint failed: nodes.id', source: 'tool',
+      }),
+    })
+    const ctx = await mountWithoutStore(root)
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: CallId('failed-status'),
+      name: 'codegraph',
+      arguments: { operation: 'status' },
+      agent: owner(ctx, root),
+    })
+    expect(result.isError).toBe(false)
+    // The record is converted to the answer's snake_case shape at this boundary; the on-disk file
+    // stays camelCase so the two sides agree with everything else that reads it.
+    expect(result.isError ? undefined : result.value).toMatchObject({
+      operation: 'status',
+      project_path: root,
+      indexed: false,
+      last_failure: { failed_at: 1_793_842_027_787, message: 'UNIQUE constraint failed: nodes.id', source: 'tool' },
+    })
+    const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
+    expect(text).toContain('The last indexing attempt (tool) failed: UNIQUE constraint failed: nodes.id.')
+  })
+
+  it.each([
+    ['unparseable', '{not json'],
+    ['a bare JSON string', '"boom"'],
+    ['null', 'null'],
+    ['written without a timestamp', JSON.stringify({ message: 'boom', source: 'auto' })],
+    ['whose message is not text', JSON.stringify({ failedAt: 1, message: 2, source: 'auto' })],
+    ['naming an unknown source', JSON.stringify({ failedAt: 1, message: 'boom', source: 'manual' })],
+  ])('ignores a failure record that is %s', async (_label, content) => {
+    const root = await workspace({ '.codegraph/last-error.json': content })
+    const ctx = await mountWithoutStore(root)
+    const result = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: CallId('damaged-failure-status'),
+      name: 'codegraph',
+      arguments: { operation: 'status' },
+      agent: owner(ctx, root),
+    })
+    // A damaged diagnostic must not turn the one status answer that has to work into an error.
+    expect(result.isError).toBe(false)
+    expect(result.isError ? undefined : result.value).not.toHaveProperty('last_failure')
     const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
     expect(text).toBe(`No index for \`${root}\`. Run codegraph_index to build one.`)
   })
@@ -1815,6 +1944,47 @@ describe('the /codegraph command', () => {
     const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
     expect(result).toEqual({ kind: 'success', text: `这个工作区还没有索引：${root}。先跑 /${COMMAND_NAME} index` })
     expect(queried).toBe(false)
+  })
+
+  it('names the recorded failure when there is no index to describe', async () => {
+    const root = await workspace({
+      '.codegraph/last-error.json': JSON.stringify({
+        failedAt: 1_793_842_027_787, message: 'UNIQUE constraint failed: nodes.id', source: 'auto',
+      }),
+    })
+    const subject = commandSubject({ async available() { return false } })
+    const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
+    // The sidecar the tool's status answer reads is the same one a human at the composer needs: "no
+    // index" and "an index that keeps failing" must not read as the same answer here either.
+    expect(result).toEqual({
+      kind: 'success',
+      text: `这个工作区还没有索引：${root}。先跑 /${COMMAND_NAME} index`
+        + '\n上次索引尝试（auto）失败：UNIQUE constraint failed: nodes.id。可以跑 /codegraph index 重试。',
+    })
+  })
+
+  it('adds the recorded failure to a workspace whose newest refresh broke', async () => {
+    const root = await workspace({
+      '.codegraph/last-error.json': JSON.stringify({ failedAt: 7, message: 'watch rebuild failed', source: 'watch' }),
+    })
+    const subject = commandSubject({
+      async available() {
+        return true
+      },
+      async query() {
+        return {
+          kind: 'status', projectRoot: root, fileCount: 2, nodeCount: 5, edgeCount: 3, languages: [],
+          formatVersion: 4, indexedAt: Date.UTC(2026, 10, 3, 3, 0), staleFileCount: 0, staleFileCountTruncated: false,
+        }
+      },
+    })
+    const result = await runCommand(subject.definition(), 'status', { agent: commandOwner(root) })
+    // A usable graph plus a failed newest attempt is its own state; the line describing the graph stays.
+    expect(result).toEqual({
+      kind: 'success',
+      text: '已索引：2 文件 / 5 声明 / 3 关系（2026-11-03T03:00Z）'
+        + '\n上次索引尝试（watch）失败：watch rebuild failed。可以跑 /codegraph index 重试。',
+    })
   })
 
   it('surfaces a failed status query as the command error text', async () => {

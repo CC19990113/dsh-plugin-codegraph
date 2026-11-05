@@ -38,7 +38,7 @@ import { CODEGRAPH_INDEX_PARAMETERS, CODEGRAPH_OUTPUT_SCHEMA, CODEGRAPH_PARAMETE
 import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue, CodegraphValueFor } from './schema.ts'
 import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
-import { agentIdOf, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+import { agentIdOf, indexStatusHint, readIndexFailureFile, readIndexStatus, workspaceOf } from './status-hint.ts'
 import { createStructureHintState, noteStructureToolUse, registerStructureHint } from './structure-hint.ts'
 import { commandRunHint } from './command-log.ts'
 import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
@@ -574,6 +574,21 @@ function runIndexJob(ctx: Context, root: string, handle: BackgroundJobHandle): B
 }
 
 /**
+ * The last indexing failure, converted to the `status` answer's snake_case shape.
+ *
+ * The reader lives in `status-hint.ts` because `/codegraph status` owes the same explanation; only
+ * the wire shape is this boundary's business.
+ * @param root - absolute project root.
+ * @returns the record in the tool's shape, or undefined when there is none to report.
+ */
+function readIndexFailure(root: string): CodegraphValueFor<'status'>['last_failure'] {
+  const record = readIndexFailureFile(root)
+  return record === undefined
+    ? undefined
+    : { failed_at: record.failedAt, message: record.message, source: record.source }
+}
+
+/**
  * The canonical value for a finished indexing run.
  * @param root - the indexed project root, as reported to the model.
  * @param report - the indexer's report.
@@ -814,8 +829,12 @@ async function run(
     }
     case 'status': {
       const available = await ctx.codegraph.available(root, signal)
+      // Read before branching, so the answer explains itself in both states: no index at all, and an
+      // index whose newest refresh failed.
+      const failure = readIndexFailure(root)
+      const lastFailure = failure === undefined ? {} : { last_failure: failure }
       if (!available) {
-        return { operation: 'status', project_path: root, indexed: false }
+        return { operation: 'status', project_path: root, indexed: false, ...lastFailure }
       }
       const result = await ctx.codegraph.query({ operation: 'status', projectRoot: root }, signal)
       return {
@@ -833,6 +852,7 @@ async function run(
         })),
         stale_file_count: result.staleFileCount,
         stale_file_count_truncated: result.staleFileCountTruncated,
+        ...lastFailure,
       }
     }
     case 'explore': {

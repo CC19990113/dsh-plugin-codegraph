@@ -118,6 +118,31 @@ describe('lastStructureUserText', () => {
     expect(lastStructureUserText([])).toBeUndefined()
     expect(lastStructureUserText(undefined)).toBeUndefined()
   })
+
+  it('walks past entries that are not user messages at all', () => {
+    // Shapes a real batch carries besides typed input, placed *after* it: the walk is newest-first, so
+    // these are what it has to step over before it reaches the one message the user typed.
+    const batch = [
+      userMessage('谁调用了它'),
+      null,
+      'plain text entry',
+      { role: 'assistant', source: { kind: 'user' }, content: [{ type: 'text', text: '谁调用' }] },
+    ]
+    expect(lastStructureUserText(batch)).toBe('谁调用了它')
+  })
+
+  it('walks past a user message whose content is not a block array', () => {
+    // A malformed message is skipped rather than throwing: the hook runs on every model request.
+    const odd = { role: 'user', source: { kind: 'user' }, content: 'who calls this' }
+    expect(lastStructureUserText([userMessage('谁调用了它'), odd])).toBe('谁调用了它')
+  })
+
+  it('keeps looking when the newest typed input has no text blocks', () => {
+    // Blocks that are not text join to the empty string; that is not user input, so the walk continues
+    // to the earlier message instead of returning "" and silencing the reminder.
+    const empty = { role: 'user', source: { kind: 'user' }, content: [{ type: 'image' }] }
+    expect(lastStructureUserText([userMessage('谁调用了它'), empty])).toBe('谁调用了它')
+  })
 })
 
 describe('buildStructureHint', () => {
@@ -204,6 +229,33 @@ describe('the pre-step hook', () => {
 
     expect(decisionA.messages).toHaveLength(1)
     expect(decisionB.messages).toHaveLength(2)
+  })
+
+  it('ignores an agent created without a scope to hook onto', () => {
+    const { ctx, created } = fakeContext()
+    registerStructureHint(ctx, createStructureHintState())
+
+    // A payload the host's own registry would never build, but a listener on a shared event must
+    // tolerate: an agent with no per-agent context has no `agent/pre-step` waterfall to join.
+    expect(() => {
+      for (const listener of created) listener({ agent: {} })
+    }).not.toThrow()
+  })
+
+  it('keys a conversation without an id under one fallback identity', async () => {
+    const { ctx, created } = fakeContext()
+    const state = createStructureHintState()
+    registerStructureHint(ctx, state)
+    const { scope, listeners } = fakeAgentScope()
+    for (const listener of created) listener({ agent: { ctx: scope } })
+    const listener = listeners[0] as PreStepListener
+
+    // No `id` means the agent cannot be told apart from another one, so the reminder's per-conversation
+    // dedupe keys on the fallback rather than skipping it — one reminder per hooked step, still.
+    const first = await enter(listener, [userMessage('谁调用了它')])
+    expect(first.messages).toHaveLength(2)
+    const second = await enter(listener, [userMessage('改这个会影响哪些地方')])
+    expect(second.messages).toHaveLength(1)
   })
 
   it('covers the vocabulary the reminder is built on', () => {

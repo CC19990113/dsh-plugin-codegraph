@@ -37,3 +37,31 @@ export interface IndexStatusFile {
   /** Of {@link unresolvedCount}, the sites that look like genuine workspace-internal gaps. */
   readonly unresolvedLikelyInternalCount: number
 }
+
+/**
+ * Path of the failure sidecar, relative to a project root. Written beside the graph by a run that
+ * threw, deleted by the next run that successfully wrote one.
+ *
+ * The status sidecar only ever describes a graph that exists, so a failed run has no graph to
+ * describe and leaves no trace there — which made a broken workspace indistinguishable from one
+ * nobody had indexed yet. This file is that missing half: the reason the last attempt failed, kept
+ * out of {@link INDEX_STATUS_RELATIVE_PATH} so a stale summary and a failure record can never be
+ * mistaken for one another.
+ */
+export const INDEX_FAILURE_RELATIVE_PATH = '.codegraph/last-error.json'
+
+/**
+ * The most recent indexing failure, as persisted for a reader that did not see the run.
+ *
+ * Deliberately tiny and unversioned: it exists to answer "why is there no index" in one small read,
+ * not to be a log. A successful run deletes it, so its presence always means "the newest attempt
+ * failed", never "an old attempt once failed".
+ */
+export interface IndexFailureFile {
+  /** Epoch milliseconds the failed run was reported. */
+  readonly failedAt: number
+  /** The failure as text, already stringified by the run that recorded it. */
+  readonly message: string
+  /** Which path started the run, so a reader can tell a background refresh from an explicit build. */
+  readonly source: 'auto' | 'tool' | 'watch'
+}

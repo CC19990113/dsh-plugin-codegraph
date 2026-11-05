@@ -125,6 +125,23 @@ const LANGUAGE_COUNT = {
   },
 } as const
 
+/**
+ * The last indexing attempt that failed, as `status` reports it.
+ *
+ * Optional on every `status` answer, not only the unindexed one: a workspace can hold a usable graph
+ * from an earlier run and a failed refresh after it, and "the index is here but its newest rebuild
+ * broke" is a different state from both "no index" and "the index is current".
+ */
+const INDEX_FAILURE = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    failed_at: { type: 'integer', required: true },
+    message: { type: 'string', required: true },
+    source: { type: 'string', required: true },
+  },
+} as const
+
 /** Bounds every truncatable member reports, so a capped answer is never read as a complete one. */
 const COUNTS = {
   total: { type: 'integer', required: true },
@@ -206,6 +223,7 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
       languages: { type: 'array', items: LANGUAGE_COUNT },
       stale_file_count: { type: 'integer' },
       stale_file_count_truncated: { type: 'boolean' },
+      last_failure: INDEX_FAILURE,
     }),
     member('explore', {
       files: { type: 'array', required: true, items: EXPLORED_FILE },

@@ -165,6 +165,25 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
 }
 
 /**
+ * Replace one JSON document atomically: serialize to a unique staging file beside `target`, then
+ * `rename` it over `target`.
+ *
+ * The staging name is unique (`pid` plus a random UUID) and lives in the target's own directory, for
+ * two reasons. Two runs on one workspace are allowed to overlap — a session-start build and an
+ * explicit `codegraph_index`, or a watcher rebuild — and a shared fixed-name `.tmp` makes the loser's
+ * `rename` fail with ENOENT after the winner moved it, turning a harmless duplicate run into a failed
+ * call. Same-directory is what makes the `rename` atomic: it is a metadata operation on one
+ * filesystem, so a reader sees either the previous document or the new one, never a half-written one.
+ * @param target - absolute path of the file to replace.
+ * @param value - the value to serialize as JSON.
+ */
+export async function writeJsonAtomically(target: string, value: unknown): Promise<void> {
+  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
+  await writeFile(temp, JSON.stringify(value))
+  await rename(temp, target)
+}
+
+/**
  * Write the prompt-time status sidecar beside the graph, replacing it atomically.
  *
  * Deliberately after the graph's own rename: a reader that sees this file can trust that the graph it
@@ -174,13 +193,5 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
  * @param status - this run's summary.
  */
 async function writeStatusFile(directory: string, status: IndexStatusFile): Promise<void> {
-  const target = join(directory, basename(INDEX_STATUS_RELATIVE_PATH))
-  // Unique like the graph's own staging name, and for the same reason: two runs on one workspace are
-  // allowed to overlap (a session-start build and an explicit `codegraph_index`, or a watcher rebuild),
-  // and a shared fixed-name `.tmp` makes the loser's `rename` fail with ENOENT after the winner moved
-  // it — which turned a harmless duplicate run into a failed tool call. Last rename wins; both graphs
-  // are complete.
-  const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
-  await writeFile(temp, JSON.stringify(status))
-  await rename(temp, target)
+  await writeJsonAtomically(join(directory, basename(INDEX_STATUS_RELATIVE_PATH)), status)
 }

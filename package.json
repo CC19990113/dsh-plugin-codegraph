@@ -17,7 +17,8 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "tsc -b --clean"
+    "clean": "tsc -b --clean",
+    "check:versions": "node scripts/check-release-versions.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",

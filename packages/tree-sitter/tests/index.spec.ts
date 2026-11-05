@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, stat as fsStat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, stat as fsStat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -8,7 +8,8 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
-import Codegraph, { CodegraphError } from 'dsh-plugin-codegraph-service'
+import Codegraph, { CodegraphError, INDEX_FAILURE_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
+import type { IndexFailureFile } from 'dsh-plugin-codegraph-service'
 import * as CodegraphTreeSitter from '../src/index.ts'
 import {
   DATABASE_RELATIVE_PATH,
@@ -234,6 +235,32 @@ function registerAgent(ctx: Context, cwd?: string): string {
  */
 function emitAgentCreated(ctx: Context, payload: unknown): void {
   ;(ctx as unknown as { emit(name: string, payload: unknown): void }).emit('agent/created', payload)
+}
+
+/**
+ * Let one `agent/created` dispatch reach the asynchronous fs walk that precedes `ctx.codegraph.index`.
+ *
+ * A listener that is gone can only be observed as a negative, so there is no event to await: this is
+ * the same bounded window a live listener uses to get from the synchronous dispatch to the size-guard
+ * walk (`exceedsAutoIndexLimit` does one `readdir` of a one-file workspace). Each caller pairs it with
+ * a positive control — the same dispatch on a mounted composition — so a broken setup fails there
+ * instead of passing here.
+ */
+async function settleDispatch(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 50))
+}
+
+/**
+ * Read a workspace's failure sidecar, or `undefined` while no run has written one yet.
+ * @param root - the workspace root.
+ * @returns the parsed record, when there is one to read.
+ */
+async function readFailure(root: string): Promise<IndexFailureFile | undefined> {
+  try {
+    return JSON.parse(await readFile(join(root, INDEX_FAILURE_RELATIVE_PATH), 'utf8')) as IndexFailureFile
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -650,6 +677,225 @@ describe('codegraph-tree-sitter plugin', () => {
     expect(jsReport.nodeCount).toBeGreaterThan(0)
   })
 
+  describe('failure records', () => {
+    it('records why a build failed and clears the record once a graph is written again', async () => {
+      // A directory where the graph file belongs: the run gets as far as writing its temp file, then
+      // fails at the rename that would commit it — so the recorded message is the real one.
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/codegraph.db/blocker.txt': 'not a graph\n',
+      })
+      const ctx = await seam()
+      const failure = await ctx.codegraph.index(root).then(() => undefined, (error: unknown) => error as Error)
+      expect(failure).toBeInstanceOf(Error)
+
+      const recorded = await readFailure(root)
+      expect(recorded).toMatchObject({ source: 'tool', message: failure?.message })
+      expect(recorded?.failedAt).toBeGreaterThan(0)
+
+      await rm(join(root, DATABASE_RELATIVE_PATH), { recursive: true, force: true })
+      await ctx.codegraph.index(root)
+      // The graph exists again, so "there is no index because …" is no longer true about it.
+      expect(existsSync(join(root, INDEX_FAILURE_RELATIVE_PATH))).toBe(false)
+    })
+
+    it('records an automatic failure under the automatic path', async () => {
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph/codegraph.db/blocker.txt': 'not a graph\n',
+      })
+      const ctx = await autoIndexSeam()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        registerAgent(ctx, root)
+        // `indexer.index` records the failure as the explicit path first — the seam has no way to tell
+        // which caller asked. The automatic run then overwrites it, so waiting for 'auto' is waiting
+        // for the final record rather than for a race.
+        await waitFor(async () => (await readFailure(root))?.source === 'auto')
+        expect((await readFailure(root))?.message).toContain('codegraph.db')
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('abandons an automatic run that outlives its deadline and releases the workspace', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      // A one-millisecond freshness window lets the second session below be a real second attempt.
+      // The deadline is generous on purpose: the second session has to arrive while the first run is
+      // still in flight, and a 20ms deadline let a loaded machine fire the timer first, which made the
+      // "turned away by the in-flight set" assertion below a race rather than a fact.
+      const ctx = await autoIndexSeam({ config: { autoIndexTimeoutMs: 500, autoRefreshAfterMs: 1 } })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      // A run that ignores its signal entirely: the worst case the deadline exists for.
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation(() => new Promise(() => {}))
+      try {
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 1)
+        // Past the one-millisecond freshness window but well inside the deadline: a second session
+        // must be turned away by the in-flight set, not race a second build over the same files.
+        await new Promise(resolve => setTimeout(resolve, 50))
+        registerAgent(ctx, root)
+        expect(indexSpy.mock.calls.length).toBe(1)
+
+        await waitFor(async () => (await readFailure(root))?.message.includes('timed out') === true)
+        expect(indexSpy.mock.calls[0]?.[1]?.aborted).toBe(true)
+
+        // The run above will never settle, so only the deadline itself can have released the root.
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 2)
+        expect((await readFailure(root))?.source).toBe('auto')
+      } finally {
+        errorSpy.mockRestore()
+        indexSpy.mockRestore()
+      }
+    })
+
+    it('records a timed-out run that does settle as timed out, not as a bare abort', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const ctx = await autoIndexSeam({ config: { autoIndexTimeoutMs: 20 } })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation((_projectRoot, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { reject(new Error('This operation was aborted')) })
+        }))
+      try {
+        registerAgent(ctx, root)
+        // The record is written before the catch logs, so waiting for both would be waiting on the
+        // slower of the two; the record is what the user reads back later.
+        await waitFor(async () => (await readFailure(root))?.message.includes('timed out') === true)
+        expect(errorSpy.mock.calls.some(args => String(args[0]).includes('timed out'))).toBe(true)
+      } finally {
+        errorSpy.mockRestore()
+        indexSpy.mockRestore()
+      }
+    })
+
+    it('aborts an automatic run when the plugin unloads', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const ctx = await autoIndexSeam()
+      let seen: AbortSignal | undefined
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation((_projectRoot, signal) => {
+        seen = signal
+        return new Promise(() => {})
+      })
+      try {
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 1)
+        // Unloading the plugin must stop the parse it no longer serves, not leave it writing into a
+        // graph this instance is no longer responsible for.
+        await ctx.fiber.dispose()
+        expect(seen?.aborted).toBe(true)
+      } finally {
+        indexSpy.mockRestore()
+      }
+    })
+
+    it('records a failed watch rebuild too, so a silently stale index has a reason', async () => {
+      const root = await writeProject({ 'a.ts': 'export function first() {}\n' })
+      const ctx = await seam({ watch: true, watchDebounceMs: 20 })
+      const fs = fsOf(ctx)
+      await ctx.codegraph.index(root)
+      await waitFor(() => fs.listings.includes(root))
+
+      // Put a directory where the graph file belongs: the next rebuild reaches its rename and fails,
+      // which is the watch path that used to leave nothing but a console line behind.
+      await rm(join(root, DATABASE_RELATIVE_PATH), { force: true })
+      await mkdir(join(root, DATABASE_RELATIVE_PATH), { recursive: true })
+      await writeFile(join(root, 'a.ts'), 'export function second() { return 2 }\n')
+      fs.emit(root)
+
+      await waitFor(async () => (await readFailure(root))?.source === 'watch')
+      await ctx.fiber.dispose()
+    }, 15_000)
+
+    it('swallows an unwritable failure record instead of turning it into a second failure', async () => {
+      // `.codegraph` is a file here, so the graph write and the record of its failure both fail. The
+      // caller must still see the original error; the diagnostic is best-effort by contract.
+      const root = await writeProject({
+        'a.ts': 'export function a() {}\n',
+        '.codegraph': 'not a directory\n',
+      })
+      const ctx = await seam()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        await expect(ctx.codegraph.index(root)).rejects.toThrow(/EEXIST|ENOTDIR/)
+        // The failed record is reported once rather than replacing the caller's error.
+        expect(errorSpy.mock.calls.some(args => String(args[0]).includes('could not record'))).toBe(true)
+        expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
+    it('does not record an aborted build as a workspace failure', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const ctx = await seam()
+      // The tool's own cancel and the plugin's unload both abort this signal; neither is a diagnosis
+      // of the workspace, so no record may outlive the process that cancelled the run.
+      await expect(ctx.codegraph.index(root, AbortSignal.abort())).rejects.toThrow()
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(existsSync(join(root, INDEX_FAILURE_RELATIVE_PATH))).toBe(false)
+    })
+
+    it('records nothing when the unload aborts an automatic run', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const ctx = await autoIndexSeam()
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation((_projectRoot, signal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { reject(new Error('This operation was aborted')) })
+        }))
+      try {
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 1)
+        await ctx.fiber.dispose()
+        // The run's catch settles after disposal; a deliberate abort is not a failure to report.
+        await new Promise(resolve => setTimeout(resolve, 50))
+        expect(existsSync(join(root, INDEX_FAILURE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+        indexSpy.mockRestore()
+      }
+    })
+
+    it('does not release a newer run\'s workspace when a timed-out run settles late', async () => {
+      const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      // A one-millisecond freshness window makes each session below a real attempt, and a deadline
+      // wide enough that the second run cannot reach its own before the first one settles: the only
+      // thing that could release the second run's room is the first run's `finally`.
+      const ctx = await autoIndexSeam({ config: { autoIndexTimeoutMs: 100, autoRefreshAfterMs: 1 } })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      let settleFirst: (() => void) | undefined
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation(() => {
+        if (settleFirst === undefined) {
+          return new Promise<never>(resolve => { settleFirst = () => { resolve(undefined as never) } })
+        }
+        return new Promise<never>(() => {})
+      })
+      try {
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 1)
+        await waitFor(async () => (await readFailure(root))?.message.includes('timed out') === true, 5_000)
+        // The deadline released the room, so a second session may claim it — and this run never
+        // settles, which leaves only the first run's `finally` able to touch the in-flight set.
+        await new Promise(resolve => setTimeout(resolve, 5))
+        registerAgent(ctx, root)
+        await waitFor(() => indexSpy.mock.calls.length === 2)
+        // The first run finally settles while the second one still owns the workspace.
+        await new Promise(resolve => setTimeout(resolve, 5))
+        settleFirst?.()
+        await new Promise(resolve => setTimeout(resolve, 10))
+        registerAgent(ctx, root)
+        await new Promise(resolve => setTimeout(resolve, 10))
+        // The second run is in flight, so this session is turned away rather than racing a third build.
+        expect(indexSpy.mock.calls.length).toBe(2)
+      } finally {
+        errorSpy.mockRestore()
+        indexSpy.mockRestore()
+      }
+    })
+  })
+
   describe('automatic indexing on session start', () => {
     it('indexes a new session\'s workspace in the background', async () => {
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
@@ -686,11 +932,20 @@ describe('codegraph-tree-sitter plugin', () => {
         'a.ts': 'export const a = 1\n',
       })
       const ctx = await autoIndexSeam()
-
-      registerAgent(ctx, root)
-      await new Promise(resolve => setTimeout(resolve, 150))
-
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index')
+      try {
+        registerAgent(ctx, root)
+        // An automatic run's first await is the size scan, so "not called yet" on its own would also
+        // be true with the guard removed. A control workspace registered in the same context proves
+        // the automatic path does reach this call; the guarded root must never appear in the log.
+        const control = await writeProject({ 'a.ts': 'export function control() {}\n' })
+        registerAgent(ctx, control)
+        await waitFor(() => indexSpy.mock.calls.some(([projectRoot]) => projectRoot === control))
+        expect(indexSpy.mock.calls.some(([projectRoot]) => projectRoot === root)).toBe(false)
+        expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        indexSpy.mockRestore()
+      }
     })
 
     it('declines a workspace past the session-start file limit instead of killing the heap', async () => {
@@ -731,6 +986,22 @@ describe('codegraph-tree-sitter plugin', () => {
       await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
     })
 
+    it('does not count a directory entry that is neither a file nor a directory toward the limit', async () => {
+      // A symlink is the shape a real tree carries (a linked file, a vendored alias) and it is not a
+      // candidate the walk would ever parse. Counting it would decline an otherwise small workspace:
+      // two real files under a two-file limit, and a third entry the guard must ignore.
+      const root = await writeProject({
+        'a.ts': 'export const a = 1\n',
+        'b.ts': 'export const b = 2\n',
+      })
+      await symlink(join(root, 'a.ts'), join(root, 'linked.ts'))
+      const ctx = await autoIndexSeam({ config: { autoIndexMaxFiles: 2 } })
+
+      registerAgent(ctx, root)
+
+      await waitFor(() => existsSync(join(root, DATABASE_RELATIVE_PATH)))
+    })
+
     it('counts files that live only in subdirectories', async () => {
       // Same nesting shape, but past the limit: the recursive call is what has to report the
       // overflow, and declining still means no graph rather than a partial one.
@@ -760,11 +1031,22 @@ describe('codegraph-tree-sitter plugin', () => {
         '.codegraph/status.json': JSON.stringify({ indexedAt: Date.now() }),
       })
       const ctx = await autoIndexSeam()
-
-      registerAgent(ctx, root)
-      await new Promise(resolve => setTimeout(resolve, 150))
-
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index')
+      try {
+        registerAgent(ctx, root)
+        // Same reasoning as the harness-home case: a stale control workspace registered here proves
+        // the automatic path reaches the index call, so the fresh root's absence is about freshness.
+        const stale = await writeProject({
+          'a.ts': 'export function staleWorkspace() {}\n',
+          '.codegraph/status.json': JSON.stringify({ indexedAt: 0 }),
+        })
+        registerAgent(ctx, stale)
+        await waitFor(() => indexSpy.mock.calls.some(([projectRoot]) => projectRoot === stale))
+        expect(indexSpy.mock.calls.some(([projectRoot]) => projectRoot === root)).toBe(false)
+        expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+      } finally {
+        indexSpy.mockRestore()
+      }
     })
 
     it('refreshes an index that has gone stale, which is also what restarts watching', async () => {
@@ -851,19 +1133,64 @@ describe('codegraph-tree-sitter plugin', () => {
       }).not.toThrow()
     })
 
-    it('registers no listener when autoIndexOnSession is false', async () => {
+    it('starts no automatic run when autoIndexOnSession is false', async () => {
       const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
-      const ctx = await autoIndexSeam({ config: { autoIndexOnSession: false } })
+      const off = await autoIndexSeam({ config: { autoIndexOnSession: false } })
+      const on = await autoIndexSeam()
+      const offSpy = vi.spyOn(off.codegraph, 'index')
+      const onSpy = vi.spyOn(on.codegraph, 'index')
+      try {
+        // The mounted composition is the positive control: the same dispatch, the same workspace and
+        // the same test body reach `index` there, so its absence below is about the config rather
+        // than about an event this test failed to deliver.
+        registerAgent(on, root)
+        await waitFor(() => onSpy.mock.calls.length === 1)
 
-      registerAgent(ctx, root)
-      await new Promise(resolve => setTimeout(resolve, 150))
+        registerAgent(off, root)
+        await settleDispatch()
+        expect(offSpy).not.toHaveBeenCalled()
+      } finally {
+        offSpy.mockRestore()
+        onSpy.mockRestore()
+        await off.fiber.dispose()
+        await on.fiber.dispose()
+      }
+    })
 
-      expect(existsSync(join(root, DATABASE_RELATIVE_PATH))).toBe(false)
+    it('stops answering agent/created once the plugin unloads', async () => {
+      const first = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      const second = await writeProject({ 'a.ts': 'export function a() {}\n' })
+      // Disposing `ctx.fiber` would take the agent registry with it, and this assertion needs the
+      // registry to keep emitting — so the composition is mounted here with the indexer's own fiber
+      // kept, and only that fiber is disposed.
+      const ctx = new Context()
+      await ctx.plugin(Codegraph)
+      new FakeFs(ctx)
+      const indexer = ctx.plugin(CodegraphTreeSitter, { watch: false })
+      await indexer
+      await ctx.plugin(AgentRegistry)
+      const indexSpy = vi.spyOn(ctx.codegraph, 'index').mockImplementation(() => new Promise(() => {}))
+      try {
+        registerAgent(ctx, first)
+        await waitFor(() => indexSpy.mock.calls.length === 1)
+
+        await indexer.dispose()
+        // A workspace this instance never saw, so neither the freshness window nor the in-flight set
+        // can be what turns the second session away: only a listener that is gone can.
+        registerAgent(ctx, second)
+        await settleDispatch()
+        expect(indexSpy.mock.calls.length).toBe(1)
+      } finally {
+        indexSpy.mockRestore()
+        await ctx.fiber.dispose()
+      }
     })
 
     it('logs a failed run instead of throwing it into the event bus', async () => {
-      // An absolute path that does not exist: a valid session workspace, but no indexer claims it.
-      const missingRoot = join(tmpdir(), 'codegraph-auto-index-missing')
+      // An absolute path that no indexer claims: a valid session workspace location, but nothing can
+      // build there. The name is per-run so a leftover directory from an earlier run cannot turn the
+      // path into an indexable workspace and swallow the failure this test needs.
+      const missingRoot = join(tmpdir(), `codegraph-auto-index-missing-${String(process.pid)}-${String(Date.now())}`)
       const ctx = await autoIndexSeam()
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
@@ -871,6 +1198,9 @@ describe('codegraph-tree-sitter plugin', () => {
         // to be logged and swallowed, never rethrown into the dispatch.
         expect(() => registerAgent(ctx, missingRoot)).not.toThrow()
         await waitFor(() => errorSpy.mock.calls.some(args => String(args[0]).includes('automatic index for')))
+        // A workspace that does not exist is not a failure record's home: creating the directory to
+        // hold one would make the next attempt succeed against an empty tree.
+        expect(existsSync(missingRoot)).toBe(false)
       } finally {
         errorSpy.mockRestore()
       }

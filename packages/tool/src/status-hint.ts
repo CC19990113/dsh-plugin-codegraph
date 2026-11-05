@@ -13,8 +13,8 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
-import type { IndexStatusFile } from 'dsh-plugin-codegraph-service'
+import { INDEX_FAILURE_RELATIVE_PATH, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
+import type { IndexFailureFile, IndexStatusFile } from 'dsh-plugin-codegraph-service'
 
 /** Path of the graph itself, relative to a project root — used only to tell "never indexed" apart. */
 const GRAPH_RELATIVE_PATH = '.codegraph/codegraph.db'
@@ -50,6 +50,42 @@ export function readIndexStatus(projectRoot: string): IndexStatusFile | undefine
   return {
     indexedAt, filesIndexed, filesMinified, nodeCount, edgeCount, unresolvedCount, unresolvedLikelyInternalCount,
   }
+}
+
+/**
+ * The last indexing failure recorded beside a workspace's graph, when there is one to trust.
+ *
+ * A synchronous small read, unlike every other `status` input: the reason an index is missing is most
+ * valuable exactly when no store can answer, and that is the one answer which must never fail.
+ * Shared by the model-facing `status` operation and `/codegraph status`, which both owe the same
+ * explanation for an absent — or newly stale — index.
+ * @param projectRoot - absolute project root.
+ * @returns the record as written, or undefined when there is none to report.
+ */
+export function readIndexFailureFile(projectRoot: string): IndexFailureFile | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(join(projectRoot, INDEX_FAILURE_RELATIVE_PATH), 'utf8'))
+  } catch {
+    // Absent, unreadable, or not JSON: all three mean "no recorded reason", which the callers render
+    // as the weaker statement rather than as an error. A status answer must never fail on this.
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const record = parsed as { failedAt?: unknown; message?: unknown; source?: unknown }
+  const failedAt = numberField(record, 'failedAt')
+  if (failedAt === undefined || typeof record.message !== 'string') return undefined
+  if (!isFailureSource(record.source)) return undefined
+  return { failedAt, message: record.message, source: record.source }
+}
+
+/**
+ * Whether a recorded `source` is one of the paths this project writes.
+ * @param value - the field as it was read off disk.
+ * @returns true when the record names a known path.
+ */
+function isFailureSource(value: unknown): value is IndexFailureFile['source'] {
+  return value === 'auto' || value === 'tool' || value === 'watch'
 }
 
 /**

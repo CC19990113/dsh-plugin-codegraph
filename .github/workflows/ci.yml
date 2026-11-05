@@ -20,6 +20,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Release version gate
+        run: node scripts/check-release-versions.mjs
+
       - name: Typecheck
         run: pnpm run typecheck
 

@@ -36,6 +36,26 @@ function codeBlock(path: string, code: string | null, startLine: number | undefi
   return [`  ${path}${from}:`, '```', code, '```']
 }
 
+/** How much of a failed run's own message one rendered status line keeps. */
+const MAX_FAILURE_MESSAGE_CHARS = 200
+
+/**
+ * One line naming the last failed indexing attempt, clipped rather than quoted in full.
+ *
+ * A run's message is often an entire SQLite or parser complaint, and a `status` answer is read to
+ * decide what to do next — the beginning of the reason is what carries the diagnosis. The source is
+ * named because "a background refresh failed" and "your explicit build failed" call for different
+ * responses.
+ * @param failure - the record the tool read off disk.
+ * @returns the rendered line.
+ */
+function failureLine(failure: { message: string; source: string }): string {
+  const message = failure.message.length > MAX_FAILURE_MESSAGE_CHARS
+    ? `${failure.message.slice(0, MAX_FAILURE_MESSAGE_CHARS)}…`
+    : failure.message
+  return `The last indexing attempt (${failure.source}) failed: ${message}. Run codegraph_index to retry.`
+}
+
 /**
  * Render one result as the text the model reads.
  * @param value - the canonical value the operation returned.
@@ -115,8 +135,10 @@ export function renderCodegraph(value: CodegraphToolValue): string {
       ].join('\n')
     }
     case 'status': {
+      const failure = value.last_failure === undefined ? undefined : failureLine(value.last_failure)
       if (!value.indexed) {
-        return `No index for \`${value.project_path}\`. Run codegraph_index to build one.`
+        const missing = `No index for \`${value.project_path}\`. Run codegraph_index to build one.`
+        return failure === undefined ? missing : `${missing}\n${failure}`
       }
       const languages = (value.languages ?? []).map(entry => `${entry.language} ${entry.file_count}`).join(', ')
       const indexedAt = value.indexed_at
@@ -127,6 +149,7 @@ export function renderCodegraph(value: CodegraphToolValue): string {
         `Languages: ${languages || 'none'}.`,
         `Last indexed: ${indexed}.`,
       ]
+      if (failure !== undefined) lines.push(failure)
       const stale = value.stale_file_count
       // Undefined only when a caller builds a partial value directly (as some tests do); the tool's
       // own `status` handler always sets this alongside `indexed: true`.

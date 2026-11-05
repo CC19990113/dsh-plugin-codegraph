@@ -275,14 +275,59 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
     }
     nodes.push(fileNode)
 
+    // `RawDefinition.key` is `row:column` with no discriminator, and two captured definitions can
+    // genuinely share one source position: C/C++'s `struct X { … } y;` captures both the enclosing
+    // `declaration`/`field_declaration` (`y`, the whole statement, which starts at the same `struct`
+    // keyword) and the nested `struct_specifier` (`X`) there. The second and later definition with the
+    // same base id therefore gets a `#N` suffix; the first keeps the bare id, so a file whose keys are
+    // all distinct — i.e. essentially every file outside that C/C++ shape — resolves to exactly the
+    // same ids (and therefore the same graph) it did before.
+    const idCounts = new Map<string, number>()
+    // `keyToId` stays last-write-wins: duplicate keys can only ever be *nested* (a source position
+    // identifies exactly one node, so two definitions sharing one must be ancestor and descendant),
+    // and the definitions are in DFS pre-order, so the last write is the innermost declaration — which
+    // is what a call or heritage reference inside it must attribute to.
     const keyToId = new Map<string, string>()
+    // Parent resolution deliberately does NOT go through `keyToId`: with a shared key, the map's last
+    // write would make the inner definition its own `contains` parent (a self-loop on a node with
+    // itself as target). The open definitions form a stack instead, so the outer and inner
+    // definitions of one position are two distinct nodes and the nesting is what it is in the source.
+    const openStack: { readonly key: string; readonly id: string }[] = []
     const fileNodes: GraphNode[] = []
     for (const def of file.extraction.definitions) {
       const qualifiedName = def.container.length === 0
         ? `${file.path}::${def.name}`
         : `${file.path}::${[...def.container, def.name].join('.')}`
-      const nodeId = `${file.path}:${def.startLine}:${def.startColumn}`
+      const baseId = `${file.path}:${def.startLine}:${def.startColumn}`
+      const occurrence = (idCounts.get(baseId) ?? 0) + 1
+      idCounts.set(baseId, occurrence)
+      const nodeId = occurrence === 1 ? baseId : `${baseId}#${occurrence}`
       keyToId.set(def.key, nodeId)
+      // A top-level definition's parent is the file node, and it also closes every definition still
+      // open at that point. Otherwise pop until the definition named by `parentKey` is on top; an
+      // unresolvable `parentKey` (a shape `extract.ts` does not produce, since a parent key is taken
+      // from the live container stack) falls back to the file node rather than throwing.
+      let parentId = id
+      if (def.parentKey === null) {
+        openStack.length = 0
+      } else {
+        while (openStack.length > 0 && openStack[openStack.length - 1]?.key !== def.parentKey) openStack.pop()
+        const parent = openStack[openStack.length - 1]
+        if (parent === undefined) {
+          // The file node is a true ancestor, so the edge stays usable — but a `parentKey` that is not
+          // open means extraction and resolution disagree, and silently reshaping that into a
+          // plausible-looking edge is how a nesting bug survives unnoticed. Record it with the exact
+          // position, which is what a reader needs to find the declaration.
+          console.error(
+            `codegraph-tree-sitter: ${file.path}:${String(def.startLine)}:${String(def.startColumn)} `
+              + `${def.name} names a parentKey (${String(def.parentKey)}) that is not open; `
+              + 'falling back to the file node',
+          )
+        } else {
+          parentId = parent.id
+        }
+      }
+      openStack.push({ key: def.key, id: nodeId })
       fileNodes.push({
         id: nodeId,
         kind: def.kind,
@@ -300,15 +345,11 @@ export function resolveWorkspace(files: readonly ExtractedFile[], now: number): 
         decorators: def.decorators,
         updatedAt: now,
       })
+      edges.push({ source: parentId, target: nodeId, kind: 'contains', provenance: 'tree-sitter' })
     }
     nodes.push(...fileNodes)
     nodesByFile.set(file.path, fileNodes)
     defIdByKey.set(file.path, keyToId)
-
-    for (const def of file.extraction.definitions) {
-      const source = def.parentKey === null ? id : mustGet(keyToId, def.parentKey)
-      edges.push({ source, target: mustGet(keyToId, def.key), kind: 'contains', provenance: 'tree-sitter' })
-    }
   }
 
   const nameIndex = buildNameIndex(nodesByFile)

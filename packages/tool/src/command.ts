@@ -14,7 +14,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { CodegraphStatusResult } from 'dsh-plugin-codegraph-service'
-import { formatIndexedAt, workspaceOf } from './status-hint.ts'
+import { formatIndexedAt, readIndexFailureFile, workspaceOf } from './status-hint.ts'
 import { recordCommandRun } from './command-log.ts'
 import { agentIdOf } from './status-hint.ts'
 
@@ -181,21 +181,27 @@ async function dispatchCommand(ctx: Context, invocation: CommandInvocation): Pro
 }
 
 /**
- * Report the workspace's index at a glance.
+ * Report the workspace's index at a glance, including why the last build failed when it did.
  *
  * `available` is asked first so "no index yet" is a helpful answer rather than the seam's
- * `CODEGRAPH_UNAVAILABLE` failure — the same distinction the `status` tool operation makes.
+ * `CODEGRAPH_UNAVAILABLE` failure — the same distinction the `status` tool operation makes. The
+ * failure sidecar is read beside it: the reason an index is missing is most valuable exactly when no
+ * store can answer, and "the newest rebuild broke" is its own state even when a graph exists.
  * @param ctx - the plugin context carrying `codegraph`.
  * @param root - the session workspace root.
  * @param signal - stops the check and the query.
  * @returns one status line, or how to build the missing index.
  */
 async function statusCommand(ctx: Context, root: string, signal?: AbortSignal): Promise<CommandResult> {
+  const failure = readIndexFailureFile(root)
+  const lastFailure = failure === undefined
+    ? ''
+    : `\n上次索引尝试（${failure.source}）失败：${failure.message}。可以跑 /${COMMAND_NAME} index 重试。`
   if (!(await ctx.codegraph.available(root, signal))) {
-    return { kind: 'success', text: `这个工作区还没有索引：${root}。先跑 /${COMMAND_NAME} index` }
+    return { kind: 'success', text: `这个工作区还没有索引：${root}。先跑 /${COMMAND_NAME} index${lastFailure}` }
   }
   const result = await ctx.codegraph.query({ operation: 'status', projectRoot: root }, signal)
-  return { kind: 'success', text: statusLine(result) }
+  return { kind: 'success', text: `${statusLine(result)}${lastFailure}` }
 }
 
 /**

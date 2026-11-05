@@ -29,20 +29,19 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
-import { stat } from 'node:fs/promises'
-import { join, posix } from 'node:path'
+import { mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { dirname, join, posix } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CodegraphIndexerId, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
-import type { CodegraphIndexer, CodegraphIndexReport } from 'dsh-plugin-codegraph-service'
+import { CodegraphIndexerId, INDEX_FAILURE_RELATIVE_PATH, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
+import type { CodegraphIndexer, CodegraphIndexReport, IndexFailureFile } from 'dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE, languageFor } from './languages.ts'
 import { isExcluded, walkAndExtract } from './walk.ts'
 import type { EngineMode } from './walk.ts'
 import { writeParseCache } from './cache.ts'
 import type { ParseCacheFileSystem } from './cache.ts'
 import { resolveWorkspace } from './resolve.ts'
-import { writeGraph } from './schema.ts'
+import { writeGraph, writeJsonAtomically } from './schema.ts'
 import { createWatcher } from './watcher.ts'
 import type { WatchFileSystem, Watcher } from './watcher.ts'
 import { decideWatch, readProcVersion } from './watch-policy.ts'
@@ -144,6 +143,17 @@ export const DEFAULT_MAX_WATCHED_DIRECTORIES = 4_000
 /** Default age past which a session-open refreshes an existing index (ten minutes). */
 export const DEFAULT_AUTO_REFRESH_AFTER_MS = 10 * 60 * 1000
 
+/**
+ * Default ceiling on one session-start automatic index (fifteen minutes).
+ *
+ * An automatic run nobody asked for holds its workspace in `autoIndexInFlight`, which is what keeps a
+ * burst of sessions from racing two builds over the same files. A run that never settles — a wedged
+ * parse, a backend whose abort is ignored — would therefore silence every later session in that
+ * workspace for the life of the process. The deadline is the way out: the run is aborted, the root is
+ * released, and the reason is recorded next to the graph for whoever asks next.
+ */
+export const DEFAULT_AUTO_INDEX_TIMEOUT_MS = 15 * 60 * 1000
+
 /** Plugin configuration: the indexer's identity and every deployment-varying bound on a run. */
 export interface Config {
   /**
@@ -235,8 +245,10 @@ export interface Config {
    * when its status sidecar already exists, so this cannot rebuild a graph that is already there.
    * Set false to keep every build explicitly requested.
    *
-   * Requires the host's `jobs` service: the build is never run synchronously inside session creation,
-   * so a composition without background jobs simply schedules nothing.
+   * Does not need the host's `jobs` service: the build never runs synchronously inside session
+   * creation, it runs as a plain background promise, so a composition without background jobs still
+   * indexes. A failure is reported through `console.error` and recorded in
+   * `.codegraph/last-error.json` for the `status` operation to explain.
    */
   /** Cap on candidate source files a session-start scan may find before it declines to index. */
   autoIndexMaxFiles?: number
@@ -248,6 +260,12 @@ export interface Config {
    * only ever begins after a successful index.
    */
   autoRefreshAfterMs?: number
+  /**
+   * How long one session-start automatic index may run before it is aborted and its workspace
+   * released (default 900000, fifteen minutes). See {@link DEFAULT_AUTO_INDEX_TIMEOUT_MS} for why an
+   * unanswered run needs a deadline at all.
+   */
+  autoIndexTimeoutMs?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -269,6 +287,7 @@ export const Config: z<Config> = z.object({
   autoIndexMaxFiles: z.number().default(DEFAULT_AUTO_INDEX_MAX_FILES),
   autoIndexOnSession: z.boolean().default(true),
   autoRefreshAfterMs: z.number().default(DEFAULT_AUTO_REFRESH_AFTER_MS),
+  autoIndexTimeoutMs: z.number().default(DEFAULT_AUTO_INDEX_TIMEOUT_MS),
 })
 
 type ResolvedConfig = Required<Config>
@@ -285,6 +304,7 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('concurrency', resolved.concurrency)
   assertPositiveInteger('watchDebounceMs', resolved.watchDebounceMs)
   assertPositiveInteger('maxWatchedDirectories', resolved.maxWatchedDirectories)
+  assertPositiveInteger('autoIndexTimeoutMs', resolved.autoIndexTimeoutMs)
 
   // Watching and the parse cache both go through the host's filesystem seam rather than `node:fs`, so
   // they follow the same execution world the rest of the harness reads: a remote or confined backend
@@ -310,6 +330,11 @@ export function apply(ctx: Context, config: Config): void {
   // window: a first build can outlive the window, and two builds on one root would only race the same
   // index files.
   const autoIndexInFlight = new Set<string>()
+
+  // Controllers of the automatic runs still executing. Kept so the plugin's own unload can abort them
+  // rather than leaving a parse writing into a graph nobody is listening for any more; each run removes
+  // its own controller in `finally`.
+  const autoIndexControllers = new Set<AbortController>()
 
   // `agent/created` is typed by `@deepseek-ai/dsh-agent`'s module augmentation. Reading the event
   // through a local structural face keeps this package's host dependencies unchanged: it needs one
@@ -360,23 +385,41 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
     async index(projectRoot, signal) {
-      const report = await runIndex(projectRoot, resolved, fileSystem, signal)
-      // Watching starts only after a successful index establishes the baseline it refreshes — never
-      // from a canIndex() probe or a failed run.
-      ensureWatching(projectRoot)
-      return report
+      try {
+        const report = await runIndex(projectRoot, resolved, fileSystem, signal)
+        // Watching starts only after a successful index establishes the baseline it refreshes — never
+        // from a canIndex() probe or a failed run.
+        ensureWatching(projectRoot)
+        return report
+      } catch (error) {
+        // One entry point for every explicit build: `codegraph_index` and the `/codegraph index`
+        // command both reach the seam here. An automatic run passes through too, but records its own
+        // 'auto' label afterwards, so the final record names the path that actually asked.
+        // An abort is not a failure of the workspace: the tool's cancel and the plugin's unload both
+        // abort this signal, and a record saying "This operation was aborted" would outlive the
+        // process that wrote it and be read back as a diagnosis.
+        if (signal?.aborted !== true) await writeIndexFailure(projectRoot, 'tool', error)
+        throw error
+      }
     },
   }
 
   ctx.effect(function* () {
     yield () => {
+      // Aborting goes first: a run still writing when this plugin unloads would otherwise keep the
+      // parse alive past the index it serves, and leave a graph half-written by an instance nobody
+      // asked for any more. Each run's own `finally` drops it from the set.
+      for (const controller of autoIndexControllers) controller.abort()
+      autoIndexControllers.clear()
       for (const watcher of watchers.values()) watcher.stop()
       watchers.clear()
     }
     if (resolved.autoIndexOnSession) {
       // Registered inside this effect so the listener follows the plugin's lifetime: unloading the
       // plugin must stop new sessions from scheduling work this instance can no longer run.
-      yield agentEvents.on('agent/created', payload => autoIndexOnSession(ctx, resolved, lastAutoRun, autoIndexInFlight, payload, ensureWatching))
+      yield agentEvents.on('agent/created', payload => autoIndexOnSession(
+        ctx, resolved, lastAutoRun, autoIndexInFlight, autoIndexControllers, payload, ensureWatching,
+      ))
     }
     yield ctx.codegraph.registerIndexer(indexer)
   }, 'codegraph-tree-sitter')
@@ -456,6 +499,8 @@ function isHarnessHome(root: string): boolean {
  * @param lastAutoRun - when this instance last started an automatic index for each root.
  * @param autoIndexInFlight - roots whose background run is still executing, so a slow build cannot be
  * started twice by sessions that open past the freshness window.
+ * @param autoIndexControllers - controllers of the automatic runs this instance has in flight, so the
+ * plugin's unload can abort them.
  * @param payload - the `agent/created` dispatch payload.
  * @param ensureWatching - starts file watching for a workspace that is already current.
  */
@@ -464,6 +509,7 @@ function autoIndexOnSession(
   config: ResolvedConfig,
   lastAutoRun: Map<string, number>,
   autoIndexInFlight: Set<string>,
+  autoIndexControllers: Set<AbortController>,
   payload: AgentCreatedPayload,
   ensureWatching: (root: string) => void,
 ): void {
@@ -498,11 +544,16 @@ function autoIndexOnSession(
     }
     lastAutoRun.set(root, now)
     autoIndexInFlight.add(root)
-    // Never rejects: a lost index is a degradation, not an error the session can act on.
-    void runAutomaticIndex(ctx, root, config).finally(() => autoIndexInFlight.delete(root))
+    // Never rejects: a lost index is a degradation, not an error the session can act on. The in-flight
+    // entry is released by the run itself rather than here, because only that run knows whether a
+    // deadline has already replaced it — see `runAutomaticIndex`.
+    void runAutomaticIndex(ctx, root, config, autoIndexInFlight, autoIndexControllers)
   } catch (error) {
     // The host treats a throwing listener as vetoing publication. Losing an index is a degradation,
     // never a reason to stop a session from starting.
+    // Nothing in the block above throws for a payload-shaped agent: the only ways here are the host's
+    // own event bus or a path helper, which a unit test cannot arrange without mocking `node:fs`.
+    /* v8 ignore next */
     console.error(`codegraph-tree-sitter: automatic indexing for a new session failed: ${String(error)}`)
   }
 }
@@ -513,12 +564,47 @@ function autoIndexOnSession(
  * The size guard stays: parsing a workspace past `autoIndexMaxFiles` would exhaust the WASM heap and
  * take the desktop down with it, and an automatic index is a convenience. Skipping it is a decision,
  * not a failure, so it is logged once and the session continues untouched.
+ *
+ * A run that fails now also leaves {@link INDEX_FAILURE_RELATIVE_PATH} beside the graph, and a run that
+ * exceeds {@link Config.autoIndexTimeoutMs} is aborted and recorded as such. Both exist for the same
+ * reason: the user's only view of an automatic run is `codegraph status`, and "no index" without a
+ * reason sent them looking for a bug in their workspace rather than in the run.
  * @param ctx - the plugin context.
  * @param root - absolute workspace path.
  * @param config - the resolved plugin configuration.
+ * @param autoIndexInFlight - roots whose background run is still executing; a timed-out run releases
+ * its own entry because a run that ignores its signal may never settle.
+ * @param autoIndexControllers - controllers of the automatic runs in flight, for the plugin's unload
+ * to abort.
  */
-async function runAutomaticIndex(ctx: Context, root: string, config: ResolvedConfig): Promise<void> {
+async function runAutomaticIndex(
+  ctx: Context,
+  root: string,
+  config: ResolvedConfig,
+  autoIndexInFlight: Set<string>,
+  autoIndexControllers: Set<AbortController>,
+): Promise<void> {
   const controller = new AbortController()
+  autoIndexControllers.add(controller)
+  const timeoutMs = config.autoIndexTimeoutMs
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    // The record is written here rather than left to the `catch` below: a run that ignores its signal
+    // may never settle, and then the failure this deadline is describing would never be recorded.
+    void writeIndexFailure(root, 'auto', `automatic index timed out after ${String(timeoutMs)}ms`)
+    // Released here for the same reason: the promise's own `finally` is exactly what a run that never
+    // settles never reaches, and every later session in this workspace would skip indexing forever.
+    autoIndexInFlight.delete(root)
+    // The controller is dropped here too: `finally` is what would normally release it, and this is the
+    // path a run that ignores its signal never reaches. Leaving it in the set would make the plugin's
+    // own unload abort a run that already gave up — and keep it alive, with the workspace it holds, for
+    // the life of the process.
+    autoIndexControllers.delete(controller)
+    controller.abort()
+  }, timeoutMs)
+  // A pending deadline must not be the reason a short-lived host process stays up.
+  timer.unref()
   try {
     const oversized = await exceedsAutoIndexLimit(root, config, controller.signal)
     if (oversized !== undefined) {
@@ -532,7 +618,24 @@ async function runAutomaticIndex(ctx: Context, root: string, config: ResolvedCon
     // A successful index is what starts file watching, inside `indexer.index`.
     await ctx.codegraph.index(root, controller.signal)
   } catch (error) {
-    console.error(`codegraph-tree-sitter: automatic index for ${root} failed: ${String(error)}`)
+    // An abort that did not come from the deadline is the plugin unloading: nobody is waiting for this
+    // graph any more, so it is not a workspace failure and gets neither a log line nor a record.
+    if (controller.signal.aborted && !timedOut) return
+    // One message either way, but "timed out" and "the indexer threw" are different diagnoses: the
+    // first says the workspace is too large or too slow, the second names what actually broke.
+    const message = timedOut
+      ? `automatic index timed out after ${String(timeoutMs)}ms`
+      : describeFailure(error)
+    console.error(`codegraph-tree-sitter: automatic index for ${root} failed: ${message}`)
+    await writeIndexFailure(root, 'auto', message)
+  } finally {
+    clearTimeout(timer)
+    autoIndexControllers.delete(controller)
+    // Only while this run still owns the entry. A run that passed its deadline released the root in the
+    // timer callback — that release is what lets a later session retry at all, because a run that
+    // ignores its signal may never reach this line — and deleting here by root alone would then take
+    // away whichever newer run has claimed the same workspace since.
+    if (!timedOut) autoIndexInFlight.delete(root)
   }
 }
 
@@ -615,8 +718,15 @@ async function runSync(
   fs: ParseCacheFileSystem,
 ): Promise<{ filesChanged: number; durationMs: number }> {
   const startedAt = Date.now()
-  const report = await runIndex(projectRoot, config, fs)
-  return { filesChanged: report.filesIndexed, durationMs: Date.now() - startedAt }
+  try {
+    const report = await runIndex(projectRoot, config, fs)
+    return { filesChanged: report.filesIndexed, durationMs: Date.now() - startedAt }
+  } catch (error) {
+    // A watch rebuild has no caller to fail: the debounce already returned, so the only trace of a
+    // failed refresh used to be one console line in a process nobody reads interactively.
+    await writeIndexFailure(projectRoot, 'watch', error)
+    throw error
+  }
 }
 
 /**
@@ -656,6 +766,11 @@ async function runIndex(
     files, nodes: graph.nodes, edges: graph.edges, unresolved: graph.unresolved, filesMinified, indexedAt,
   })
 
+  // The graph is back, so the recorded reason for its absence is no longer true. Cleared here rather
+  // than in `index()` because the watch path reaches this function without going through it; the
+  // deletion tolerates absence, which is the common case on a healthy workspace.
+  await rm(join(projectRoot, INDEX_FAILURE_RELATIVE_PATH), { force: true })
+
   // Only after the graph is in place: the cache records the extractions this run actually committed,
   // so a run that failed before writing its graph leaves the previous cache — and the mtimes it was
   // built from — alone instead of vouching for a graph that was never written.
@@ -679,6 +794,52 @@ async function runIndex(
     unresolvedLikelyInternalCount: graph.unresolved.filter(ref => !ref.likelyExternal).length,
     languages,
   }
+}
+
+/**
+ * Record why a run failed beside the graph, so a later `codegraph status` can explain an absent index.
+ *
+ * Best-effort by design: the run has already failed, and a diagnostic that cannot be written must not
+ * replace that failure with a different one. `mkdir` is recursive because `.codegraph` itself may not
+ * exist yet — a run that failed early never got as far as creating it. The record itself goes through
+ * {@link writeJsonAtomically}: `status` reads this file synchronously while another run may be
+ * rewriting it, and a reader must never see a half-written record.
+ * @param root - absolute workspace path.
+ * @param source - which path started the run.
+ * @param reason - whatever the run threw, stringified; a non-Error rejection is still worth recording.
+ */
+async function writeIndexFailure(
+  root: string,
+  source: IndexFailureFile['source'],
+  reason: unknown,
+): Promise<void> {
+  const failure: IndexFailureFile = { failedAt: Date.now(), message: describeFailure(reason), source }
+  try {
+    // A root that does not exist is not a workspace: writing the record there would create the very
+    // directory the failed run reported as missing. Only the console line covers that case.
+    if (!existsSync(root)) return
+    const target = join(root, INDEX_FAILURE_RELATIVE_PATH)
+    await mkdir(dirname(target), { recursive: true })
+    await writeJsonAtomically(target, failure)
+  } catch (error) {
+    // A read-only workspace, or a file where `.codegraph` belongs. The caller still sees the original
+    // failure — this record was only ever a diagnostic, never a precondition for reporting anything —
+    // but a diagnostic that could not be written is itself worth one line rather than silence.
+    console.error(`codegraph-tree-sitter: could not record the indexing failure for ${root}: ${describeFailure(error)}`)
+  }
+}
+
+/**
+ * The text of one failed run, as a reader of the record should see it.
+ *
+ * An `Error`'s own message is the whole diagnosis; its `String()` form adds a `"Error: "` prefix that
+ * only makes the sidecar harder to read. A rejection that is not an `Error` — a provider that throws a
+ * string — is still worth recording verbatim.
+ * @param reason - whatever the run threw.
+ * @returns the message to persist.
+ */
+function describeFailure(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason)
 }
 
 /** Reject a non-positive-integer config value at load, so misconfiguration fails loud. */

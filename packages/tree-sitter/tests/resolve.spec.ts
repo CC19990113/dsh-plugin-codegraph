@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { resolveWorkspace } from '../src/resolve.ts'
 import type { ExtractedFile } from '../src/resolve.ts'
 import type { RawCall, RawDefinition, RawHeritageRef, RawImport } from '../src/extract.ts'
@@ -318,6 +318,119 @@ describe('resolveWorkspace', () => {
     ]
     const graph = resolveWorkspace(files, NOW)
     expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'a.ts:1:0', target: 'b.ts:1:0', kind: 'calls', line: 2, col: 2 }))
+  })
+
+  // `RawDefinition.key` is `row:column`, so a nested declaration that starts on the same row and
+  // column as the declaration enclosing it is indistinguishable *by key*: C/C++'s
+  // `struct X { … } y;` captures both the enclosing `declaration`/`field_declaration` (`y`) and the
+  // nested `struct_specifier` (`X`) at the same source position. Two such definitions used to take the
+  // same `path:row:col` node id (`UNIQUE constraint failed: nodes.id` on write) and, because the parent
+  // lookup went through a last-write-wins key map, the inner one also became its own `contains` parent.
+  describe('two definitions sharing one source position', () => {
+    /** The real C shape, as `extract.ts` reports it: outer `variable`/`field` at 120:4, inner `struct` there too. */
+    function duplicateKeyFile(): ExtractedFile {
+      return file('x.c', [
+        def({ key: '120:4', name: 'dec', kind: 'variable', startLine: 120, startColumn: 4, endLine: 130, endColumn: 6 }),
+        def({ key: '120:4', name: 'xz_dec', kind: 'struct', parentKey: '120:4', container: ['dec'], startLine: 120, startColumn: 4, endLine: 130, endColumn: 6 }),
+        def({ key: '200:0', name: 'sink', kind: 'function', startLine: 200, startColumn: 0 }),
+      ])
+    }
+
+    it('gives them distinct ids, keeping the bare id for the first occurrence', () => {
+      const graph = resolveWorkspace([duplicateKeyFile()], NOW)
+      const ids = graph.nodes.filter(node => node.filePath === 'x.c').map(node => node.id).sort()
+      expect(ids).toEqual(['file:x.c', 'x.c:120:4', 'x.c:120:4#2', 'x.c:200:0'])
+    })
+
+    it('never emits a duplicate node id', () => {
+      const graph = resolveWorkspace([duplicateKeyFile()], NOW)
+      expect(new Set(graph.nodes.map(node => node.id)).size).toBe(graph.nodes.length)
+    })
+
+    it('nests inner under outer instead of pointing both at the inner one', () => {
+      const graph = resolveWorkspace([duplicateKeyFile()], NOW)
+      expect(graph.edges).toContainEqual({ source: 'file:x.c', target: 'x.c:120:4', kind: 'contains', provenance: 'tree-sitter' })
+      expect(graph.edges).toContainEqual({ source: 'x.c:120:4', target: 'x.c:120:4#2', kind: 'contains', provenance: 'tree-sitter' })
+      // The regression itself: with a key-only parent lookup the inner def's parent resolved to the
+      // inner def's own id, i.e. a node containing itself.
+      expect(graph.edges.filter(edge => edge.kind === 'contains' && edge.source === edge.target)).toEqual([])
+    })
+
+    it('attributes a call whose callerKey names the shared position to the inner declaration', () => {
+      const graph = resolveWorkspace([
+        file('x.c', [
+          def({ key: '120:4', name: 'dec', kind: 'variable', startLine: 120, startColumn: 4 }),
+          def({ key: '120:4', name: 'xz_dec', kind: 'struct', parentKey: '120:4', container: ['dec'], startLine: 120, startColumn: 4 }),
+          def({ key: '200:0', name: 'sink', kind: 'function', startLine: 200, startColumn: 0 }),
+        ], [
+          { callerKey: '120:4', calleeName: 'sink', line: 125, column: 8, isMemberCall: false },
+        ]),
+      ], NOW)
+      expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'x.c:120:4#2', target: 'x.c:200:0', kind: 'calls' }))
+    })
+
+    it('attributes a heritage reference whose sourceKey names the shared position to the inner declaration', () => {
+      const graph = resolveWorkspace([
+        file('x.c', [
+          def({ key: '120:4', name: 'dec', kind: 'variable', startLine: 120, startColumn: 4 }),
+          def({ key: '120:4', name: 'xz_dec', kind: 'struct', parentKey: '120:4', container: ['dec'], startLine: 120, startColumn: 4 }),
+        ], [], [], [{ sourceKey: '120:4', targetName: 'Base', relation: 'extends' }]),
+        file('b.ts', [def({ key: '1:0', name: 'Base', kind: 'class' })]),
+      ], NOW)
+      expect(graph.edges).toContainEqual(expect.objectContaining({ source: 'x.c:120:4#2', target: 'b.ts:1:0', kind: 'extends' }))
+    })
+
+    it('numbers the third occurrence with its own suffix', () => {
+      const graph = resolveWorkspace([
+        file('x.c', [
+          def({ key: '120:4', name: 'dec', kind: 'variable', startLine: 120, startColumn: 4 }),
+          def({ key: '120:4', name: 'xz_dec', kind: 'struct', parentKey: '120:4', container: ['dec'], startLine: 120, startColumn: 4 }),
+          def({ key: '120:4', name: 'inner', kind: 'struct', parentKey: '120:4', container: ['dec', 'xz_dec'], startLine: 120, startColumn: 4 }),
+        ]),
+      ], NOW)
+      expect(graph.nodes.map(node => node.id)).toContain('x.c:120:4#3')
+      expect(new Set(graph.nodes.map(node => node.id)).size).toBe(graph.nodes.length)
+      expect(graph.edges.filter(edge => edge.kind === 'contains')).toEqual([
+        { source: 'file:x.c', target: 'x.c:120:4', kind: 'contains', provenance: 'tree-sitter' },
+        { source: 'x.c:120:4', target: 'x.c:120:4#2', kind: 'contains', provenance: 'tree-sitter' },
+        { source: 'x.c:120:4#2', target: 'x.c:120:4#3', kind: 'contains', provenance: 'tree-sitter' },
+      ])
+    })
+
+    it('leaves the id of a definition whose position is unique in the old `path:row:col` form', () => {
+      const graph = resolveWorkspace([file('a.ts', [def({ key: '1:0', name: 'foo' })])], NOW)
+      expect(graph.nodes.map(node => node.id)).toEqual(['file:a.ts', 'a.ts:1:0'])
+    })
+  })
+
+  describe('stack-based parent reconstruction', () => {
+    it('reaches a grandparent that is no longer the immediately preceding definition', () => {
+      const graph = resolveWorkspace([file('a.ts', [
+        def({ key: '1:0', name: 'A', kind: 'class' }),
+        def({ key: '2:2', name: 'B', kind: 'method', parentKey: '1:0', container: ['A'], startLine: 2, startColumn: 2 }),
+        def({ key: '3:4', name: 'C', kind: 'variable', parentKey: '2:2', container: ['A', 'B'], startLine: 3, startColumn: 4 }),
+        // A sibling of `B`: `B`'s subtree is finished, so this pops back to `A`.
+        def({ key: '5:2', name: 'D', kind: 'method', parentKey: '1:0', container: ['A'], startLine: 5, startColumn: 2 }),
+      ])], NOW)
+      expect(graph.edges).toContainEqual({ source: 'a.ts:1:0', target: 'a.ts:5:2', kind: 'contains', provenance: 'tree-sitter' })
+      expect(graph.edges.filter(edge => edge.source === edge.target)).toEqual([])
+    })
+
+    it('falls back to the file node for an unresolvable parentKey instead of throwing', () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const graph = resolveWorkspace([file('a.ts', [def({ key: '1:0', name: 'orphan', parentKey: '9:9', container: ['ghost'] })])], NOW)
+        expect(graph.edges).toContainEqual({ source: 'file:a.ts', target: 'a.ts:1:0', kind: 'contains', provenance: 'tree-sitter' })
+        // The fallback keeps the graph usable, which is exactly why it has to be recorded: a dangling
+        // parent key is an extraction/resolution disagreement, and the log is the only place it shows.
+        expect(errorSpy).toHaveBeenCalledTimes(1)
+        const logged = String(errorSpy.mock.calls[0]?.[0])
+        expect(logged).toContain('a.ts:1:0')
+        expect(logged).toContain('9:9')
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
   })
 
   describe('extends/implements resolution', () => {
