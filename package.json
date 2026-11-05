@@ -18,7 +18,9 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "tsc -b --clean",
-    "check:versions": "node scripts/check-release-versions.mjs"
+    "check:versions": "node scripts/check-release-versions.mjs",
+    "release:prepare": "node scripts/release-prepare.mjs",
+    "release:finish": "node scripts/release-finish.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-include": "^1.0.6",
