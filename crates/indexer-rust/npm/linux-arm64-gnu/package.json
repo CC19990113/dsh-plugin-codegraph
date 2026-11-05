@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph-indexer-linux-arm64-gnu",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "The native codegraph extraction engine for Linux arm64 (glibc). Installed automatically by dsh-plugin-codegraph-tree-sitter; do not depend on it directly.",
   "os": [
     "linux"
