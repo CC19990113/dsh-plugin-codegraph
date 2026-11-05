@@ -317,6 +317,8 @@ async function extractWithJs(file: PendingFile, signal?: AbortSignal): Promise<F
     // megabytes of AST. Deleting only the parser leaked it for the life of the process -- measured
     // on a 477-file workspace: RSS +103 MB per index run, +1.1 GB across 11 runs before the host ran
     // out of memory. With this line the same loop is flat at 95 MB.
+    /* v8 ignore next -- the same impossible null as the check above: parse() returns null only
+     * when the parser has no language, which createParser() never returns. */
     tree?.delete()
     parser.delete()
   }
