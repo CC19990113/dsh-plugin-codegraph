@@ -182,6 +182,26 @@ export class GraphPool {
     return db
   }
 
+  /**
+   * Drop the cached connection for one root, so a re-index may replace its file.
+   *
+   * A connection kept past the query is what breaks a Windows re-index: the writer
+   * replaces the graph with rename(), and Windows refuses to rename over a file that
+   * is open, while the design above assumes POSIX unlink semantics.
+   */
+  forget(projectRoot: string): void {
+    const entry = this.open.get(projectRoot)
+    if (entry === undefined) return
+    // Tolerate a connection the caller already closed: the store closes it first and
+    // then forgets it, and node:sqlite throws "database is not open" on a second close.
+    try {
+      entry.db.close()
+    } catch {
+      // already closed by the caller
+    }
+    this.open.delete(projectRoot)
+  }
+
   /** Close every open connection; further {@link acquire} calls fail as `CODEGRAPH_DISPOSED`. */
   close(): void {
     this.disposed = true
