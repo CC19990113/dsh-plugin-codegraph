@@ -246,6 +246,24 @@ Built on [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and
 
 Questions or need support? Open an [issue](https://github.com/CC19990113/dsh-plugin-codegraph/issues).
 
+## Releasing
+
+Two commands, because `pnpm-lock.yaml` cannot be regenerated before the platform addons exist on the
+registry: an addon version only becomes resolvable after the tag-triggered workflow publishes it.
+
+```sh
+pnpm run release:prepare 0.6.3      # every published manifest + the five addon pins + the exclude list
+git commit -am "chore(release): 0.6.3"
+git tag v0.6.3 && git push --tags   # publish.yml builds the addons first, then the six packages
+pnpm run release:finish             # regenerate the lockfile, then re-run the gate CI runs
+git add -A && git commit -m "chore: 补上平台包在 lockfile 里的记录"
+```
+
+`pnpm run check:versions` is that gate. It compares the six package versions, the five addon
+manifests, their `optionalDependencies` pins, the lockfile's recorded specifiers and the
+`minimumReleaseAgeExclude` list — and fails *before* anything is published rather than halfway
+through a release. Both `ci.yml` and `publish.yml` run it first.
+
 ## License
 
 [MIT](LICENSE)
