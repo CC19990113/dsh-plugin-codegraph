@@ -145,27 +145,39 @@ function run<R extends CodegraphRequest>(
   request: R,
 ): CodegraphResultFor<R> {
   const db = pool.acquire(request.projectRoot)
-  switch (request.operation) {
-    case 'search':
-      return search(db, request) as CodegraphResultFor<R>
-    case 'node':
-      return node(db, request) as CodegraphResultFor<R>
-    case 'callers':
-    case 'callees':
-      return relations(db, request) as CodegraphResultFor<R>
-    case 'impact':
-      return impact(db, request, (origin, depth) =>
-        walkImpact(db, origin, depth, config.maxTraversalNodes)) as CodegraphResultFor<R>
-    case 'trace':
-      return trace(db, request, (from, to, maxDepth, maxPaths) =>
-        walkTrace(db, from, to, maxDepth, maxPaths, config.maxTraversalNodes)) as CodegraphResultFor<R>
-    case 'files':
-      return files(db, request) as CodegraphResultFor<R>
-    case 'status':
-      return status(db, request.projectRoot, config.maxStalenessChecks) as CodegraphResultFor<R>
-    /* v8 ignore next -- exhaustive over the seam's closed operation union; unreachable. */
-    default:
-      return assertNever(request, 'codegraph-sqlite request')
+  try {
+    switch (request.operation) {
+      case 'search':
+        return search(db, request) as CodegraphResultFor<R>
+      case 'node':
+        return node(db, request) as CodegraphResultFor<R>
+      case 'callers':
+      case 'callees':
+        return relations(db, request) as CodegraphResultFor<R>
+      case 'impact':
+        return impact(db, request, (origin, depth) =>
+          walkImpact(db, origin, depth, config.maxTraversalNodes)) as CodegraphResultFor<R>
+      case 'trace':
+        return trace(db, request, (from, to, maxDepth, maxPaths) =>
+          walkTrace(db, from, to, maxDepth, maxPaths, config.maxTraversalNodes)) as CodegraphResultFor<R>
+      case 'files':
+        return files(db, request) as CodegraphResultFor<R>
+      case 'status':
+        return status(db, request.projectRoot, config.maxStalenessChecks) as CodegraphResultFor<R>
+      /* v8 ignore next -- exhaustive over the seam's closed operation union; unreachable. */
+      default:
+        return assertNever(request, 'codegraph-sqlite request')
+    }
+  } finally {
+    // Every operation above is synchronous, so the connection goes back the moment the
+    // answer exists. That is what fixes the Windows EPERM: the writer may only replace
+    // the file when nobody has it open.
+    try {
+      db.close()
+    } catch {
+      // already closed
+    }
+    pool.forget(request.projectRoot)
   }
 }
 
