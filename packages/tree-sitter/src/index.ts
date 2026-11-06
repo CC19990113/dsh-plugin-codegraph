@@ -110,8 +110,26 @@ export const DEFAULT_INDEXER_ID = 'codegraph-tree-sitter'
  * Directory segments never descended into by default. Includes this package's own `.codegraph`
  * output — without it, a watcher would treat its own `writeGraph()` as an in-scope change and
  * rebuild forever.
+ *
+ * `target` is here for a reason that cost real file descriptors to learn: this plugin is developed
+ * in its own repository, and `crates/indexer-rust/target/` holds thousands of cargo artefacts
+ * across ~1000 directories. Without the exclusion the walk descends into every one of them, and on
+ * macOS each watched file pins a descriptor — a single workspace accumulated 9.7k open handles,
+ * which is what makes a host's `spawn()` fail with `EBADF` long before any real limit is reached.
+ * `.scratch` and `vendor` cover the same shape of accident for working copies and dependency
+ * checkouts.
  */
-export const DEFAULT_EXCLUDE = ['node_modules', 'dist', 'build', 'coverage', '.git', '.codegraph']
+export const DEFAULT_EXCLUDE = [
+  'node_modules',
+  'dist',
+  'build',
+  'coverage',
+  '.git',
+  '.codegraph',
+  'target',
+  '.scratch',
+  'vendor',
+]
 
 /** Default ceiling on a single file's size before it is skipped. */
 export const DEFAULT_MAX_FILE_BYTES = 2_000_000

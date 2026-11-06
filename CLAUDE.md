@@ -89,4 +89,5 @@ Six packages under `packages/*`, split along a strict seam so that adding a new 
 
 ### Known gaps
 
-- The default exclude list for the tree-sitter indexer is `node_modules`/`dist`/`build`/`coverage`/`.git` plus whatever the project's own `.gitignore` says; it does not hardcode `lib`, relying on `.gitignore` to catch TypeScript build output there.
+- The default exclude list for the tree-sitter indexer is `node_modules`/`dist`/`build`/`coverage`/`.git`/`.codegraph`/`target`/`.scratch`/`vendor` plus whatever the project's own `.gitignore` says; it does not hardcode `lib`, relying on `.gitignore` to catch TypeScript build output there.
+- The `target` entry is load-bearing, not cosmetic, because two facts compose: `loadGitignore` reads only the **root** `.gitignore` (`gitignore.ts`), so a crate-level file such as `crates/indexer-rust/.gitignore` (`target/`) never reaches the walk — and `watcher.ts` opens one watch per directory, so descending into a 795-directory cargo tree pins a descriptor per directory, which on macOS is what made `spawn()` fail with `EBADF`. Same reason `.scratch` and `vendor` are listed: a working copy or a dependency checkout that has no root `.gitignore` entry would otherwise be walked and watched.

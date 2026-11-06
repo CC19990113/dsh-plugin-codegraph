@@ -101,7 +101,11 @@ window.__ModuleLoader__.load({
       try {
         if (typeof localStorage === "undefined") return "";
         const value = localStorage.getItem(STORAGE_KEY);
-        return typeof value === "string" ? value : "";
+        if (typeof value !== "string") return "";
+        // Only an absolute path can name a workspace. An earlier build stored whatever had been
+        // typed, so a profile that once held a relative path (e.g. a folder name) would open this tab
+        // on a red "root 必须是一个存在的绝对路径" before the user had touched anything.
+        return value.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(value) ? value : "";
       } catch (err) {
         return "";
       }

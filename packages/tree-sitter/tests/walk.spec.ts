@@ -5,6 +5,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import { writeParseCache } from '../src/cache.ts'
 import type { ParseCacheFileSystem } from '../src/cache.ts'
+import { DEFAULT_EXCLUDE } from '../src/index.ts'
 import { walkAndExtract } from '../src/walk.ts'
 import type { WalkResult } from '../src/walk.ts'
 import { installRustEngineForTests } from '../src/rust-engine.ts'
@@ -51,6 +52,27 @@ describe('walkAndExtract', () => {
     const { files, filesSkipped } = await walkAndExtract(root, BASE, fs)
     expect(files.map(file => file.path).sort()).toEqual(['src/main.ts'])
     expect(filesSkipped).toBe(0)
+  })
+
+  it('skips a cargo target tree and a working copy under the default exclude list', async () => {
+    // `target` is the entry that keeps a descriptor per directory from being pinned: watcher.ts opens
+    // one watch per visited directory, and a root `.gitignore` is the only one consulted, so a crate
+    // level `target/` never reaches the walk.
+    const root = await writeProject({
+      'src/main.ts': 'export function foo() {}\n',
+      'crates/x/target/debug/build.rs': 'fn built() {}\n',
+      '.scratch/notes.ts': 'export function scratch() {}\n',
+      'vendor/dep.ts': 'export function vendored() {}\n',
+    })
+    const { files } = await walkAndExtract(root, { ...BASE, exclude: DEFAULT_EXCLUDE }, fs)
+    expect(files.map(file => file.path)).toEqual(['src/main.ts'])
+  })
+
+  it('names the build and working-copy directories in the default exclude list', () => {
+    // A default nobody asserts is a default that can be dropped by an unrelated edit.
+    for (const name of ['node_modules', 'dist', 'build', 'coverage', '.git', '.codegraph', 'target', '.scratch', 'vendor']) {
+      expect(DEFAULT_EXCLUDE).toContain(name)
+    }
   })
 
   it('skips a file over maxFileBytes and counts it', async () => {
