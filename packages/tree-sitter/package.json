@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph-tree-sitter",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Self-built code-graph indexer for DeepSeek Harness — parses a workspace with web-tree-sitter and writes schema version 4 to .codegraph/codegraph.db, the same on-disk format the codegraph CLI writes, so no external indexer is required",
   "keywords": [
     "dsh",
@@ -59,11 +59,11 @@
     "@deepseek-ai/dsh-invariants": ">=0.1.0-rc.6"
   },
   "optionalDependencies": {
-    "dsh-plugin-codegraph-indexer-darwin-arm64": "0.6.2",
-    "dsh-plugin-codegraph-indexer-darwin-x64": "0.6.2",
-    "dsh-plugin-codegraph-indexer-linux-x64-gnu": "0.6.2",
-    "dsh-plugin-codegraph-indexer-linux-arm64-gnu": "0.6.2",
-    "dsh-plugin-codegraph-indexer-win32-x64-msvc": "0.6.2"
+    "dsh-plugin-codegraph-indexer-darwin-arm64": "0.6.3",
+    "dsh-plugin-codegraph-indexer-darwin-x64": "0.6.3",
+    "dsh-plugin-codegraph-indexer-linux-x64-gnu": "0.6.3",
+    "dsh-plugin-codegraph-indexer-linux-arm64-gnu": "0.6.3",
+    "dsh-plugin-codegraph-indexer-win32-x64-msvc": "0.6.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

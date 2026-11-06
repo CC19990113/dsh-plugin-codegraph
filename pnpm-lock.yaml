@@ -158,22 +158,6 @@ importers:
       '@deepseek-ai/dsh-invariants':
         specifier: 0.1.0-rc.6
         version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)
-    optionalDependencies:
-      dsh-plugin-codegraph-indexer-darwin-arm64:
-        specifier: 0.6.2
-        version: 0.6.2
-      dsh-plugin-codegraph-indexer-darwin-x64:
-        specifier: 0.6.2
-        version: 0.6.2
-      dsh-plugin-codegraph-indexer-linux-arm64-gnu:
-        specifier: 0.6.2
-        version: 0.6.2
-      dsh-plugin-codegraph-indexer-linux-x64-gnu:
-        specifier: 0.6.2
-        version: 0.6.2
-      dsh-plugin-codegraph-indexer-win32-x64-msvc:
-        specifier: 0.6.2
-        version: 0.6.2
 
 packages:
 
@@ -626,31 +610,6 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
-
-  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.2:
-    resolution: {integrity: sha512-fn73iACS7SQPbAkF2+z6cLlVd4pRiZ8mmUBXVAbH7PMT+jt7/WBlZyEXEUJ9523YqeQwb077cdVQXYC9gCBshw==}
-    cpu: [arm64]
-    os: [darwin]
-
-  dsh-plugin-codegraph-indexer-darwin-x64@0.6.2:
-    resolution: {integrity: sha512-YmN/gTqswX7JfgXIIjxtFm6Gfsw5HRDbNs9d2N13Ld3gMtgx1OJUUcjBGYglIHreSbenciPZ3MRPKgm6OG2cSg==}
-    cpu: [x64]
-    os: [darwin]
-
-  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.2:
-    resolution: {integrity: sha512-OBkSoLzStCuD6rilAE+tgeUCVKh+VXTeKhaXOAIvD5dJTphwO2X47ZpFDrPDLeh+zGO0bCZdAQm4WBss9BABHw==}
-    cpu: [arm64]
-    os: [linux]
-
-  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.2:
-    resolution: {integrity: sha512-3CIZrtEGLpIPdXI4m0PVqPhjv9nC1GdCNCGHLdoh3wLf2p8H1GmyMFgkDH0/IScIbIW53NLwnqb97AD3caZQOQ==}
-    cpu: [x64]
-    os: [linux]
-
-  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.2:
-    resolution: {integrity: sha512-VM8UeMCiHrLPNfFTVj7L2M6SQRPLnVdaqHcgcrJJRyi2rS5iLieBuMF2eRBPcsklewksCfkxEJme94OWGsrWEA==}
-    cpu: [x64]
-    os: [win32]
 
   es-module-lexer@2.3.1:
     resolution: {integrity: sha512-shc1dbU90Yl/xq1QrC7QRtfcwURZuVRfPhZbDoldJ1cn1gzDvBaBWlv0eFolj5+0znnPJz5TXLxsN77X/12KTA==}
@@ -1350,21 +1309,6 @@ snapshots:
       ms: 2.1.3
 
   detect-libc@2.1.2: {}
-
-  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.2:
-    optional: true
-
-  dsh-plugin-codegraph-indexer-darwin-x64@0.6.2:
-    optional: true
-
-  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.2:
-    optional: true
-
-  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.2:
-    optional: true
-
-  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.2:
-    optional: true
 
   es-module-lexer@2.3.1: {}
 
