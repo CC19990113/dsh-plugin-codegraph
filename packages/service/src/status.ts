@@ -65,3 +65,37 @@ export interface IndexFailureFile {
   /** Which path started the run, so a reader can tell a background refresh from an explicit build. */
   readonly source: 'auto' | 'tool' | 'watch'
 }
+
+/**
+ * Path of the watch-state sidecar, relative to a project root.
+ *
+ * A third file rather than a field on {@link INDEX_STATUS_RELATIVE_PATH}, because the two are written
+ * by different owners at different times. The status sidecar is written by an indexing run, after the
+ * graph rename, and only ever describes a graph that exists; a watcher degrading happens *after* that
+ * run has finished, in the session that follows it. Putting the degradation into the status file would
+ * mean a non-indexing writer racing the indexer's atomic replaces, and would make a file whose whole
+ * contract is "everything here came from one run that wrote the graph" carry a fact from outside it.
+ * This file exists so the watcher's state has an owner of its own, under the same atomic-write rule.
+ */
+export const INDEX_WATCH_STATE_RELATIVE_PATH = '.codegraph/watch-state.json'
+
+/**
+ * Whether live watching is running for a workspace, as last reported by the process that tried.
+ *
+ * `watching: false` is the important state, and the one that had nowhere to go before: a watcher that
+ * degraded only ever wrote a `console.error`, so a workspace whose auto-rebuild never worked looked
+ * exactly like one where it did. This record is read by the same synchronous prompt-side reader as the
+ * status sidecar, and by `status`, so the degradation reaches the user instead of a log.
+ *
+ * The record is replaced on every state change, not appended: the last report wins. A process restart
+ * that arms the watcher again writes `watching: true` over it, which is what keeps a stale reason from
+ * outliving the condition that produced it.
+ */
+export interface IndexWatchStateFile {
+  /** Whether watching is running. `false` means the watcher degraded and nothing refreshes on its own. */
+  readonly watching: boolean
+  /** Why watching degraded, when it did — the watcher's own `DegradeReason.code`. */
+  readonly code?: string
+  /** Epoch milliseconds this state was recorded. */
+  readonly at: number
+}

@@ -57,6 +57,22 @@ function failureLine(failure: { message: string; source: string }): string {
 }
 
 /**
+ * One line saying automatic rebuilding is off, for a `status` answer that would otherwise read as a
+ * healthy index.
+ *
+ * The reason is quoted, not paraphrased: `WATCH_COST_EXCEEDED` and `WATCH_LIMIT_EXCEEDED` name
+ * different budgets, and a caller deciding whether to raise one needs the one that actually tripped.
+ * @param watch - the degradation record the tool read off disk.
+ * @returns the rendered line.
+ */
+function watchLine(watch: { readonly code?: string; readonly at: number }): string {
+  const reason = watch.code === undefined ? '' : ` (${watch.code})`
+  const at = new Date(watch.at).toISOString()
+  return `Live rebuilding is NOT running${reason}: watching degraded at ${at}. Edits will not refresh `
+    + 'the graph on their own — run codegraph_index after changes.'
+}
+
+/**
  * Render one result as the text the model reads.
  * @param value - the canonical value the operation returned.
  * @returns the rendered text.
@@ -136,9 +152,10 @@ export function renderCodegraph(value: CodegraphToolValue): string {
     }
     case 'status': {
       const failure = value.last_failure === undefined ? undefined : failureLine(value.last_failure)
+      const watch = value.watch === undefined ? undefined : watchLine(value.watch)
       if (!value.indexed) {
         const missing = `No index for \`${value.project_path}\`. Run codegraph_index to build one.`
-        return failure === undefined ? missing : `${missing}\n${failure}`
+        return [missing, failure, watch].filter(line => line !== undefined).join('\n')
       }
       const languages = (value.languages ?? []).map(entry => `${entry.language} ${entry.file_count}`).join(', ')
       const indexedAt = value.indexed_at
@@ -150,6 +167,10 @@ export function renderCodegraph(value: CodegraphToolValue): string {
         `Last indexed: ${indexed}.`,
       ]
       if (failure !== undefined) lines.push(failure)
+      // Appended, not substituted: "the graph is here and nothing refreshes it" is one more fact
+      // about this workspace, and dropping the size/freshness lines for it would hide what the
+      // caller asked for.
+      if (watch !== undefined) lines.push(watch)
       const stale = value.stale_file_count
       // Undefined only when a caller builds a partial value directly (as some tests do); the tool's
       // own `status` handler always sets this alongside `indexed: true`.

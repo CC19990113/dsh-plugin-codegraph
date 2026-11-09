@@ -116,6 +116,9 @@ function watchConfig(overrides: Partial<WatchConfig> = {}): WatchConfig {
     respectGitignore: false,
     debounceMs: 100,
     maxWatchedDirectories: 10,
+    // Generous on purpose: a test that cares about the entry budget sets its own, and a test that
+    // does not must never be degraded by the fixture's own default.
+    maxWatchedEntries: 10_000,
     sync: () => Promise.resolve({ filesChanged: 0, durationMs: 0 }),
     ...overrides,
   }
@@ -483,6 +486,90 @@ describe('createWatcher over the filesystem seam', () => {
     expect(onDegraded).not.toHaveBeenCalled()
     expect(watcher.isDegraded()).toBe(false)
     expect(watchedPaths(fake)).toEqual(['/repo', '/repo/src', '/repo/src/nested'])
+  })
+
+  it('degrades before installing a single watch when the entry budget is exceeded', async () => {
+    // `repoListing` is 3 directories and 3 direct files: 6 watches, which is the real cost of a
+    // `depth: 0` watch per directory. The directory cap (10) is deliberately left clear, because the
+    // whole point of the second budget is a tree whose directories fit and whose watches do not.
+    const fake = makeFakeFs({ listing: repoListing() })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedDirectories: 10, maxWatchedEntries: 5, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(onDegraded).toHaveBeenCalledTimes(1)
+    expect(onDegraded).toHaveBeenCalledWith({ code: 'WATCH_COST_EXCEEDED' })
+    expect(watcher.isDegraded()).toBe(true)
+    expect(fake.watches).toEqual([])
+  })
+
+  it('arms a tree whose directories and direct files exactly fill the entry budget', async () => {
+    // The budget is inclusive for the same reason the directory cap is: exactly the cap is allowed.
+    const fake = makeFakeFs({ listing: repoListing() })
+    const onDegraded = vi.fn()
+    const onWatching = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedEntries: 6, onDegraded, onWatching }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(onDegraded).not.toHaveBeenCalled()
+    expect(watcher.isDegraded()).toBe(false)
+    expect(onWatching).toHaveBeenCalledTimes(1)
+    expect(watchedPaths(fake)).toEqual(['/repo', '/repo/src', '/repo/src/nested'])
+  })
+
+  it('does not count or watch an entry that is neither a file nor a directory', async () => {
+    // A socket or device node has no watch to open and no file to count; the budget is 1 directory +
+    // 1 file = 2, so counting the third entry would degrade a tree that fits.
+    const listing: Listing = { '/repo': { sock: { type: 'other' }, 'a.ts': file('a1') } }
+    const fake = makeFakeFs({ listing })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedEntries: 2, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(onDegraded).not.toHaveBeenCalled()
+    expect(watcher.isDegraded()).toBe(false)
+  })
+
+  it('degrades when a new direct file pushes the live watcher past the entry budget', async () => {
+    // Directories are bounded by their own cap while running; files are not, and a `depth: 0` watch
+    // opens one per file. Without this check a session could sit under the directory cap and still
+    // accumulate file watches without limit.
+    const listing: Listing = { '/repo': { 'a.ts': file('a1') } }
+    const fake = makeFakeFs({ listing })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedEntries: 2, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(watcher.isDegraded()).toBe(false)
+
+    listing['/repo'] = { 'a.ts': file('a1'), 'b.ts': file('b1') }
+    fake.watches[0]!.emit()
+    await settle()
+    expect(onDegraded).toHaveBeenCalledWith({ code: 'WATCH_COST_EXCEEDED' })
+    expect(watcher.isDegraded()).toBe(true)
+  })
+
+  it('frees the entry budget again when a direct file disappears', async () => {
+    // The re-listing adjusts the count by the delta: a directory's files must not be counted twice,
+    // or every ordinary re-listing would walk the budget upward until it degraded for no reason.
+    const listing: Listing = { '/repo': { 'a.ts': file('a1'), 'b.ts': file('b1') } }
+    const fake = makeFakeFs({ listing })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedEntries: 3, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(watcher.isDegraded()).toBe(false)
+
+    listing['/repo'] = { 'a.ts': file('a1') }
+    fake.watches[0]!.emit()
+    await settle()
+    expect(watcher.isDegraded()).toBe(false)
+
+    listing['/repo'] = { 'a.ts': file('a1'), 'b.ts': file('b1') }
+    fake.watches[0]!.emit()
+    await settle()
+    expect(onDegraded).not.toHaveBeenCalled()
+    expect(watcher.isDegraded()).toBe(false)
   })
 
   it('degrades when the tree grows past the cap while the watcher is already running', async () => {

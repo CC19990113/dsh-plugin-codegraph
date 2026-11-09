@@ -349,6 +349,25 @@ describe('result rendering', () => {
       .toBe('No index for `/repo`. Run codegraph_index to build one.')
   })
 
+  it('renders a degraded watcher in both status shapes, quoting the reason', () => {
+    const watch = { degraded: true as const, code: 'WATCH_COST_EXCEEDED', at: Date.UTC(2026, 10, 3, 2, 5) }
+    // A graph that exists and nothing refreshing it is one more fact about the answer, not a
+    // replacement for the size and freshness lines the caller asked for.
+    expect(renderCodegraph({
+      ...base, operation: 'status', indexed: true, file_count: 1, symbol_count: 1, edge_count: 0,
+      format_version: 4, indexed_at: 0, languages: [], watch,
+    })).toContain('Live rebuilding is NOT running (WATCH_COST_EXCEEDED): watching degraded at 2026-11-03T02:05:00.000Z.')
+
+    // "No index" and "no watcher" can both be true; the caller needs both sentences.
+    expect(renderCodegraph({ ...base, operation: 'status', indexed: false, watch }))
+      .toContain('Live rebuilding is NOT running (WATCH_COST_EXCEEDED)')
+
+    // A record without a code still says the half that matters.
+    expect(renderCodegraph({
+      ...base, operation: 'status', indexed: false, watch: { degraded: true as const, at: 0 },
+    })).toContain('Live rebuilding is NOT running: watching degraded')
+  })
+
   it('names the last failure in both status shapes, clipping a long reason', () => {
     const failure = { failed_at: 1, message: 'UNIQUE constraint failed: nodes.id', source: 'auto' }
     expect(renderCodegraph({ ...base, operation: 'status', indexed: false, last_failure: failure }))
@@ -747,6 +766,33 @@ describe('the tool plugin', () => {
       project_path: root,
       indexed: true,
       last_failure: { failed_at: 7, message: 'watch rebuild failed', source: 'watch' },
+    })
+  })
+
+  it('reports a degraded watcher in `status` and stays quiet while watching runs', async () => {
+    const root = await workspace({
+      '.codegraph/watch-state.json': JSON.stringify({ watching: false, code: 'WATCH_COST_EXCEEDED', at: 1_700_000_000_000 }),
+    })
+    const ctx = await mount(root)
+    const owner = agent(ctx, root)
+    const degraded = await call(ctx, owner, { operation: 'status' }, 'watch-degraded')
+    expect(degraded.isError ? undefined : degraded.value).toMatchObject({
+      operation: 'status',
+      project_path: root,
+      watch: { degraded: true, code: 'WATCH_COST_EXCEEDED', at: 1_700_000_000_000 },
+    })
+
+    // Once watching is running the field disappears rather than turning into `degraded: false`:
+    // "watching is on" is what every caller already assumes, and only the exception is worth bytes.
+    await writeFile(join(root, '.codegraph/watch-state.json'), JSON.stringify({ watching: true, at: 1_700_000_000_001 }))
+    const running = await call(ctx, owner, { operation: 'status' }, 'watch-running')
+    expect(running.isError ? undefined : running.value).not.toHaveProperty('watch')
+
+    // A record without a reason still reports the degradation; only the quoted code is missing.
+    await writeFile(join(root, '.codegraph/watch-state.json'), JSON.stringify({ watching: false, at: 1_700_000_000_002 }))
+    const bare = await call(ctx, owner, { operation: 'status' }, 'watch-bare')
+    expect(bare.isError ? undefined : bare.value).toMatchObject({
+      watch: { degraded: true, at: 1_700_000_000_002 },
     })
   })
 

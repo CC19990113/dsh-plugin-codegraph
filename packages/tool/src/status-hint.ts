@@ -13,8 +13,12 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { INDEX_FAILURE_RELATIVE_PATH, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
-import type { IndexFailureFile, IndexStatusFile } from 'dsh-plugin-codegraph-service'
+import {
+  INDEX_FAILURE_RELATIVE_PATH,
+  INDEX_STATUS_RELATIVE_PATH,
+  INDEX_WATCH_STATE_RELATIVE_PATH,
+} from 'dsh-plugin-codegraph-service'
+import type { IndexFailureFile, IndexStatusFile, IndexWatchStateFile } from 'dsh-plugin-codegraph-service'
 
 /** Path of the graph itself, relative to a project root — used only to tell "never indexed" apart. */
 const GRAPH_RELATIVE_PATH = '.codegraph/codegraph.db'
@@ -105,11 +109,63 @@ export function formatIndexedAt(indexedAt: number): string {
 }
 
 /**
+ * Whether live watching is running for a workspace, as the watcher last reported it.
+ *
+ * The degradation this reads used to exist only as a `console.error`, so a workspace whose automatic
+ * rebuild had never once succeeded was indistinguishable from one where it worked — the user believed
+ * watching was on. A synchronous read for the same reason as the status sidecar: a prompt section is
+ * assembled on every request, and a degradation notice is worth a few hundred bytes of JSON, not a
+ * tool round-trip. An absent file means "nothing recorded", which is not the same as "degraded".
+ * @param projectRoot - absolute workspace root.
+ * @returns the recorded state, or `undefined` when the file is absent, unreadable, or not shaped like
+ *   one — every one of which renders as the weaker "no degradation recorded".
+ */
+export function readWatchState(projectRoot: string): IndexWatchStateFile | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(join(projectRoot, INDEX_WATCH_STATE_RELATIVE_PATH), 'utf8'))
+  } catch {
+    // Absent, unreadable, or not JSON. A prompt line must never fail an assembly over a hint.
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const record = parsed as Record<string, unknown>
+  const at = numberField(record, 'at')
+  if (typeof record['watching'] !== 'boolean' || at === undefined) return undefined
+  // A `code` that is present but not text is a record this reader cannot trust; it still knows the
+  // boolean half, so the degradation is still reported, just without a reason to quote.
+  return typeof record['code'] === 'string'
+    ? { watching: record['watching'], code: record['code'], at }
+    : { watching: record['watching'], at }
+}
+
+/**
+ * One sentence saying automatic rebuilding is off, or `''` when it is running (or never recorded).
+ *
+ * A prompt line, not an error: the model reads it before deciding whether a `codegraph_index` call is
+ * needed, which is exactly the decision a silently degraded watcher used to hide.
+ * @param projectRoot - absolute workspace root.
+ * @returns the degradation sentence, or an empty string when there is nothing to warn about.
+ */
+export function watchStateHint(projectRoot: string): string {
+  const state = readWatchState(projectRoot)
+  if (state === undefined || state.watching) return ''
+  // The two caps report different codes, so the reason is quoted rather than paraphrased — a caller
+  // raising one budget does not want to learn it raised the wrong one from a sentence this file made
+  // up. A record without a code still says the half that matters.
+  const reason = state.code === undefined ? '' : ` Reasons code: ${state.code}.`
+  return `Live rebuilding is NOT running for ${projectRoot}: watching stopped, so edits will not refresh the `
+    + `graph on their own — run codegraph_index after changes.${reason}`
+}
+
+/**
  * The state of one workspace's index, phrased for a system prompt.
  *
  * Three outcomes, deliberately distinguished: a full summary, an index that exists without a summary
  * (built by an older run or another indexer), and no index at all. Collapsing the middle case into
- * "no index" would invite a rebuild of a graph that is already there.
+ * "no index" would invite a rebuild of a graph that is already there. A recorded watcher degradation
+ * is appended to whichever of the three it is: "the graph exists but nothing refreshes it" is a fact
+ * about this workspace, not a replacement for what the graph contains.
  * @param projectRoot - the session's workspace root, when it has one.
  * @returns one sentence naming the state, or the reason no state can be named.
  */
@@ -117,6 +173,17 @@ export function indexStatusHint(projectRoot: string | undefined): string {
   if (projectRoot === undefined) {
     return 'This session has no workspace bound, so codegraph needs an explicit project_path on every call.'
   }
+  const warning = watchStateHint(projectRoot)
+  const summary = indexStatusSummary(projectRoot)
+  return warning === '' ? summary : `${summary}\n\n${warning}`
+}
+
+/**
+ * The index half of {@link indexStatusHint}: what the sidecar says about the graph itself.
+ * @param projectRoot - absolute workspace root.
+ * @returns the sentence naming the graph's state.
+ */
+function indexStatusSummary(projectRoot: string): string {
   const status = readIndexStatus(projectRoot)
   if (status !== undefined) {
     const skipped = status.filesMinified === 0 ? '' : ` ${status.filesMinified} generated files were left out.`

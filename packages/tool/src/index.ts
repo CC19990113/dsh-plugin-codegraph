@@ -38,7 +38,7 @@ import { CODEGRAPH_INDEX_PARAMETERS, CODEGRAPH_OUTPUT_SCHEMA, CODEGRAPH_PARAMETE
 import type { CodegraphIndexToolArgs, CodegraphToolArgs, CodegraphToolValue, CodegraphValueFor } from './schema.ts'
 import { readSlice } from './source.ts'
 import type { SourceLimits } from './source.ts'
-import { agentIdOf, indexStatusHint, readIndexFailureFile, readIndexStatus, workspaceOf } from './status-hint.ts'
+import { agentIdOf, indexStatusHint, readIndexFailureFile, readIndexStatus, readWatchState, workspaceOf } from './status-hint.ts'
 import { createStructureHintState, noteStructureToolUse, registerStructureHint } from './structure-hint.ts'
 import { commandRunHint } from './command-log.ts'
 import { createUpdateChecker, defaultStateFile, DEFAULT_UPDATE_CHECK_INTERVAL_MS, readOwnVersion } from './version-check.ts'
@@ -72,7 +72,7 @@ export type {
 export { toAffected, toHop, toRelation, toSymbol } from './projection.ts'
 export { renderCodegraph } from './render.ts'
 export { readSlice } from './source.ts'
-export { formatIndexedAt, indexStatusHint, readIndexStatus, workspaceOf } from './status-hint.ts'
+export { formatIndexedAt, indexStatusHint, readIndexStatus, readWatchState, watchStateHint, workspaceOf } from './status-hint.ts'
 export { clearCommandRuns, commandRunHint, COMMAND_LOG_WINDOW_MS, recentCommandRun, recordCommandRun } from './command-log.ts'
 
 /** Cordis plugin name for loader diagnostics. */
@@ -589,6 +589,24 @@ function readIndexFailure(root: string): CodegraphValueFor<'status'>['last_failu
 }
 
 /**
+ * The watcher's recorded state, converted to the `status` answer's snake_case shape.
+ *
+ * Reported only when watching is off. "Watching is on" is what every caller assumes; "watching
+ * stopped" is the fact that used to exist nowhere but `console.error`, and it is the one that changes
+ * what a caller should do after an edit. The reader lives in `status-hint.ts` because the prompt line
+ * owes the same warning.
+ * @param root - absolute project root.
+ * @returns the degradation in the tool's shape, or undefined when nothing degraded.
+ */
+function readWatchStateField(root: string): CodegraphValueFor<'status'>['watch'] {
+  const record = readWatchState(root)
+  if (record === undefined || record.watching) return undefined
+  return record.code === undefined
+    ? { degraded: true, at: record.at }
+    : { degraded: true, code: record.code, at: record.at }
+}
+
+/**
  * The canonical value for a finished indexing run.
  * @param root - the indexed project root, as reported to the model.
  * @param report - the indexer's report.
@@ -830,11 +848,15 @@ async function run(
     case 'status': {
       const available = await ctx.codegraph.available(root, signal)
       // Read before branching, so the answer explains itself in both states: no index at all, and an
-      // index whose newest refresh failed.
+      // index whose newest refresh failed. The watcher's state is read here for the same reason — a
+      // graph can be present and still never refresh, and that is exactly the case a caller cannot
+      // otherwise tell apart from a healthy workspace.
       const failure = readIndexFailure(root)
       const lastFailure = failure === undefined ? {} : { last_failure: failure }
+      const watch = readWatchStateField(root)
+      const watchState = watch === undefined ? {} : { watch }
       if (!available) {
-        return { operation: 'status', project_path: root, indexed: false, ...lastFailure }
+        return { operation: 'status', project_path: root, indexed: false, ...lastFailure, ...watchState }
       }
       const result = await ctx.codegraph.query({ operation: 'status', projectRoot: root }, signal)
       return {
@@ -853,6 +875,7 @@ async function run(
         stale_file_count: result.staleFileCount,
         stale_file_count_truncated: result.staleFileCountTruncated,
         ...lastFailure,
+        ...watchState,
       }
     }
     case 'explore': {

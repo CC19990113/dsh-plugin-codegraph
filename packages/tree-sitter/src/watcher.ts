@@ -28,9 +28,12 @@
  * permanent degradation, and a watch whose initialization finishes after its watcher was stopped is
  * closed immediately instead of being adopted — a late init can never leak a live watch. A
  * generation counter invalidates every in-flight async step of a previous start(), so a restart
- * cannot inherit state from the session it replaced. {@link WatchConfig.maxWatchedDirectories}
- * bounds the number of open watches, and reaching it degrades the whole watcher rather than silently
- * covering only part of the tree.
+ * cannot inherit state from the session it replaced. Two caps bound the watches a root may open:
+ * {@link WatchConfig.maxWatchedDirectories} on directory count and
+ * {@link WatchConfig.maxWatchedEntries} on the entries a `depth: 0` watch really costs (`1` per
+ * directory plus `1` per direct file). Either one exceeded degrades the whole watcher rather than
+ * silently covering only part of the tree, and the two report different codes so a caller can tell
+ * which budget ran out.
  * @module dsh-plugin-codegraph-tree-sitter/watcher
  */
 
@@ -107,6 +110,15 @@ export interface WatchFileSystem {
 export type DegradeReason =
   | { readonly code: 'RESOURCE_EXHAUSTED'; readonly cause: NodeJS.ErrnoException }
   | { readonly code: 'WATCH_LIMIT_EXCEEDED' }
+  /**
+   * The directory count stayed under its cap, but `directories + files` passed
+   * {@link WatchConfig.maxWatchedEntries}.
+   *
+   * Its own code rather than a reuse of `WATCH_LIMIT_EXCEEDED`: the two caps answer different
+   * questions ("too deep" vs "too many direct entries"), and a caller told only that a limit was hit
+   * cannot tell which knob to raise.
+   */
+  | { readonly code: 'WATCH_COST_EXCEEDED' }
   | { readonly code: 'WATCH_UNAVAILABLE'; readonly cause: unknown }
   | { readonly code: 'SYNC_FAILURE_LIMIT'; readonly cause: unknown }
 
@@ -129,6 +141,15 @@ export interface WatchConfig {
   /** Hard cap on directories watched individually; exceeding it degrades the watcher. */
   readonly maxWatchedDirectories: number
   /**
+   * Hard cap on `directories + the direct files in them` — every OS watch the arm pass would open.
+   *
+   * Kept apart from {@link maxWatchedDirectories} rather than folded into it because that one is a
+   * documented, already-shipped setting whose meaning ("how many directories") callers may rely on.
+   * The two are checked independently and whichever trips first degrades; a tree with few deep
+   * directories and many flat files is bounded by this one, a deep tree with few files by the other.
+   */
+  readonly maxWatchedEntries: number
+  /**
    * Run one reindex. `paths` are the project-relative paths of the direct entries whose change the
    * per-directory watch could attribute; this version's caller always ignores them and rebuilds the
    * whole graph.
@@ -136,6 +157,14 @@ export interface WatchConfig {
   readonly sync: (paths?: readonly string[]) => Promise<{ filesChanged: number; durationMs: number }>
   /** Fired once, the first time live watching degrades permanently. */
   readonly onDegraded?: (reason: DegradeReason) => void
+  /**
+   * Fired once, when a start() finished arming the whole tree without degrading.
+   *
+   * The counterpart {@link onDegraded} needs to make a recorded degradation honest: a workspace that
+   * degraded in an earlier process must be able to say "watching again" once it fits, otherwise the
+   * one written reason outlives the condition that produced it.
+   */
+  readonly onWatching?: () => void
 }
 
 /** A running (or stopped) file watcher for one workspace root. */
@@ -172,10 +201,25 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
   let gitignoreRules: readonly GitignoreRule[] = []
   /** Project-relative paths of the directories currently watched. */
   const watchedDirs = new Set<string>()
+  /**
+   * OS watches this instance has installed so far: one per watched directory, plus one per direct
+   * file inside it — the count `maxWatchedEntries` bounds.
+   *
+   * Counted here, at the same points the watches are actually opened, rather than derived from
+   * `watchedDirs`: a directory's cost is not 1 but `1 + its direct files`, and chokidar's `depth: 0`
+   * watch really does open that many. Tracking it lets a directory created mid-session be refused by
+   * the same budget the arm-time pre-check applied to the tree as it was first listed.
+   */
+  let installedEntries = 0
   /** One disposer per live watch, invoked exactly once on teardown. */
   const disposers: (() => Promise<void>)[] = []
   /** The last listing of each watched directory, keyed by project-relative path. */
   const snapshots = new Map<string, Map<string, EntryStamp>>()
+  /**
+   * Direct in-scope file count of each watched directory, so a re-listing can adjust
+   * {@link installedEntries} by the change instead of re-counting the whole tree.
+   */
+  const dirFileCounts = new Map<string, number>()
   const pendingPaths = new Set<string>()
   /** Directories whose change-triggered re-listing is currently in flight. */
   const refreshing = new Set<string>()
@@ -233,6 +277,8 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
     controller = undefined
     for (const dispose of disposers.splice(0)) closeQuietly(dispose)
     watchedDirs.clear()
+    dirFileCounts.clear()
+    installedEntries = 0
     snapshots.clear()
     dirtyDirs.clear()
     // Cleared even though the re-listing that owns this marker still holds it: that work belongs to
@@ -393,6 +439,7 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
     const previous = snapshots.get(relativePath)
     const next = new Map<string, EntryStamp>()
     const changed: string[] = []
+    let files = 0
     for (const entry of entries) {
       const childPath = relativePath === '' ? entry.name : `${relativePath}/${entry.name}`
       const isDirectory = entry.type === 'directory'
@@ -402,12 +449,25 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
       next.set(entry.name, { type: entry.type, version: entry.version, size: entry.size })
       if (previous !== undefined && !sameEntry(previous.get(entry.name), entry)) changed.push(childPath)
       if (isDirectory) await watchDirectory(childPath, entry.target, gen, signal)
+      else if (entry.type === 'file') files += 1
     }
     if (previous !== undefined) {
       for (const name of previous.keys()) {
         if (next.has(name)) continue
         changed.push(relativePath === '' ? name : `${relativePath}/${name}`)
       }
+    }
+    // The directory's own watch was counted where it was installed; its direct files are counted
+    // here, and as a delta against the previous listing — a re-listing must adjust the budget, not
+    // add the same files a second time.
+    installedEntries += files - (dirFileCounts.get(relativePath) ?? 0)
+    dirFileCounts.set(relativePath, files)
+    // A directory or file created after this session started can push the tree past the entry budget
+    // the pre-check cleared; refusing it here is why that budget bounds a live watcher and not only
+    // the tree as it looked at startup.
+    if (installedEntries > config.maxWatchedEntries) {
+      degrade({ code: 'WATCH_COST_EXCEEDED' })
+      return undefined
     }
     // A teardown mid-listing means this snapshot describes a session that no longer exists; keeping
     // it would let the next session diff against stale state.
@@ -516,60 +576,65 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
       return
     }
     disposers.push(dispose)
+    // This directory's own OS watch is the `1` half of `1 + direct files`, counted at the moment the
+    // watch is actually adopted — a backend whose initialization failed never gets here.
+    installedEntries += 1
     await listAndWatchChildren(relativePath, target, gen, signal)
   }
 
   /**
-   * Count the in-scope directories of a root **before** the first watch is opened, stopping one past
-   * the cap.
+   * Count what arming a root would actually cost — its in-scope directories AND the direct files
+   * inside them — before the first watch is opened.
    *
-   * Why this pass exists instead of letting {@link watchDirectory} discover the cap as it recurses:
-   * the host's `ctx.fs.watch` is chokidar with `depth: 0`, and that opens one OS watch for the
-   * directory *plus one more for each of its direct files*. So "install watches until the cap is
-   * reached, then degrade" is not a cheap cap check — measured on `/Users/admin/www`, whose in-scope
-   * tree is 5793 directories across 56 top-level entries, it meant 4000 directory watches and 4873
-   * file watches, a 7012-fd peak, and 43 seconds of ~90% CPU before every one of them was torn down
-   * again. Counting first converts that into one directory-listing pass (same tree: 4001 listings,
-   * 2.4 s, 21 fds peak, nothing to tear down), and the degraded state a caller ends in is the same.
+   * Why the file half is here at all: the host's `ctx.fs.watch` is chokidar with `depth: 0`, and that
+   * opens one OS watch for the directory *plus one more for each of its direct files*. Counting only
+   * directories therefore measures the wrong thing. Measured on this repository (39 directories, 184
+   * direct files) the difference is 39 watches versus 223 — a cap of 4000 directories cleared a tree
+   * that really needed thousands of watches and file descriptors. On `/Users/admin/www` the earlier
+   * directory-only count let a 5795-directory, 15909-file tree get 4000 directory watches and 4873
+   * file watches deep before degrading: a 7012-fd peak and 43 seconds of ~90% CPU, all torn down
+   * again. Counting both, one read-only listing pass, stops that at the pre-check.
    *
    * The walk mirrors {@link watchDirectory} exactly — same `isExcluded`, same "an unlistable directory
-   * contributes nothing" rule — so the count is the number of watches the arm pass would install. It
-   * stops at `limit + 1` on purpose: exactly `limit` directories is allowed, only exceeding it
-   * degrades.
+   * contributes nothing" rule — so the counts are what the arm pass would install. Both caps stop the
+   * walk the moment they are exceeded: exactly the cap is allowed, only exceeding it degrades.
    * @param root - the resolved workspace root target.
-   * @param limit - the configured cap on individually watched directories.
+   * @param limits - the configured caps on watched directories and on all watched entries.
    * @param gen - the generation this session runs under.
    * @param signal - cancels the counting.
-   * @returns the number of in-scope directories up to `limit + 1`.
+   * @returns the in-scope directory count and direct-file count, both at most one past their cap.
    */
-  async function countInScopeDirectories(
+  async function countInScopeCost(
     root: WatchTarget,
-    limit: number,
+    limits: { readonly maxDirectories: number; readonly maxEntries: number },
     gen: number,
     signal: AbortSignal,
-  ): Promise<number> {
-    let count = 0
+  ): Promise<{ readonly directories: number; readonly files: number }> {
+    let directories = 0
+    let files = 0
     const pending: { readonly relativePath: string; readonly target: WatchTarget }[] = [
       { relativePath: '', target: root },
     ]
     while (pending.length > 0) {
-      if (!live(gen)) return count
+      if (!live(gen)) return { directories, files }
       // `noUncheckedIndexedAccess` cannot see the length check above; `pop()` on a non-empty stack
       // always yields an element.
       const current = pending.pop()
       /* v8 ignore next -- unreachable for the same reason as the check above. */
       if (current === undefined) break
-      count += 1
-      // One past the cap is all the caller needs to know, and stopping there keeps a workspace that
-      // is orders of magnitude too large from costing a listing of every last directory.
-      if (count > limit) return count
+      directories += 1
+      // Either cap stopping the walk is all the caller needs, and stopping here keeps a workspace
+      // that is orders of magnitude too large from costing a listing of every last directory.
+      if (directories > limits.maxDirectories || directories + files > limits.maxEntries) {
+        return { directories, files }
+      }
       let entries: readonly WatchDirEntry[]
       try {
         entries = await fs.listDir(current.target, signal)
       } catch {
         // A teardown cancels the listing through `signal`; anything else is a directory that vanished
         // or refused enumeration, which the arm pass also leaves unwatched.
-        if (!live(gen)) return count
+        if (!live(gen)) return { directories, files }
         continue
       }
       for (const entry of entries) {
@@ -577,9 +642,10 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
         const isDirectory = entry.type === 'directory'
         if (isExcluded(entry.name, childPath, isDirectory, excluded, gitignoreRules)) continue
         if (isDirectory) pending.push({ relativePath: childPath, target: entry.target })
+        else if (entry.type === 'file') files += 1
       }
     }
-    return count
+    return { directories, files }
   }
 
   /**
@@ -605,9 +671,11 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
    * Arm the whole watch tree for this session: read the exclusion list, resolve the root, refuse a tree
    * that is too large to watch at all, then recurse.
    *
-   * The cap is decided here rather than inside {@link watchDirectory} for the reason
-   * {@link countInScopeDirectories} documents: discovering it while arming pays the full cost of
-   * thousands of OS watches before degrading, and the outcome is "no watches" either way.
+   * Both caps are decided here rather than inside {@link watchDirectory} for the reason
+   * {@link countInScopeCost} documents: discovering one while arming pays the full cost of thousands of
+   * OS watches before degrading, and the outcome is "no watches" either way. The directory cap is
+   * judged first so an over-deep tree keeps the reason it has always had; the entry cap only speaks for
+   * a tree whose directories fit but whose watches do not.
    * @param gen - the generation this session runs under.
    * @param signal - cancels the work.
    */
@@ -616,13 +684,23 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
     if (!live(gen)) return
     const root = await resolveRoot(gen, signal)
     if (root === undefined) return
-    const directories = await countInScopeDirectories(root, config.maxWatchedDirectories, gen, signal)
+    const cost = await countInScopeCost(root, {
+      maxDirectories: config.maxWatchedDirectories,
+      maxEntries: config.maxWatchedEntries,
+    }, gen, signal)
     if (!live(gen)) return
-    if (directories > config.maxWatchedDirectories) {
+    if (cost.directories > config.maxWatchedDirectories) {
       degrade({ code: 'WATCH_LIMIT_EXCEEDED' })
       return
     }
+    if (cost.directories + cost.files > config.maxWatchedEntries) {
+      degrade({ code: 'WATCH_COST_EXCEEDED' })
+      return
+    }
     await watchDirectory('', root, gen, signal)
+    // Only an arm pass that ended undegraded is worth recording as "watching": the counterpart fact is
+    // what lets a caller who saw a degradation from an earlier session clear it.
+    if (live(gen)) config.onWatching?.()
   }
 
   return {

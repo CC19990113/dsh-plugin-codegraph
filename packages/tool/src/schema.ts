@@ -142,6 +142,23 @@ const INDEX_FAILURE = {
   },
 } as const
 
+/**
+ * Whether live rebuilding is running for the workspace, as `status` reports it.
+ *
+ * Present only when the watcher has degraded: "watching is on" is the default a caller already
+ * assumes, while "watching stopped" is the fact it cannot otherwise learn — the watcher writes a
+ * sidecar precisely because this answer used to exist nowhere but a process's stderr.
+ */
+const WATCH_STATE = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    degraded: { type: 'boolean', required: true },
+    code: { type: 'string' },
+    at: { type: 'integer', required: true },
+  },
+} as const
+
 /** Bounds every truncatable member reports, so a capped answer is never read as a complete one. */
 const COUNTS = {
   total: { type: 'integer', required: true },
@@ -224,6 +241,7 @@ export const CODEGRAPH_OUTPUT_SCHEMA = {
       stale_file_count: { type: 'integer' },
       stale_file_count_truncated: { type: 'boolean' },
       last_failure: INDEX_FAILURE,
+      watch: WATCH_STATE,
     }),
     member('explore', {
       files: { type: 'array', required: true, items: EXPLORED_FILE },

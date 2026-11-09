@@ -33,8 +33,18 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, posix } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { CodegraphIndexerId, INDEX_FAILURE_RELATIVE_PATH, INDEX_STATUS_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
-import type { CodegraphIndexer, CodegraphIndexReport, IndexFailureFile } from 'dsh-plugin-codegraph-service'
+import {
+  CodegraphIndexerId,
+  INDEX_FAILURE_RELATIVE_PATH,
+  INDEX_STATUS_RELATIVE_PATH,
+  INDEX_WATCH_STATE_RELATIVE_PATH,
+} from 'dsh-plugin-codegraph-service'
+import type {
+  CodegraphIndexer,
+  CodegraphIndexReport,
+  IndexFailureFile,
+  IndexWatchStateFile,
+} from 'dsh-plugin-codegraph-service'
 import { LANGUAGE_TABLE, languageFor } from './languages.ts'
 import { isExcluded, walkAndExtract } from './walk.ts'
 import type { EngineMode } from './walk.ts'
@@ -158,6 +168,33 @@ export const DEFAULT_WATCH_DEBOUNCE_MS = 2_000
 /** Default cap on directories watched individually, one watch each, by the fs seam. */
 export const DEFAULT_MAX_WATCHED_DIRECTORIES = 4_000
 
+/**
+ * Default cap on every OS watch a root may open: its in-scope directories plus the direct files in
+ * them (default 6000).
+ *
+ * The directory cap alone is the wrong measure. `ctx.fs.watch` is chokidar with `depth: 0`, which
+ * opens one OS watch for a directory *and one more for every direct file in it* — measured against
+ * chokidar 5.0.0 from the host's own bundle, a fixture of 1 directory + 40 files + 3 subdirectories
+ * costs 41 file descriptors, not 4. So a tree with 3999 directories was still allowed to open nearly
+ * ten thousand watches.
+ *
+ * 6000 is where that stops, chosen from measured descriptors rather than a round number:
+ *
+ *  - The measured peak descriptor delta is between 0.6x and 1.0x the entry count (this repository:
+ *    223 entries → +190 fds; a 1419-directory tree: 3545 entries → +2138 fds; the synthetic fixture:
+ *    41 entries → +41 fds). So the cap is also a descriptor budget, and 6000 entries is at most
+ *    ~6000 descriptors.
+ *  - macOS's per-process soft limit is 256 by default (`launchctl limit maxfiles`) and its common
+ *    hard ceiling is 10240; 6000 leaves room under the hard ceiling for the rest of the host, while
+ *    the soft limit is already too small for any watcher at all, so it cannot be the number to plan
+ *    against. This machine's `kern.maxfilesperproc` is 92160 and the host process inherits a
+ *    1048575 soft limit, where the same cap is 6.5% of one process's budget.
+ *  - It sits between the two real workspaces this was measured on with margin both ways: this
+ *    repository (223) and a 1419-directory monorepo (3545) keep watching, while `/Users/admin/www`
+ *    (21704) degrades before opening a single watch.
+ */
+export const DEFAULT_MAX_WATCHED_ENTRIES = 6_000
+
 /** Default age past which a session-open refreshes an existing index (ten minutes). */
 export const DEFAULT_AUTO_REFRESH_AFTER_MS = 10 * 60 * 1000
 
@@ -258,6 +295,14 @@ export interface Config {
    */
   maxWatchedDirectories?: number
   /**
+   * Hard cap on every OS watch a root may open — its in-scope directories plus the direct files in
+   * them (default 6000). A `depth: 0` watch on one directory really opens `1 + its direct files`
+   * watches, so the directory cap alone lets a wide, shallow tree open thousands of descriptors
+   * while still counting as a few dozen directories. Whichever cap trips first degrades the root's
+   * watcher; the two report different `DegradeReason` codes.
+   */
+  maxWatchedEntries?: number
+  /**
    * Build a first index automatically, in the background, when a session is created in a workspace
    * that has none (default true). A workspace is only ever auto-indexed once per process and never
    * when its status sidecar already exists, so this cannot rebuild a graph that is already there.
@@ -301,6 +346,7 @@ export const Config: z<Config> = z.object({
   watch: z.boolean().default(true),
   watchDebounceMs: z.number().default(DEFAULT_WATCH_DEBOUNCE_MS),
   maxWatchedDirectories: z.number().default(DEFAULT_MAX_WATCHED_DIRECTORIES),
+  maxWatchedEntries: z.number().default(DEFAULT_MAX_WATCHED_ENTRIES),
   /** Cap on candidate source files a session-start scan may find before it declines to index. */
   autoIndexMaxFiles: z.number().default(DEFAULT_AUTO_INDEX_MAX_FILES),
   autoIndexOnSession: z.boolean().default(true),
@@ -322,6 +368,7 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('concurrency', resolved.concurrency)
   assertPositiveInteger('watchDebounceMs', resolved.watchDebounceMs)
   assertPositiveInteger('maxWatchedDirectories', resolved.maxWatchedDirectories)
+  assertPositiveInteger('maxWatchedEntries', resolved.maxWatchedEntries)
   assertPositiveInteger('autoIndexTimeoutMs', resolved.autoIndexTimeoutMs)
 
   // Watching and the parse cache both go through the host's filesystem seam rather than `node:fs`, so
@@ -359,6 +406,48 @@ export function apply(ctx: Context, config: Config): void {
   // event name and one payload shape, not the whole agent package.
   const agentEvents = ctx as unknown as AgentLifecycleContext
 
+  /**
+   * Per-root tail of the watch-state writes, so two state changes cannot land out of order.
+   *
+   * A start can degrade in the same turn it begins, and `writeJsonAtomically` is a rename: the second
+   * call must not overtake the first, or the sidecar would keep describing the state that came before.
+   * @see recordWatchState
+   */
+  const watchStateWrites = new Map<string, Promise<void>>()
+
+  /**
+   * Persist whether a root's watcher is running, so a degradation is visible outside `console.error`.
+   *
+   * The watcher-degradation fact is the one this plugin used to have nowhere to put: the status
+   * sidecar belongs to the indexing run and only ever describes a graph that exists, while watching
+   * starts after that run and can stop long afterwards. `.codegraph/watch-state.json` is its own
+   * file, written through the same atomic replace, so both readers (the prompt line and `status`)
+   * see it without either one racing the indexer.
+   *
+   * Fire-and-forget and never rejecting on purpose: a hint that cannot be written must not turn a
+   * degraded watcher into a failed index call, and the next state change simply rewrites the file.
+   * The failure still gets one line, because a diagnostic nobody can see is the bug being fixed.
+   * @param root - absolute workspace path.
+   * @param state - the state to persist; the last call wins.
+   */
+  function recordWatchState(root: string, state: IndexWatchStateFile): void {
+    const previous = watchStateWrites.get(root) ?? Promise.resolve()
+    const next = previous
+      .then(async () => {
+        // A workspace that no longer exists is not a place to write: `mkdir(recursive)` would
+        // recreate the very directory the user deleted, leaving an empty one behind. The state it
+        // would have recorded describes a watcher nobody can use any more.
+        if (!existsSync(root)) return
+        const target = join(root, INDEX_WATCH_STATE_RELATIVE_PATH)
+        await mkdir(dirname(target), { recursive: true })
+        await writeJsonAtomically(target, state)
+      })
+      .catch((error: unknown) => {
+        console.error(`codegraph-tree-sitter: could not record the watch state for ${root}: ${describeFailure(error)}`)
+      })
+    watchStateWrites.set(root, next)
+  }
+
   /** Start (or leave running) file watching for `projectRoot`, once it has a baseline to refresh. */
   function ensureWatching(projectRoot: string): void {
     if (watchers.has(projectRoot)) return
@@ -376,14 +465,23 @@ export function apply(ctx: Context, config: Config): void {
       respectGitignore: resolved.respectGitignore,
       debounceMs: resolved.watchDebounceMs,
       maxWatchedDirectories: resolved.maxWatchedDirectories,
+      maxWatchedEntries: resolved.maxWatchedEntries,
       sync: () => runSync(projectRoot, resolved, fileSystem),
       // No diagnostics service is wired into this package's dependencies; this is the floor for
-      // "degradation must be visible" until one is, per NOTES.local.md.
+      // "degradation must be visible" until one is, per NOTES.local.md. The sidecar below is the
+      // part a user actually sees: without it a workspace whose auto-rebuild never worked looks
+      // exactly like one where it does.
       onDegraded: (reason) => {
         console.error(
           `codegraph-tree-sitter: file watching for "${projectRoot}" stopped permanently (${reason.code}); ` +
           'the index will no longer refresh on its own — run codegraph_index manually to update it.',
         )
+        recordWatchState(projectRoot, { watching: false, code: reason.code, at: Date.now() })
+      },
+      // The clearing half: a workspace that fits after a restart must be able to say so, or the one
+      // recorded reason outlives the tree that produced it.
+      onWatching: () => {
+        recordWatchState(projectRoot, { watching: true, at: Date.now() })
       },
     }, fileSystem)
     watchers.set(projectRoot, watcher)

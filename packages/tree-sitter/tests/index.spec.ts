@@ -8,7 +8,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
-import Codegraph, { CodegraphError, INDEX_FAILURE_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
+import Codegraph, { CodegraphError, INDEX_FAILURE_RELATIVE_PATH, INDEX_WATCH_STATE_RELATIVE_PATH } from 'dsh-plugin-codegraph-service'
 import type { IndexFailureFile } from 'dsh-plugin-codegraph-service'
 import * as CodegraphTreeSitter from '../src/index.ts'
 import {
@@ -548,6 +548,108 @@ describe('codegraph-tree-sitter plugin', () => {
       await waitFor(() => errorSpy.mock.calls.length > 0, 5_000)
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('stopped permanently'))
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('WATCH_UNAVAILABLE'))
+      await ctx.fiber.dispose()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  }, 10_000)
+
+  it('records that watching is running once the tree is armed', async () => {
+    // The clearing half of the sidecar: a degradation recorded by an earlier process must be
+    // overwritable, or a workspace that now fits would keep reporting the old reason forever.
+    const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+    const ctx = await seam({ watch: true, watchDebounceMs: 50 })
+    await ctx.codegraph.index(root)
+    const stateFile = join(root, INDEX_WATCH_STATE_RELATIVE_PATH)
+    await waitFor(() => existsSync(stateFile))
+    const state = JSON.parse(await readFile(stateFile, 'utf8')) as { watching?: unknown; at?: unknown }
+    expect(state.watching).toBe(true)
+    expect(typeof state.at).toBe('number')
+    await ctx.fiber.dispose()
+  }, 10_000)
+
+  it('records a permanent degradation beside the graph, so `status` can report it', async () => {
+    // The degradation used to exist only as a console line, which is why a workspace whose automatic
+    // rebuild never worked looked exactly like one where it did. One directory + one file is two
+    // entries; the budget of one is what this test uses to force the second cap.
+    const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const ctx = await seam({ watch: true, maxWatchedEntries: 1 })
+      await ctx.codegraph.index(root)
+      const stateFile = join(root, INDEX_WATCH_STATE_RELATIVE_PATH)
+      await waitFor(() => existsSync(stateFile))
+      const state = JSON.parse(await readFile(stateFile, 'utf8')) as { watching?: unknown; code?: unknown; at?: unknown }
+      expect(state.watching).toBe(false)
+      expect(state.code).toBe('WATCH_COST_EXCEEDED')
+      expect(typeof state.at).toBe('number')
+      await ctx.fiber.dispose()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  }, 10_000)
+
+  it('does not recreate a workspace that was deleted while the watcher was starting', async () => {
+    // `mkdir(recursive)` under a path that no longer exists would leave an empty directory where the
+    // user deleted one. Holding the arm pass on its first listing is what makes the window between
+    // `index()` returning and the watcher deciding anything wide enough to act in.
+    const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+    const ctx = await seam({ watch: true })
+    const fs = fsOf(ctx)
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let gated = false
+    const listDir = fs.listDir.bind(fs)
+    fs.listDir = async (target) => {
+      if (!gated) {
+        gated = true
+        await gate
+      }
+      return listDir(target)
+    }
+    await ctx.codegraph.index(root)
+    await rm(root, { recursive: true, force: true })
+    release()
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(existsSync(root)).toBe(false)
+    await ctx.fiber.dispose()
+  }, 10_000)
+
+  it('reports a watch-state record it could not write instead of losing the degradation', async () => {
+    // A read-only `.codegraph` (here: replaced by a file) must not turn a degraded watcher into a
+    // failed index call — but it also must not be silent, because this whole sidecar exists to make
+    // the degradation visible.
+    const root = await writeProject({ 'a.ts': 'export function a() {}\n' })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const ctx = await seam({ watch: true, maxWatchedEntries: 1 })
+      const fs = fsOf(ctx)
+      // Hold the arm pass on its first directory listing, so the `.codegraph` swap below lands
+      // before the watcher decides anything. `index()` has already returned by then; the watcher runs
+      // on its own background promise.
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      let gated = false
+      const listDir = fs.listDir.bind(fs)
+      fs.listDir = async (target) => {
+        if (!gated) {
+          gated = true
+          await gate
+        }
+        return listDir(target)
+      }
+      await ctx.codegraph.index(root)
+      await rm(join(root, '.codegraph'), { recursive: true, force: true })
+      await writeFile(join(root, '.codegraph'), 'not a directory')
+      release()
+      await waitFor(
+        () => errorSpy.mock.calls.some(args => String(args[0]).includes('could not record the watch state')),
+        5_000,
+      )
       await ctx.fiber.dispose()
     } finally {
       errorSpy.mockRestore()

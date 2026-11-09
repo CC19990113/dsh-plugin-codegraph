@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { formatIndexedAt, indexStatusHint, readIndexStatus, workspaceOf } from '../src/status-hint.ts'
+import { formatIndexedAt, indexStatusHint, readIndexStatus, readWatchState, watchStateHint, workspaceOf } from '../src/status-hint.ts'
 
 const roots: string[] = []
 
@@ -28,6 +28,13 @@ const STATUS = {
   edgeCount: 6786,
   unresolvedCount: 8337,
   unresolvedLikelyInternalCount: 2993,
+}
+
+/** One watcher degradation as the watcher records it: watching stopped, with the code that tripped. */
+const WATCH = {
+  watching: false,
+  code: 'WATCH_COST_EXCEEDED',
+  at: Date.UTC(2026, 10, 3, 2, 5),
 }
 
 describe('readIndexStatus', () => {
@@ -113,6 +120,87 @@ describe('indexStatusHint', () => {
     expect(indexStatusHint(empty)).toBe(
       `No code graph exists for ${empty} yet. Call codegraph_index once to build one; queries fail until then.`,
     )
+  })
+
+  it('appends a watcher degradation to the summary instead of replacing it', async () => {
+    // "The graph exists" and "nothing refreshes it" are both facts about this workspace; a prompt
+    // line that dropped either half would mislead about the graph or about the editing loop.
+    const root = await workspace({
+      '.codegraph/status.json': JSON.stringify({ ...STATUS, filesMinified: 0 }),
+      '.codegraph/watch-state.json': JSON.stringify(WATCH),
+    })
+    const hint = indexStatusHint(root)
+    expect(hint).toContain('3074 declarations, 6786 relationships.')
+    expect(hint).toContain('Live rebuilding is NOT running')
+    expect(hint).toContain('WATCH_COST_EXCEEDED')
+  })
+})
+
+describe('readWatchState', () => {
+  it('reads a recorded degradation', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify(WATCH) })
+    expect(readWatchState(root)).toEqual(WATCH)
+  })
+
+  it('answers undefined when the file is absent', async () => {
+    expect(readWatchState(await workspace())).toBeUndefined()
+  })
+
+  it('answers undefined when the file is not JSON', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': 'not json' })
+    expect(readWatchState(root)).toBeUndefined()
+  })
+
+  it('answers undefined for a JSON null or primitive', async () => {
+    for (const raw of ['null', '42']) {
+      const root = await workspace({ '.codegraph/watch-state.json': raw })
+      expect(readWatchState(root)).toBeUndefined()
+    }
+  })
+
+  it('answers undefined without a boolean `watching`', async () => {
+    for (const raw of [{ at: 1 }, { watching: 'no', at: 1 }]) {
+      const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify(raw) })
+      expect(readWatchState(root)).toBeUndefined()
+    }
+  })
+
+  it('answers undefined without a numeric `at`', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify({ watching: false, at: '1' }) })
+    expect(readWatchState(root)).toBeUndefined()
+  })
+
+  it('keeps the boolean half when the recorded code is not text', async () => {
+    // A record this reader cannot fully trust still carries the fact that matters: watching is off.
+    const root = await workspace({
+      '.codegraph/watch-state.json': JSON.stringify({ watching: false, code: 7, at: 1 }),
+    })
+    expect(readWatchState(root)).toEqual({ watching: false, at: 1 })
+  })
+})
+
+describe('watchStateHint', () => {
+  it('says nothing while watching is running', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify({ watching: true, at: 1 }) })
+    expect(watchStateHint(root)).toBe('')
+  })
+
+  it('says nothing when no state was ever recorded', async () => {
+    expect(watchStateHint(await workspace())).toBe('')
+  })
+
+  it('quotes the reason code the watcher recorded', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify(WATCH) })
+    expect(watchStateHint(root)).toBe(
+      `Live rebuilding is NOT running for ${root}: watching stopped, so edits will not refresh the `
+      + 'graph on their own — run codegraph_index after changes. Reasons code: WATCH_COST_EXCEEDED.',
+    )
+  })
+
+  it('still reports the degradation when the record carries no code', async () => {
+    const root = await workspace({ '.codegraph/watch-state.json': JSON.stringify({ watching: false, at: 1 }) })
+    expect(watchStateHint(root)).toContain('Live rebuilding is NOT running')
+    expect(watchStateHint(root)).not.toContain('Reasons code')
   })
 })
 
