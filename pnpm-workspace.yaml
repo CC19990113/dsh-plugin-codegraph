@@ -8,5 +8,15 @@ minimumReleaseAgeExclude:
   - dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.5
   - dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.5
   - dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.5
+  - dsh-plugin-codegraph-indexer-darwin-arm64
+  - dsh-plugin-codegraph-indexer-darwin-x64
+  - dsh-plugin-codegraph-indexer-linux-arm64-gnu
+  - dsh-plugin-codegraph-indexer-linux-x64-gnu
+  - dsh-plugin-codegraph-indexer-win32-x64-msvc
 onlyBuiltDependencies:
   - koffi
+  - dsh-plugin-codegraph-indexer-darwin-arm64
+  - dsh-plugin-codegraph-indexer-darwin-x64
+  - dsh-plugin-codegraph-indexer-linux-arm64-gnu
+  - dsh-plugin-codegraph-indexer-linux-x64-gnu
+  - dsh-plugin-codegraph-indexer-win32-x64-msvc

@@ -151,7 +151,11 @@ function readExcludeList() {
     if (quoted !== null) value = quoted[2]
     const separator = value.lastIndexOf('@')
     if (separator <= 0 || separator === value.length - 1) {
-      complain(`${where}: "${value}" is not shaped like "<package>@<version>"`)
+      // pnpm accepts two forms here and they are **not** interchangeable: the pinned `name@version`
+      // satisfies `pnpm install`'s resolver, while only the bare package name clears its lockfile
+      // policy check. A release window needs both, so a bare entry is valid input and must survive
+      // the rewrite below rather than being reported as malformed.
+      entries.push({ name: value, version: undefined })
       continue
     }
     entries.push({ name: value.slice(0, separator), version: value.slice(separator + 1) })
@@ -297,8 +301,13 @@ function main() {
   if (addons.size > 0) {
     const excluded = readExcludeList()
     if (excluded !== undefined) {
-      const desired = [...addons.keys()].map(name => `${name}@${version}`)
-      const actual = excluded.map(entry => `${entry.name}@${entry.version}`)
+      // Bare entries are carried through untouched: they are what pnpm's lockfile check honours, and
+      // dropping them here would silently put the next publish back in the violation it documents.
+      const desired = [
+        ...excluded.filter(entry => entry.version === undefined).map(entry => entry.name),
+        ...[...addons.keys()].map(name => `${name}@${version}`),
+      ]
+      const actual = excluded.map(entry => (entry.version === undefined ? entry.name : `${entry.name}@${entry.version}`))
       const sameSet = desired.length === actual.length && desired.every(item => actual.includes(item))
       changes.push({
         path: WORKSPACE_FILE,
@@ -346,7 +355,10 @@ function main() {
     if (addons.size > 0) {
       const text = readText(WORKSPACE_FILE)
       if (text !== undefined) {
-        const rewritten = rewriteExcludeBlock(text, [...addons.keys()].map(name => `${name}@${version}`))
+        const keptBare = (readExcludeList() ?? [])
+          .filter(entry => entry.version === undefined)
+          .map(entry => entry.name)
+        const rewritten = rewriteExcludeBlock(text, [...keptBare, ...[...addons.keys()].map(name => `${name}@${version}`)])
         if (rewritten === undefined) {
           console.error(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" block is not shaped like a flat list; add the entries by hand`)
         } else {

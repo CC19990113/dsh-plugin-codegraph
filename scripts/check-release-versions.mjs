@@ -149,7 +149,10 @@ function readExcludeList() {
     }
     const separator = value.lastIndexOf('@')
     if (separator <= 0 || separator === value.length - 1) {
-      complain(`${where}: "${value}" is not shaped like "<package>@<version>"`)
+      // A bare package name is pnpm's other accepted form and is **not** interchangeable: pinning a
+      // version satisfies `pnpm install`'s resolver, while pnpm's lockfile policy check only honors
+      // the bare name. A release window therefore needs both, so this list accepts both.
+      entries.push({ name: value, version: undefined })
       continue
     }
     entries.push({ name: value.slice(0, separator), version: value.slice(separator + 1) })
@@ -340,11 +343,14 @@ function main() {
       if (excluded !== undefined) {
         const excludedEntries = new Map()
         for (const entry of excluded) {
-          if (excludedEntries.has(entry.name)) {
+          const seen = excludedEntries.get(entry.name)
+          // Two pinned entries for one package is a contradiction. A bare name beside a pinned one
+          // is the release-window shape this file documents, and the pinned entry wins for the gate.
+          if (seen !== undefined && seen.version !== undefined && entry.version !== undefined) {
             complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${entry.name}" more than once`)
             continue
           }
-          excludedEntries.set(entry.name, entry)
+          if (seen === undefined || entry.version !== undefined) excludedEntries.set(entry.name, entry)
         }
 
         for (const name of addons.keys()) {
@@ -354,13 +360,14 @@ function main() {
               `${WORKSPACE_FILE}: "${EXCLUDE_KEY}" is missing "${name}@${expected}" — a freshly published`
               + " addon stays unresolvable under pnpm 11's minimumReleaseAge",
             )
-          } else if (entry.version !== expected) {
+          } else if (entry.version !== undefined && entry.version !== expected) {
             complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" pins "${name}@${entry.version}", must be "${name}@${expected}"`)
           }
         }
         for (const [name, entry] of excludedEntries) {
           if (!addons.has(name)) {
-            complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${name}@${entry.version}", which is not one of the platform packages`)
+            const listed = entry.version === undefined ? name : `${name}@${entry.version}`
+            complain(`${WORKSPACE_FILE}: "${EXCLUDE_KEY}" lists "${listed}", which is not one of the platform packages`)
           }
         }
       }
