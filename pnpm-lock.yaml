@@ -160,20 +160,20 @@ importers:
         version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)
     optionalDependencies:
       dsh-plugin-codegraph-indexer-darwin-arm64:
-        specifier: 0.6.4
-        version: 0.6.4
+        specifier: 0.6.5
+        version: 0.6.5
       dsh-plugin-codegraph-indexer-darwin-x64:
-        specifier: 0.6.4
-        version: 0.6.4
+        specifier: 0.6.5
+        version: 0.6.5
       dsh-plugin-codegraph-indexer-linux-arm64-gnu:
-        specifier: 0.6.4
-        version: 0.6.4
+        specifier: 0.6.5
+        version: 0.6.5
       dsh-plugin-codegraph-indexer-linux-x64-gnu:
-        specifier: 0.6.4
-        version: 0.6.4
+        specifier: 0.6.5
+        version: 0.6.5
       dsh-plugin-codegraph-indexer-win32-x64-msvc:
-        specifier: 0.6.4
-        version: 0.6.4
+        specifier: 0.6.5
+        version: 0.6.5
 
 packages:
 
@@ -627,28 +627,28 @@ packages:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
 
-  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.4:
-    resolution: {integrity: sha512-kiAIGx5F8zpny0JwLIftWmg6EFOMP7qpcL5eYVSG/+qA2pOzVm1Ml5gAd3XnOmkI+KVE7z5XlaIHdN0Wgrt5RA==}
+  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.5:
+    resolution: {integrity: sha512-xeuZhC7jHPxzgj7q5bb3W24SufhV+DFweJHoRRLKLBLJc+50Dz24dCR/HNg/AhIPUg5Dcz+aNt5wHcx0aasP8Q==}
     cpu: [arm64]
     os: [darwin]
 
-  dsh-plugin-codegraph-indexer-darwin-x64@0.6.4:
-    resolution: {integrity: sha512-Eb5jbBC0B+wW7ahJdCxcu3lzyg7TRyeECLXAWLMWSh/IcRUCFEOPhWJ1EwA/Mk2JdwaYEyn/aNkIN2jQnOKQdg==}
+  dsh-plugin-codegraph-indexer-darwin-x64@0.6.5:
+    resolution: {integrity: sha512-NMT2XR+Ja/XzRYvftyABIel4gFr3VNftEWGpGSJ/RdWenEh6P48T1t1ANyqHr4mh2pxSMgub0HbH2RZop+F5+g==}
     cpu: [x64]
     os: [darwin]
 
-  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.4:
-    resolution: {integrity: sha512-YHe3kuPnpK2T8whEGNKMhL8HCXHc9ZdRTa7OqSiKwavLIg71VZJx5W2rQYswdd6Wt0hUiUgdZv8CtOAQmt3mqg==}
+  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.5:
+    resolution: {integrity: sha512-qAk+HvVdrLXZ068w7rtqC5pmzEJ4vfnUb+QzbxgW6GgrYq9FTS5dDqXCNVVv8Nniw+HlEwUKt8QQ7IQYjZdefg==}
     cpu: [arm64]
     os: [linux]
 
-  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.4:
-    resolution: {integrity: sha512-xeOMTbQwbCEKf1pgde2uht79mnXZiUKUUiUTkzz2Z3UqHeOGFcQwykEiqWW4ncMLp03NVwCMDqm/KGcYwmupfw==}
+  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.5:
+    resolution: {integrity: sha512-wsYpZYRO4G+QrcS7siwqaFe1o6yeIlfJUtattCB6xsoCUx5WpW0tYaR9YIDKptPwHMyJ+BbRNEmIkcvpm0UNKA==}
     cpu: [x64]
     os: [linux]
 
-  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.4:
-    resolution: {integrity: sha512-qdXRA1viho82ZRiZr3kjOk1IvNFVDXpBN2VI8lp8vA2q/LXMURi5lXI/CCP1Jj/HMEVva6q/x2AFGXFoD1Wovw==}
+  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.5:
+    resolution: {integrity: sha512-xaW2D7hGwd//fbvxRfpA3Z8QvuYJVjM5kD+HQycqgmowk3g7RRkVnYB5e25gTJzmv0TjdiBjsL779C+swVha1g==}
     cpu: [x64]
     os: [win32]
 
@@ -1351,19 +1351,19 @@ snapshots:
 
   detect-libc@2.1.2: {}
 
-  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.4:
+  dsh-plugin-codegraph-indexer-darwin-arm64@0.6.5:
     optional: true
 
-  dsh-plugin-codegraph-indexer-darwin-x64@0.6.4:
+  dsh-plugin-codegraph-indexer-darwin-x64@0.6.5:
     optional: true
 
-  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.4:
+  dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.5:
     optional: true
 
-  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.4:
+  dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.5:
     optional: true
 
-  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.4:
+  dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.5:
     optional: true
 
   es-module-lexer@2.3.1: {}
