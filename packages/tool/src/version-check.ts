@@ -488,14 +488,14 @@ export function writeStateFile(file: string, state: UpdateState): void {
  * @param packageName - the npm package name, used to keep sibling plugins' state apart.
  * @returns the absolute state-file path.
  */
-export function defaultStateFile(packageName: string, home: string = homedir()): string {
+export function defaultStateFile(packageName: string, home?: string): string {
   const short = packageName.replace(/^dsh-plugin-/, '')
-  // DSH_HOME is the host's real home once it has been relocated. Joining
-  // homedir() + .dsh unconditionally wrote the record beside a DIFFERENT DSH home
-  // (os.homedir() is C:\Users\asus while DSH_HOME is F:\Users\TBH\.dsh), so two
-  // homes under one OS user shared -- or lost -- the record. The .dsh segment must
-  // not be re-appended: DSH_HOME already ends with it.
-  const dir = process.env.DSH_HOME || join(home, '.dsh')
+  // An explicitly supplied home wins, so a caller can pin the location. Only the production
+  // call, which passes nothing, defers to DSH_HOME: that variable is the host's real home once
+  // it has been relocated, and joining homedir() + .dsh unconditionally wrote the record beside
+  // a DIFFERENT DSH home (os.homedir() is C:\Users\asus while DSH_HOME is F:\Users\TBH\.dsh).
+  // DSH_HOME already ends with `.dsh`, so the segment must not be re-appended.
+  const dir = home === undefined ? (process.env.DSH_HOME || join(homedir(), '.dsh')) : join(home, '.dsh')
   return join(dir, `${short}-update-check.json`)
 }
 

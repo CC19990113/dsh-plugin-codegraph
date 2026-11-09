@@ -11,7 +11,7 @@
  * @module dsh-plugin-codegraph-tree-sitter/schema
  */
 
-import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
@@ -71,26 +71,46 @@ async function removeGraphFiles(path: string): Promise<void> {
 }
 
 /**
- * Replace the graph at `databasePath` with one indexing run's output.
+ * Report whether the process that claimed a lock file is still running.
  *
- * The full build happens on a temporary file beside `databasePath`; only a successful build is
- * `rename`d over the real path, atomically on the same filesystem. A reader with a connection already
- * open on the old file keeps reading it (POSIX unlink semantics) until it reopens — that half of
- * freshness is the sqlite store's responsibility, not this writer's.
- * @param databasePath - absolute path of the `.codegraph/codegraph.db` file to (re)create.
- * @param input - the run's resolved graph and per-file metadata.
+ * A timestamp is the wrong staleness test here: an index over a large tree legitimately runs
+ * for minutes, so any fixed window either steals a lock that is still held or waits forever on
+ * one whose holder crashed. The holder writes its pid after the exclusive create, and a pid the
+ * OS no longer knows is garbage. `process.kill(pid, 0)` sends no signal — it only asks whether
+ * the process exists; `EPERM` means it does and is simply not ours to signal.
+ * @param lockPath - absolute path of the `.graph.lock` file to inspect.
+ * @returns true when the recorded holder still exists.
  */
+async function lockHolderIsAlive(lockPath: string): Promise<boolean> {
+  let raw: string
+  try {
+    raw = await readFile(lockPath, 'utf8')
+  } catch {
+    // Vanished between the failed `wx` and this read: let the caller retry the create.
+    return false
+  }
+  const pid = Number.parseInt(raw, 10)
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // ESRCH: no such process. EPERM: alive, but owned by another user.
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 /**
- * Serialize index runs on one workspace, across processes.
+ * Serialize graph writes on one workspace, across processes.
  *
  * Two runs used to be allowed to overlap (see writeStatusFile): each built its own
- * temporary file and the last rename won. That is safe for the file, but two full
- * builds of one tree burn the machine, and the loser's status.json can describe a
- * graph the winner already replaced.
+ * temporary file and the last rename won. That is safe for the file, but the loser's
+ * status.json can then describe a graph the winner already replaced.
+ * @param dir - the `.codegraph` directory, which must already exist.
+ * @param work - the write to run while the lock is held.
  */
 async function withGraphLock(dir: string, work: () => Promise<void>): Promise<void> {
   const lockPath = join(dir, '.graph.lock')
-  const STALE_MS = 8_000
   const ACQUIRE_MS = 10_000
   const RETRY_MS = 25
   const started = Date.now()
@@ -100,19 +120,13 @@ async function withGraphLock(dir: string, work: () => Promise<void>): Promise<vo
       handle = await open(lockPath, 'wx')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      // A holder that died leaves the file behind. Only an OLD file may be stolen, so a
-      // live holder slower than ACQUIRE_MS is waited out rather than overrun.
-      let ageMs = Number.POSITIVE_INFINITY
-      try {
-        ageMs = Date.now() - (await stat(lockPath)).mtimeMs
-      } catch {
-        // vanished between open and stat
-      }
-      if (ageMs > STALE_MS) {
+      // A holder that died leaves the file behind; only a dead pid may be stolen, so a
+      // live run slower than ACQUIRE_MS is waited out rather than overrun.
+      if (!(await lockHolderIsAlive(lockPath))) {
         try {
           await rm(lockPath, { force: true })
         } catch {
-          // someone else reclaimed it
+          // another contender reclaimed it first
         }
         continue
       }
@@ -123,6 +137,10 @@ async function withGraphLock(dir: string, work: () => Promise<void>): Promise<vo
     }
   }
   try {
+    // Record the holder so the next contender can tell a live run from a crashed one. An
+    // absent or unparseable pid reads as dead, which is also the right answer for a lock
+    // left by a process that died between the create and this write.
+    await handle.writeFile(String(process.pid))
     return await work()
   } finally {
     try {
@@ -157,7 +175,20 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
   }
   throw last
 }
+/**
+ * Replace the graph at `databasePath` with one indexing run's output.
+ *
+ * The full build happens on a temporary file beside `databasePath`; only a successful build is
+ * `rename`d over the real path, atomically on the same filesystem. A reader with a connection already
+ * open on the old file keeps reading it (POSIX unlink semantics) until it reopens — that half of
+ * freshness is the sqlite store's responsibility, not this writer's.
+ * @param databasePath - absolute path of the `.codegraph/codegraph.db` file to (re)create.
+ * @param input - the run's resolved graph and per-file metadata.
+ */
 export async function writeGraph(databasePath: string, input: WriteInput): Promise<void> {
+  // The lock file lives beside the database, so its directory must exist before the lock can
+  // be created — the first index of a workspace has no `.codegraph/` yet.
+  await mkdir(dirname(databasePath), { recursive: true })
   return withGraphLock(dirname(databasePath), () => writeGraphUnlocked(databasePath, input))
 }
 async function writeGraphUnlocked(databasePath: string, input: WriteInput): Promise<void> {
