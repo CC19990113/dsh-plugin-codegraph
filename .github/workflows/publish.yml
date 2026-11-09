@@ -145,7 +145,10 @@ jobs:
       # Not frozen: the optional platform packages were only just published, so the lockfile this
       # checkout carries predates them. CI does not commit the lockfile, and every other dependency
       # is still pinned by it.
-      - run: pnpm install --no-frozen-lockfile
+      # The release publishes its own platform packages, so pnpm's freshness window is not a
+      # supply-chain risk here — it is the thing being published. Without this, a run fails on
+      # lockfile entries for packages published minutes ago by the *previous* release.
+      - run: pnpm install --no-frozen-lockfile --config.minimumReleaseAge=0
 
       # Publishing an artifact that does not typecheck or pass its own tests is
       # not recoverable: npm forbids re-using a version number.
