@@ -1,8 +1,8 @@
-import { mkdtemp, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { SCHEMA_VERSION, writeGraph } from '../src/schema.ts'
 import type { ExtractedFile, GraphEdge, GraphNode, UnresolvedRef } from '../src/resolve.ts'
 
@@ -153,5 +153,74 @@ describe('writeGraph', () => {
       .rejects.toThrow()
     const entries = await readdir(dirname(path))
     expect(entries.sort()).toEqual(['codegraph.db', 'status.json'])
+  })
+})
+
+describe('writeGraph lock', () => {
+  const input = (indexedAt: number) =>
+    ({ files: [FILE], nodes: NODES, edges: EDGES, unresolved: UNRESOLVED, filesMinified: 0, indexedAt })
+
+  /** A temp database path whose `.codegraph` directory already exists, plus that directory. */
+  async function preparedPath(): Promise<{ path: string; dir: string; lockPath: string }> {
+    const path = await tempDatabasePath()
+    const dir = dirname(path)
+    await mkdir(dir, { recursive: true })
+    return { path, dir, lockPath: join(dir, '.graph.lock') }
+  }
+
+  it('steals a lock whose recorded process no longer exists', async () => {
+    // macOS pids cap well below 999999, so this one cannot be running: the lock is debris from a
+    // crashed run, and an index must not wait 10 s for a process that will never release it.
+    const { path, dir, lockPath } = await preparedPath()
+    await writeFile(lockPath, '999999')
+    await writeGraph(path, input(NOW))
+    expect((await readdir(dir)).sort()).toEqual(['codegraph.db', 'status.json'])
+  })
+
+  it('treats an empty lock file as a dead holder', async () => {
+    // A process that died between the exclusive create and the pid write leaves this behind.
+    const { path, dir, lockPath } = await preparedPath()
+    await writeFile(lockPath, '')
+    await writeGraph(path, input(NOW))
+    expect((await readdir(dir)).sort()).toEqual(['codegraph.db', 'status.json'])
+  })
+
+  it('treats a non-positive pid as a dead holder', async () => {
+    const { path, dir, lockPath } = await preparedPath()
+    await writeFile(lockPath, '-1')
+    await writeGraph(path, input(NOW))
+    expect((await readdir(dir)).sort()).toEqual(['codegraph.db', 'status.json'])
+  })
+
+  it('waits for a live holder instead of stealing its lock', async () => {
+    const { path, lockPath } = await preparedPath()
+    await writeFile(lockPath, String(process.pid))
+    const release = setTimeout(() => { void rm(lockPath, { force: true }) }, 60)
+    try {
+      await writeGraph(path, input(NOW))
+    } finally {
+      clearTimeout(release)
+    }
+    const db = new DatabaseSync(path, { readOnly: true })
+    try {
+      expect(db.prepare('SELECT count(*) AS c FROM nodes').get()).toEqual({ c: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('fails instead of waiting forever when a live holder never releases', async () => {
+    const { path, lockPath } = await preparedPath()
+    await writeFile(lockPath, String(process.pid))
+    // Jump the clock past the acquire budget so the assertion does not wait out a real 10 s.
+    const now = vi.spyOn(Date, 'now')
+    let clock = 1_000
+    now.mockImplementation(() => { clock += 20_000; return clock })
+    try {
+      await expect(writeGraph(path, input(NOW))).rejects.toThrow('another index run holds')
+    } finally {
+      now.mockRestore()
+      await rm(lockPath, { force: true })
+    }
   })
 })

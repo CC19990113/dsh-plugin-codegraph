@@ -29,7 +29,11 @@ let context: Context | undefined
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
-  if (root !== undefined) await rm(root, { recursive: true, force: true })
+  // A recursive remove walks the tree and then rmdirs; an indexer finishing its own write in
+  // that window makes the final rmdir fail with ENOTEMPTY. Node's rm retries exactly these
+  // transient codes, which is the documented way to make test cleanup coexist with a quiescing
+  // background job.
+  if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   root = undefined
 })
 

@@ -1,5 +1,5 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -207,6 +207,28 @@ describe('state files', () => {
   it('names the state file after the package, without the plugin prefix', () => {
     expect(defaultStateFile('dsh-plugin-codegraph', '/home/x')).toBe(join('/home/x', '.dsh', 'codegraph-update-check.json'))
     expect(defaultStateFile('plain', '/home/x')).toBe(join('/home/x', '.dsh', 'plain-update-check.json'))
+  })
+
+  it('defers to DSH_HOME when the host relocated its home', () => {
+    const saved = process.env.DSH_HOME
+    process.env.DSH_HOME = join('/relocated', '.dsh')
+    try {
+      // DSH_HOME already names the `.dsh` directory itself; re-appending it would nest a second one.
+      expect(defaultStateFile('dsh-plugin-codegraph')).toBe(join('/relocated', '.dsh', 'codegraph-update-check.json'))
+    } finally {
+      if (saved === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = saved
+    }
+  })
+
+  it('falls back to the OS home when DSH_HOME is unset', () => {
+    const saved = process.env.DSH_HOME
+    delete process.env.DSH_HOME
+    try {
+      expect(defaultStateFile('dsh-plugin-codegraph')).toBe(join(homedir(), '.dsh', 'codegraph-update-check.json'))
+    } finally {
+      if (saved !== undefined) process.env.DSH_HOME = saved
+    }
   })
 
   it('reads this package version, and falls back when asked to', () => {
