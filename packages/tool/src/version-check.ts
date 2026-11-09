@@ -32,6 +32,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
 /** The npm project's own default registry — the last resort, used only when nothing else is configured. */
@@ -489,7 +490,13 @@ export function writeStateFile(file: string, state: UpdateState): void {
  */
 export function defaultStateFile(packageName: string, home: string = homedir()): string {
   const short = packageName.replace(/^dsh-plugin-/, '')
-  return join(home, '.dsh', `${short}-update-check.json`)
+  // DSH_HOME is the host's real home once it has been relocated. Joining
+  // homedir() + .dsh unconditionally wrote the record beside a DIFFERENT DSH home
+  // (os.homedir() is C:\Users\asus while DSH_HOME is F:\Users\TBH\.dsh), so two
+  // homes under one OS user shared -- or lost -- the record. The .dsh segment must
+  // not be re-appended: DSH_HOME already ends with it.
+  const dir = process.env.DSH_HOME || join(home, '.dsh')
+  return join(dir, `${short}-update-check.json`)
 }
 
 /**
@@ -506,7 +513,11 @@ export function readOwnVersion(
   fallback = '0.0.0',
   readText: (file: string) => string | undefined = readTextFile,
 ): string {
-  const raw = readText(new URL('../package.json', import.meta.url).pathname)
+  // `URL.pathname` is a URL path, not a filesystem path: on Windows it keeps a leading
+  // slash and percent-encodes segments, so this read threw on EVERY run and the
+  // `0.0.0` fallback was returned -- the update notice then claimed every release was
+  // newer than the running install.
+  const raw = readText(fileURLToPath(new URL('../package.json', import.meta.url)))
   if (raw === undefined) return fallback
   let parsed: unknown
   try {

@@ -11,7 +11,7 @@
  * @module dsh-plugin-codegraph-tree-sitter/schema
  */
 
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
@@ -80,7 +80,87 @@ async function removeGraphFiles(path: string): Promise<void> {
  * @param databasePath - absolute path of the `.codegraph/codegraph.db` file to (re)create.
  * @param input - the run's resolved graph and per-file metadata.
  */
+/**
+ * Serialize index runs on one workspace, across processes.
+ *
+ * Two runs used to be allowed to overlap (see writeStatusFile): each built its own
+ * temporary file and the last rename won. That is safe for the file, but two full
+ * builds of one tree burn the machine, and the loser's status.json can describe a
+ * graph the winner already replaced.
+ */
+async function withGraphLock(dir: string, work: () => Promise<void>): Promise<void> {
+  const lockPath = join(dir, '.graph.lock')
+  const STALE_MS = 8_000
+  const ACQUIRE_MS = 10_000
+  const RETRY_MS = 25
+  const started = Date.now()
+  let handle: Awaited<ReturnType<typeof open>> | null = null
+  while (handle === null) {
+    try {
+      handle = await open(lockPath, 'wx')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      // A holder that died leaves the file behind. Only an OLD file may be stolen, so a
+      // live holder slower than ACQUIRE_MS is waited out rather than overrun.
+      let ageMs = Number.POSITIVE_INFINITY
+      try {
+        ageMs = Date.now() - (await stat(lockPath)).mtimeMs
+      } catch {
+        // vanished between open and stat
+      }
+      if (ageMs > STALE_MS) {
+        try {
+          await rm(lockPath, { force: true })
+        } catch {
+          // someone else reclaimed it
+        }
+        continue
+      }
+      if (Date.now() - started > ACQUIRE_MS) {
+        throw new Error(`codegraph: another index run holds ${lockPath}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, RETRY_MS))
+    }
+  }
+  try {
+    return await work()
+  } finally {
+    try {
+      await handle.close()
+    } catch {
+      // already closed
+    }
+    try {
+      await rm(lockPath, { force: true })
+    } catch {
+      // best effort
+    }
+  }
+}
+/**
+ * `rename` on Windows fails with EPERM/EBUSY/EACCES while ANY handle holds the target.
+ * Those are transient by nature -- an antivirus read, a reader closing its connection --
+ * and a single attempt turns one of them into a failed index.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  let last: unknown = null
+  for (let attempt = 0; attempt <= 3; attempt += 1) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      last = error
+      const retryable: readonly string[] = ['EPERM', 'EBUSY', 'EACCES']
+      if (!retryable.includes((error as NodeJS.ErrnoException).code ?? '') || attempt === 3) break
+      await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)))
+    }
+  }
+  throw last
+}
 export async function writeGraph(databasePath: string, input: WriteInput): Promise<void> {
+  return withGraphLock(dirname(databasePath), () => writeGraphUnlocked(databasePath, input))
+}
+async function writeGraphUnlocked(databasePath: string, input: WriteInput): Promise<void> {
   await mkdir(dirname(databasePath), { recursive: true })
   const tempPath = `${databasePath}.tmp-${process.pid}-${randomUUID()}`
   // Defensive: a previous run that crashed mid-write may have left this exact temp name behind.
@@ -148,7 +228,14 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
   // before the rename so the new file never inherits a stale WAL/SHM pair.
   await rm(`${databasePath}-wal`, { force: true })
   await rm(`${databasePath}-shm`, { force: true })
-  await rename(tempPath, databasePath)
+  try {
+    await renameWithRetry(tempPath, databasePath)
+  } catch (error) {
+    // The rename sat outside the build's cleanup, so a failed replace left a finished
+    // multi-megabyte temp behind. Reproduced before this change.
+    await removeGraphFiles(tempPath)
+    throw error
+  }
   // rename() only moves the main file; the temp name's own sidecars (should the driver have left any)
   // never travel with it and would otherwise linger under the temp name forever.
   await removeGraphFiles(tempPath)
@@ -180,7 +267,7 @@ export async function writeGraph(databasePath: string, input: WriteInput): Promi
 export async function writeJsonAtomically(target: string, value: unknown): Promise<void> {
   const temp = `${target}.tmp-${process.pid}-${randomUUID()}`
   await writeFile(temp, JSON.stringify(value))
-  await rename(temp, target)
+  await renameWithRetry(temp, target)
 }
 
 /**
