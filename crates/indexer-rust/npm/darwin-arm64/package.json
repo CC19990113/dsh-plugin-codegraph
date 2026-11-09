@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codegraph-indexer-darwin-arm64",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "The native codegraph extraction engine for macOS on Apple Silicon. Installed automatically by dsh-plugin-codegraph-tree-sitter; do not depend on it directly.",
   "os": [
     "darwin"

@@ -3,10 +3,10 @@ packages:
 allowBuilds:
   koffi: true
 minimumReleaseAgeExclude:
-  - dsh-plugin-codegraph-indexer-darwin-arm64@0.6.3
-  - dsh-plugin-codegraph-indexer-darwin-x64@0.6.3
-  - dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.3
-  - dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.3
-  - dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.3
+  - dsh-plugin-codegraph-indexer-darwin-arm64@0.6.4
+  - dsh-plugin-codegraph-indexer-darwin-x64@0.6.4
+  - dsh-plugin-codegraph-indexer-linux-arm64-gnu@0.6.4
+  - dsh-plugin-codegraph-indexer-linux-x64-gnu@0.6.4
+  - dsh-plugin-codegraph-indexer-win32-x64-msvc@0.6.4
 onlyBuiltDependencies:
   - koffi
