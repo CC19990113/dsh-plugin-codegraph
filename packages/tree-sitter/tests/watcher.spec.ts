@@ -394,7 +394,10 @@ describe('createWatcher over the filesystem seam', () => {
     const watcher = createWatcher(watchConfig({ sync }), gated)
     watcher.start()
     await settle()
-    expect(base.listCalls).toEqual(['/repo'])
+    // Two listings before the burst: the watcher counts the tree's in-scope directories first (so a
+    // tree too large to watch is refused before any watch is opened), then lists the root again as
+    // the baseline its own arm pass records.
+    expect(base.listCalls).toEqual(['/repo', '/repo'])
 
     gateNext = true
     listing['/repo'] = { 'a.ts': file('a2') }
@@ -404,7 +407,7 @@ describe('createWatcher over the filesystem seam', () => {
     gate.resolve()
     await settle()
     // One listing was already in flight; the second notification is folded into exactly one more.
-    expect(base.listCalls).toEqual(['/repo', '/repo', '/repo'])
+    expect(base.listCalls).toEqual(['/repo', '/repo', '/repo', '/repo'])
     expect(watcher.getPendingFiles()).toEqual(['a.ts'])
     vi.advanceTimersByTime(100)
     expect(sync).toHaveBeenCalledTimes(1)
@@ -453,7 +456,7 @@ describe('createWatcher over the filesystem seam', () => {
     expect(sync.mock.calls[0]).toEqual([undefined])
   })
 
-  it('degrades once the per-directory watch cap is reached, instead of covering part of the tree', async () => {
+  it('degrades before installing a single watch when the per-directory cap is exceeded', async () => {
     const listing = repoListing()
     const fake = makeFakeFs({ listing })
     const onDegraded = vi.fn()
@@ -463,8 +466,108 @@ describe('createWatcher over the filesystem seam', () => {
     expect(onDegraded).toHaveBeenCalledTimes(1)
     expect(onDegraded).toHaveBeenCalledWith({ code: 'WATCH_LIMIT_EXCEEDED' })
     expect(watcher.isDegraded()).toBe(true)
-    expect(fake.watches.length).toBeLessThanOrEqual(2)
+    // The point of the pre-check: an over-cap tree costs directory listings, never OS watches. On the
+    // real `/Users/admin/www` root this is the difference between 43 seconds of watch churn and one
+    // read-only pass.
+    expect(fake.watches).toEqual([])
+  })
+
+  it('arms a tree that holds exactly as many directories as the cap allows', async () => {
+    // `repoListing` is three directories (root, src, nested): the cap must be an inclusive bound, not
+    // one the pre-check trips over one short.
+    const fake = makeFakeFs({ listing: repoListing() })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedDirectories: 3, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(onDegraded).not.toHaveBeenCalled()
+    expect(watcher.isDegraded()).toBe(false)
+    expect(watchedPaths(fake)).toEqual(['/repo', '/repo/src', '/repo/src/nested'])
+  })
+
+  it('degrades when the tree grows past the cap while the watcher is already running', async () => {
+    // The pre-check can only bound the tree as it was listed; a directory created afterwards is found
+    // by an ordinary re-listing, and the arm-time cap check is what stops the tree from growing past
+    // `maxWatchedDirectories` one change at a time.
+    const listing: Listing = {
+      '/repo': { src: directory() },
+      '/repo/src': {},
+    }
+    const fake = makeFakeFs({ listing })
+    const onDegraded = vi.fn()
+    const watcher = createWatcher(watchConfig({ maxWatchedDirectories: 2, onDegraded }), fake.fs)
+    watcher.start()
+    await settle()
+    expect(watcher.isDegraded()).toBe(false)
+
+    listing['/repo/src'] = { late: directory() }
+    listing['/repo/src/late'] = {}
+    fake.watches.find(watch => watch.targetKey === '/repo/src')!.emit()
+    await settle()
+    expect(onDegraded).toHaveBeenCalledWith({ code: 'WATCH_LIMIT_EXCEEDED' })
+    expect(watcher.isDegraded()).toBe(true)
     expect(fake.watches.every(watch => watch.closed === 1)).toBe(true)
+  })
+
+  it('abandons the size pre-check when the watcher is stopped while a directory is being listed', async () => {
+    // Two directories are stacked so a completed listing still leaves one pending: that is what the
+    // loop's own liveness check (rather than the one after the pre-check) has to stop.
+    const listing: Listing = {
+      '/repo': { first: directory(), second: directory() },
+      '/repo/first': {},
+      '/repo/second': {},
+    }
+    const base = makeFakeFs({ listing })
+    const gate = defer()
+    let gatedOnce = false
+    const gated: WatchFileSystem = {
+      ...base.fs,
+      listDir: async (target, signal) => {
+        // The stack pops the last entry first, so `second` is the directory under listing when stop()
+        // lands; `first` is still pending behind it.
+        if (target.targetKey === '/repo/second' && !gatedOnce) {
+          gatedOnce = true
+          await gate.promise
+        }
+        return base.fs.listDir(target, signal)
+      },
+    }
+    const watcher = createWatcher(watchConfig(), gated)
+    watcher.start()
+    await settle()
+    watcher.stop()
+    gate.resolve()
+    await settle()
+    expect(base.watches).toEqual([])
+    expect(watcher.isDegraded()).toBe(false)
+  })
+
+  it('abandons the size pre-check when a listing is canceled by a stop', async () => {
+    const listing: Listing = {
+      '/repo': { src: directory() },
+      '/repo/src': {},
+    }
+    const base = makeFakeFs({ listing })
+    const gate = defer()
+    const gated: WatchFileSystem = {
+      ...base.fs,
+      listDir: async (target, signal) => {
+        if (target.targetKey === '/repo/src') {
+          await gate.promise
+          // The backend cancels an in-flight listing by rejecting it once the signal aborts.
+          throw new Error('listing canceled')
+        }
+        return base.fs.listDir(target, signal)
+      },
+    }
+    const watcher = createWatcher(watchConfig(), gated)
+    watcher.start()
+    await settle()
+    watcher.stop()
+    gate.resolve()
+    await settle()
+    expect(base.watches).toEqual([])
+    expect(watcher.isDegraded()).toBe(false)
   })
 
   it('degrades when the backend reports it cannot watch, closing what was already installed', async () => {
@@ -595,11 +698,17 @@ describe('createWatcher over the filesystem seam', () => {
     const listing = repoListing()
     const base = makeFakeFs({ listing })
     let watcher: ReturnType<typeof createWatcher> | undefined
+    let repoListings = 0
     const stopping: WatchFileSystem = {
       ...base.fs,
       listDir: async (target, signal) => {
-        // `stop()` lands between listing the root and descending into the children it returned.
-        if (target.targetKey === '/repo') watcher?.stop()
+        // The first listing of `/repo` is the size pre-check, which happens before any watch exists;
+        // the second is the root's own arm listing. `stop()` lands on that second one, between
+        // listing the root and descending into the children it returned.
+        if (target.targetKey === '/repo') {
+          repoListings += 1
+          if (repoListings === 2) watcher?.stop()
+        }
         return base.fs.listDir(target, signal)
       },
     }

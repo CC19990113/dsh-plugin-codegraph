@@ -520,6 +520,69 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
   }
 
   /**
+   * Count the in-scope directories of a root **before** the first watch is opened, stopping one past
+   * the cap.
+   *
+   * Why this pass exists instead of letting {@link watchDirectory} discover the cap as it recurses:
+   * the host's `ctx.fs.watch` is chokidar with `depth: 0`, and that opens one OS watch for the
+   * directory *plus one more for each of its direct files*. So "install watches until the cap is
+   * reached, then degrade" is not a cheap cap check — measured on `/Users/admin/www`, whose in-scope
+   * tree is 5793 directories across 56 top-level entries, it meant 4000 directory watches and 4873
+   * file watches, a 7012-fd peak, and 43 seconds of ~90% CPU before every one of them was torn down
+   * again. Counting first converts that into one directory-listing pass (same tree: 4001 listings,
+   * 2.4 s, 21 fds peak, nothing to tear down), and the degraded state a caller ends in is the same.
+   *
+   * The walk mirrors {@link watchDirectory} exactly — same `isExcluded`, same "an unlistable directory
+   * contributes nothing" rule — so the count is the number of watches the arm pass would install. It
+   * stops at `limit + 1` on purpose: exactly `limit` directories is allowed, only exceeding it
+   * degrades.
+   * @param root - the resolved workspace root target.
+   * @param limit - the configured cap on individually watched directories.
+   * @param gen - the generation this session runs under.
+   * @param signal - cancels the counting.
+   * @returns the number of in-scope directories up to `limit + 1`.
+   */
+  async function countInScopeDirectories(
+    root: WatchTarget,
+    limit: number,
+    gen: number,
+    signal: AbortSignal,
+  ): Promise<number> {
+    let count = 0
+    const pending: { readonly relativePath: string; readonly target: WatchTarget }[] = [
+      { relativePath: '', target: root },
+    ]
+    while (pending.length > 0) {
+      if (!live(gen)) return count
+      // `noUncheckedIndexedAccess` cannot see the length check above; `pop()` on a non-empty stack
+      // always yields an element.
+      const current = pending.pop()
+      /* v8 ignore next -- unreachable for the same reason as the check above. */
+      if (current === undefined) break
+      count += 1
+      // One past the cap is all the caller needs to know, and stopping there keeps a workspace that
+      // is orders of magnitude too large from costing a listing of every last directory.
+      if (count > limit) return count
+      let entries: readonly WatchDirEntry[]
+      try {
+        entries = await fs.listDir(current.target, signal)
+      } catch {
+        // A teardown cancels the listing through `signal`; anything else is a directory that vanished
+        // or refused enumeration, which the arm pass also leaves unwatched.
+        if (!live(gen)) return count
+        continue
+      }
+      for (const entry of entries) {
+        const childPath = current.relativePath === '' ? entry.name : `${current.relativePath}/${entry.name}`
+        const isDirectory = entry.type === 'directory'
+        if (isExcluded(entry.name, childPath, isDirectory, excluded, gitignoreRules)) continue
+        if (isDirectory) pending.push({ relativePath: childPath, target: entry.target })
+      }
+    }
+    return count
+  }
+
+  /**
    * Resolve the workspace root, or report that there is nothing to watch.
    * @param gen - the generation this resolution belongs to.
    * @param signal - cancels the resolution.
@@ -539,7 +602,12 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
   }
 
   /**
-   * Arm the whole watch tree for this session: read the exclusion list, resolve the root, then recurse.
+   * Arm the whole watch tree for this session: read the exclusion list, resolve the root, refuse a tree
+   * that is too large to watch at all, then recurse.
+   *
+   * The cap is decided here rather than inside {@link watchDirectory} for the reason
+   * {@link countInScopeDirectories} documents: discovering it while arming pays the full cost of
+   * thousands of OS watches before degrading, and the outcome is "no watches" either way.
    * @param gen - the generation this session runs under.
    * @param signal - cancels the work.
    */
@@ -548,6 +616,12 @@ export function createWatcher(config: WatchConfig, fs: WatchFileSystem): Watcher
     if (!live(gen)) return
     const root = await resolveRoot(gen, signal)
     if (root === undefined) return
+    const directories = await countInScopeDirectories(root, config.maxWatchedDirectories, gen, signal)
+    if (!live(gen)) return
+    if (directories > config.maxWatchedDirectories) {
+      degrade({ code: 'WATCH_LIMIT_EXCEEDED' })
+      return
+    }
     await watchDirectory('', root, gen, signal)
   }
 
